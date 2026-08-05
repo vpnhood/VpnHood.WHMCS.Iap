@@ -39,6 +39,10 @@ add_hook('DailyCronJob', 1, function () {
     require_once $moduleDir . '/lib/Stores/StoreAdapterRegistry.php';
     require_once $moduleDir . '/lib/Stores/GooglePlay/GooglePlayApiClient.php';
     require_once $moduleDir . '/lib/Stores/GooglePlay/GooglePlayAdapter.php';
+    require_once $moduleDir . '/lib/Jwk.php';
+    require_once $moduleDir . '/lib/Stores/AppStore/AppleJws.php';
+    require_once $moduleDir . '/lib/Stores/AppStore/AppStoreApiClient.php';
+    require_once $moduleDir . '/lib/Stores/AppStore/AppStoreAdapter.php';
     require_once $moduleDir . '/lib/Provisioning/AccountService.php';
     require_once $moduleDir . '/lib/Provisioning/ClientProvisioner.php';
     require_once $moduleDir . '/lib/Provisioning/OrderProvisioner.php';

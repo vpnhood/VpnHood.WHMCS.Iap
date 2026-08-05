@@ -36,6 +36,8 @@ require_once __DIR__ . '/lib/Jwt.php';
 require_once __DIR__ . '/lib/IapRepository.php';
 require_once __DIR__ . '/lib/Auth/IdentityProviderInterface.php';
 require_once __DIR__ . '/lib/Auth/GoogleIdentityProvider.php';
+require_once __DIR__ . '/lib/Jwk.php';
+require_once __DIR__ . '/lib/Auth/AppleIdentityProvider.php';
 require_once __DIR__ . '/lib/Auth/SessionService.php';
 require_once __DIR__ . '/lib/Stores/Dto/PurchaseRecord.php';
 require_once __DIR__ . '/lib/Stores/Dto/StoreNotification.php';
@@ -43,6 +45,9 @@ require_once __DIR__ . '/lib/Stores/StoreAdapterInterface.php';
 require_once __DIR__ . '/lib/Stores/StoreAdapterRegistry.php';
 require_once __DIR__ . '/lib/Stores/GooglePlay/GooglePlayApiClient.php';
 require_once __DIR__ . '/lib/Stores/GooglePlay/GooglePlayAdapter.php';
+require_once __DIR__ . '/lib/Stores/AppStore/AppleJws.php';
+require_once __DIR__ . '/lib/Stores/AppStore/AppStoreApiClient.php';
+require_once __DIR__ . '/lib/Stores/AppStore/AppStoreAdapter.php';
 require_once __DIR__ . '/lib/Provisioning/AccountService.php';
 require_once __DIR__ . '/lib/Provisioning/ClientProvisioner.php';
 require_once __DIR__ . '/lib/Provisioning/OrderProvisioner.php';
@@ -137,6 +142,7 @@ function vpnhoodiap_actionAuthToken(IapRepository $repo, array $body, string $re
     }
     $identityProvider = match ($provider) {
         'google' => new GoogleIdentityProvider(),
+        'apple'  => new \WHMCS\Module\Addon\VpnHoodIap\Auth\AppleIdentityProvider(),
         default  => throw new ApiException("Unsupported sign-in provider: $provider", 400),
     };
 
