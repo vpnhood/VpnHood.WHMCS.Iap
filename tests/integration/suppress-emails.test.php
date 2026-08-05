@@ -33,10 +33,10 @@ function createDraftInvoice(int $clientId, string $gateway): int
     return ($r['result'] ?? '') === 'success' ? (int) $r['invoiceid'] : 0;
 }
 
-$iapInvoiceId = createDraftInvoice((int) $buyer['id'], 'vpnhoodiap');
+$iapInvoiceId = createDraftInvoice((int) $buyer['id'], 'vpnhoodiappay');
 $otherInvoiceId = createDraftInvoice((int) $buyer['id'], 'banktransfer');
 if ($iapInvoiceId > 0 && $otherInvoiceId > 0) {
-    ok("draft invoices created (vpnhoodiap #$iapInvoiceId, banktransfer #$otherInvoiceId)");
+    ok("draft invoices created (vpnhoodiappay #$iapInvoiceId, banktransfer #$otherInvoiceId)");
 } else {
     bad("could not create draft invoices (iap=$iapInvoiceId, other=$otherInvoiceId)");
     finish();
@@ -65,9 +65,9 @@ $templates = [
 ];
 foreach ($templates as $template) {
     if (emailPreSendAborts($template, $iapInvoiceId)) {
-        ok("'$template' aborted for the vpnhoodiap invoice");
+        ok("'$template' aborted for the vpnhoodiappay invoice");
     } else {
-        bad("'$template' NOT aborted for the vpnhoodiap invoice");
+        bad("'$template' NOT aborted for the vpnhoodiappay invoice");
     }
 }
 

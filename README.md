@@ -78,7 +78,7 @@ packages copy the module verbatim and never restamp it.
 
 ```text
 modules/addons/vpnhoodiap/          the addon: admin UI, tables, api.php, webhook.php
-modules/gateways/vpnhoodiap.php     bookkeeping gateway (store is the merchant of record)
+modules/gateways/vpnhoodiappay.php     bookkeeping gateway (store is the merchant of record)
 includes/hooks/vpnhoodiap-suppress-emails.php   aborts WHMCS invoice mail for store-paid invoices
 scripts/set-version.sh              propagate ./VERSION into the module
 scripts/test-dev.sh                 run the test suites against the dev WHMCS
@@ -94,7 +94,7 @@ Everything extracts at the WHMCS root.
 - The addon activated (until then the public endpoints answer 404).
 - WHMCS **email verification enabled** (`EnableEmailVerification`) — the module refuses
   to attach purchases to unverified existing emails.
-- The bookkeeping gateway `vpnhoodiap` activated but **never shown on the order form**.
+- The bookkeeping gateway `vpnhoodiappay` activated but **never shown on the order form**.
 - Products for each sellable plan, using `vpnhoodstore` (hub) or `vpnhoodpartner`
   (partner), mapped in the addon's **Catalog** tab.
 - Per store app: the store credentials (Google service-account JSON, Apple keys, …)
