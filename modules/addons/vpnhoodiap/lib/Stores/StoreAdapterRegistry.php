@@ -3,6 +3,7 @@
 namespace WHMCS\Module\Addon\VpnHoodIap\Stores;
 
 use WHMCS\Module\Addon\VpnHoodIap\ApiException;
+use WHMCS\Module\Addon\VpnHoodIap\Stores\AppStore\AppStoreAdapter;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\GooglePlay\GooglePlayAdapter;
 
 if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
@@ -30,8 +31,9 @@ final class StoreAdapterRegistry
         }
         return match ($store) {
             'googleplay' => new GooglePlayAdapter(),
-            'appstore', 'microsoft' => throw new ApiException("Store '$store' is not supported yet.", 501),
-            default => throw new ApiException("Unknown store: $store", 400),
+            'appstore'   => new AppStoreAdapter(),
+            'microsoft'  => throw new ApiException("Store '$store' is not supported yet.", 501),
+            default      => throw new ApiException("Unknown store: $store", 400),
         };
     }
 }
