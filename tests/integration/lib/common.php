@@ -55,6 +55,6 @@ function iapModuleActive(PDO $db): bool {
 /** Load the module's lib classes for in-process tests (SessionService etc.). */
 function requireIapLib(string ...$relPaths): void {
     foreach ($relPaths as $rel) {
-        require_once WEBROOT . '/modules/addons/vpnhoodiap/' . $rel;
+        require_once WEBROOT . '/modules/addons/vpnhoodiap/lib/' . $rel;
     }
 }

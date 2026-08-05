@@ -2,6 +2,10 @@
 
 namespace WHMCS\Module\Addon\VpnHoodIap;
 
+if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
+    die('This file cannot be accessed directly');
+}
+
 /**
  * Minimal cURL wrapper for the store adapters (Google Android Publisher, Apple App
  * Store Server API, Microsoft Collections). Always sets a User-Agent (Cloudflare and
