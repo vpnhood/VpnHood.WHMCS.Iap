@@ -45,6 +45,26 @@ if (!$gatewayActive) {
     ok('vpnhoodiappay gateway already active');
 }
 
+// -- admin visibility -------------------------------------------------------
+// WHMCS only lists the addon under Addons for roles named in its `access` row,
+// and only the admin-UI activation flow writes that row — so a module activated
+// through the API (exactly what this test does, and what an automated install
+// does) used to end up working but invisible. _activate() now grants it.
+$access = one($db, "SELECT value FROM tbladdonmodules WHERE module='vpnhoodiap' AND setting='access'");
+if ($access === null) {
+    bad('no access row: the addon would be invisible in the Addons menu');
+} elseif (trim((string) $access['value']) === '') {
+    bad('access row is empty: the addon would be invisible in the Addons menu');
+} else {
+    $roleExists = one($db, 'SELECT id FROM tbladminroles WHERE id IN (' .
+        implode(',', array_map('intval', explode(',', (string) $access['value']))) . ') LIMIT 1');
+    if ($roleExists === null) {
+        bad("access row lists no existing role (value: {$access['value']})");
+    } else {
+        ok("addon is visible to admin role(s) {$access['value']}");
+    }
+}
+
 // -- tables -----------------------------------------------------------------
 $tables = [
     'mod_vpnhood_iap_apps',

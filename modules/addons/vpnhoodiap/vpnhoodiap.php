@@ -199,6 +199,8 @@ function vpnhoodiap_activate(): array
             });
         }
 
+        vpnhoodiap_ensureAdminAccess();
+
         return [
             'status'      => 'success',
             'description' => 'VpnHood IAP tables created successfully.',
@@ -217,7 +219,61 @@ function vpnhoodiap_activate(): array
  */
 function vpnhoodiap_upgrade(array $vars): void
 {
-    // no migrations yet
+    // installs activated before this ran (API/automation) have no access row and
+    // are invisible in the Addons menu until someone notices
+    vpnhoodiap_ensureAdminAccess();
+}
+
+/**
+ * WHMCS lists an addon under the Addons menu only for the admin roles named in its
+ * `access` setting, and only the admin-UI activation flow writes that row. Activate
+ * the module any other way — the API, an automated install, a test harness — and it
+ * is installed, fully working, and completely invisible, with nothing to indicate
+ * why. Granting it here makes activation self-sufficient however it was triggered.
+ *
+ * This is the only place the module writes a WHMCS core table: `access` lives in
+ * tbladdonmodules alongside the module's own settings, and no localAPI command
+ * grants it. An existing grant is never touched — widening access is the admin's
+ * decision, not ours.
+ */
+function vpnhoodiap_ensureAdminAccess(): void
+{
+    $exists = Capsule::table('tbladdonmodules')
+        ->where('module', IapRepository::MODULE)
+        ->where('setting', 'access')
+        ->exists();
+    if ($exists) {
+        return;
+    }
+
+    $roleId = vpnhoodiap_activatingRoleId();
+    if ($roleId <= 0) {
+        return; // no admin roles defined at all — nothing sensible to grant
+    }
+
+    Capsule::table('tbladdonmodules')->insert([
+        'module'  => IapRepository::MODULE,
+        'setting' => 'access',
+        'value'   => (string) $roleId,
+    ]);
+}
+
+/**
+ * The role that should see the module: whoever activated it, or — when nobody is
+ * logged in (API/automation) — the first role, which is Full Administrator on any
+ * stock install.
+ */
+function vpnhoodiap_activatingRoleId(): int
+{
+    $adminId = (int) ($_SESSION['adminid'] ?? 0);
+    if ($adminId > 0) {
+        $roleId = (int) Capsule::table('tbladmins')->where('id', $adminId)->value('roleid');
+        if ($roleId > 0) {
+            return $roleId;
+        }
+    }
+
+    return (int) Capsule::table('tbladminroles')->orderBy('id')->value('id');
 }
 
 /**
