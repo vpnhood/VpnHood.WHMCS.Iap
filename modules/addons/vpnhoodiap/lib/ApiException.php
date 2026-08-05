@@ -2,6 +2,10 @@
 
 namespace WHMCS\Module\Addon\VpnHoodIap;
 
+if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
+    die('This file cannot be accessed directly');
+}
+
 /**
  * Exception carrying an HTTP status code, used to short-circuit an API request
  * with a structured error response. (Ported from vpnhoodpartnerhub.)

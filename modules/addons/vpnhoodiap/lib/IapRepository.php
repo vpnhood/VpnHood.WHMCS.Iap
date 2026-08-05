@@ -4,6 +4,10 @@ namespace WHMCS\Module\Addon\VpnHoodIap;
 
 use WHMCS\Database\Capsule;
 
+if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
+    die('This file cannot be accessed directly');
+}
+
 /**
  * Data access for the mod_vpnhood_iap_* tables plus addon settings and secrets.
  *
@@ -119,6 +123,22 @@ class IapRepository
         return $row === null ? null : (array) $row;
     }
 
+    /**
+     * Sign-in requests carry only the package/bundle name (the store is not
+     * known yet at sign-in time); package names are unique across stores in
+     * practice, and the unique (store, package_name) index bounds this to one
+     * row per store.
+     */
+    public function findAppByPackageAnyStore(string $packageName): ?array
+    {
+        $row = Capsule::table('mod_vpnhood_iap_apps')
+            ->where('package_name', $packageName)
+            ->where('status', 'active')
+            ->orderBy('id')
+            ->first();
+        return $row === null ? null : (array) $row;
+    }
+
     public function createApp(array $data): array
     {
         $data['webhook_token'] = bin2hex(random_bytes(24));
@@ -201,6 +221,96 @@ class IapRepository
     {
         return Capsule::table('tblproducts')->orderBy('id')
             ->get(['id', 'name', 'paytype'])->map(fn ($row) => (array) $row)->all();
+    }
+
+    // -- users --------------------------------------------------------------
+
+    /** RFC 4122 v4 UUID — the external_uid format (Apple appAccountToken requires UUID). */
+    public static function uuidV4(): string
+    {
+        $bytes = random_bytes(16);
+        $bytes[6] = chr((ord($bytes[6]) & 0x0f) | 0x40);
+        $bytes[8] = chr((ord($bytes[8]) & 0x3f) | 0x80);
+        return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($bytes), 4));
+    }
+
+    public function getUser(int $id): ?array
+    {
+        $row = Capsule::table('mod_vpnhood_iap_users')->find($id);
+        return $row === null ? null : (array) $row;
+    }
+
+    public function getUserByExternalUid(string $externalUid): ?array
+    {
+        $row = Capsule::table('mod_vpnhood_iap_users')->where('external_uid', $externalUid)->first();
+        return $row === null ? null : (array) $row;
+    }
+
+    /**
+     * Upsert the module user for a verified sign-in identity. The identity key
+     * is (provider, subject) — email is an attribute that can change on the
+     * provider side; when it does, the stale WHMCS client link is dropped so
+     * the attach gate re-runs against the new email.
+     */
+    public function findOrCreateUser(string $provider, string $subject, string $email, bool $emailVerifiedClaim): array
+    {
+        $now = date('Y-m-d H:i:s');
+        $existing = Capsule::table('mod_vpnhood_iap_users')
+            ->where('provider', $provider)
+            ->where('provider_subject', $subject)
+            ->first();
+
+        if ($existing !== null) {
+            $user = (array) $existing;
+            $update = [];
+            if ($user['email'] !== $email) {
+                $update = ['email' => $email, 'client_id' => null];
+            }
+            if ((bool) $user['email_verified_claim'] !== $emailVerifiedClaim) {
+                $update['email_verified_claim'] = $emailVerifiedClaim ? 1 : 0;
+            }
+            if ($update !== []) {
+                $update['updated_at'] = $now;
+                Capsule::table('mod_vpnhood_iap_users')->where('id', $user['id'])->update($update);
+                $user = array_merge($user, $update);
+            }
+            return $user;
+        }
+
+        try {
+            $id = Capsule::table('mod_vpnhood_iap_users')->insertGetId([
+                'provider'             => $provider,
+                'provider_subject'     => $subject,
+                'email'                => $email,
+                'email_verified_claim' => $emailVerifiedClaim ? 1 : 0,
+                'external_uid'         => self::uuidV4(),
+                'created_at'           => $now,
+                'updated_at'           => $now,
+            ]);
+        } catch (\Throwable $e) {
+            // lost a concurrent-insert race on unique (provider, subject) — reread
+            $row = Capsule::table('mod_vpnhood_iap_users')
+                ->where('provider', $provider)
+                ->where('provider_subject', $subject)
+                ->first();
+            if ($row === null) {
+                throw $e;
+            }
+            return (array) $row;
+        }
+        $user = $this->getUser((int) $id);
+        if ($user === null) {
+            throw new \RuntimeException('User row disappeared right after insert.');
+        }
+        return $user;
+    }
+
+    public function linkUserClient(int $userId, int $clientId): void
+    {
+        Capsule::table('mod_vpnhood_iap_users')->where('id', $userId)->update([
+            'client_id'  => $clientId,
+            'updated_at' => date('Y-m-d H:i:s'),
+        ]);
     }
 
     // -- monitors -----------------------------------------------------------
