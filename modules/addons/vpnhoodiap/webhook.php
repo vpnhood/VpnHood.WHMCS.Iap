@@ -12,12 +12,34 @@
  * re-fetching the purchase from the store API, never from the notification body.
  *
  * FAILS CLOSED: 404 while the addon is not activated; 401 without a matching app token.
+ * Processing failures answer 200 (recorded + cron-replayed) — stores retry on 5xx and
+ * must never be given a reason to loop.
  */
 
+use WHMCS\Module\Addon\VpnHoodIap\Controllers\NotificationController;
 use WHMCS\Module\Addon\VpnHoodIap\IapRepository;
+use WHMCS\Module\Addon\VpnHoodIap\Stores\StoreAdapterRegistry;
 
 require_once __DIR__ . '/../../../init.php';
+require_once __DIR__ . '/lib/ApiException.php';
+require_once __DIR__ . '/lib/Http.php';
+require_once __DIR__ . '/lib/Jwt.php';
 require_once __DIR__ . '/lib/IapRepository.php';
+require_once __DIR__ . '/lib/Auth/IdentityProviderInterface.php';
+require_once __DIR__ . '/lib/Auth/GoogleIdentityProvider.php';
+require_once __DIR__ . '/lib/Stores/Dto/PurchaseRecord.php';
+require_once __DIR__ . '/lib/Stores/Dto/StoreNotification.php';
+require_once __DIR__ . '/lib/Stores/StoreAdapterInterface.php';
+require_once __DIR__ . '/lib/Stores/StoreAdapterRegistry.php';
+require_once __DIR__ . '/lib/Stores/GooglePlay/GooglePlayApiClient.php';
+require_once __DIR__ . '/lib/Stores/GooglePlay/GooglePlayAdapter.php';
+require_once __DIR__ . '/lib/Provisioning/AccountService.php';
+require_once __DIR__ . '/lib/Provisioning/ClientProvisioner.php';
+require_once __DIR__ . '/lib/Provisioning/OrderProvisioner.php';
+require_once __DIR__ . '/lib/Provisioning/DeliveryReader.php';
+require_once __DIR__ . '/lib/Provisioning/EntitlementService.php';
+require_once __DIR__ . '/lib/Provisioning/RenewalService.php';
+require_once __DIR__ . '/lib/Controllers/NotificationController.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -48,10 +70,25 @@ if ($app === null) {
     echo json_encode(['success' => false, 'error' => 'Unauthorized.']);
     exit;
 }
+// the adapter pins the OIDC audience to this exact endpoint URL
+$app['webhook_url'] = $repo->webhookUrl($app);
 
-// The store adapters (NotificationController -> StoreAdapterRegistry) land with the
-// purchase-pipeline pass. Until then this endpoint must not be wired to any live
-// subscription: answer 501 so a premature configuration is loud, not silently swallowed.
-$repo->log(null, 'webhook', $remoteIp, 501, substr(file_get_contents('php://input') ?: '', 0, 2000), 'store adapters not implemented yet');
-http_response_code(501);
-echo json_encode(['success' => false, 'error' => 'Store notification processing is not implemented yet.']);
+$headers = [];
+foreach ($_SERVER as $key => $value) {
+    if (str_starts_with($key, 'HTTP_')) {
+        $headers[strtolower(str_replace('_', '-', substr($key, 5)))] = (string) $value;
+    }
+}
+
+$controller = new NotificationController($repo);
+$result = $controller->handle(
+    $app,
+    StoreAdapterRegistry::get($store),
+    $headers,
+    file_get_contents('php://input') ?: '',
+    $_GET
+);
+
+$repo->log(null, 'webhook', $remoteIp, $result['status'], null, $result['body']['data'] ?? $result['body']);
+http_response_code($result['status']);
+echo json_encode($result['body']);

@@ -38,7 +38,7 @@ FAIL=0
 
 # All integration tests, in dependency order (activation first: it activates
 # the addon the others rely on).
-INTEGRATION_TESTS=(activation sessions suppress-emails)
+INTEGRATION_TESTS=(activation sessions suppress-emails webhook redeem)
 
 upload() {
   echo "== Uploading tests + module lib to the dev box"

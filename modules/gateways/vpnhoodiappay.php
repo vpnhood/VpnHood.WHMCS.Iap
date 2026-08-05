@@ -5,7 +5,7 @@
  *
  * This gateway never collects money: the app store (Google Play / Apple / Microsoft)
  * is the merchant of record. It exists so invoices created by the vpnhoodiap addon can
- * carry paymentmethod=vpnhoodiap and payments can carry the store order id as the
+ * carry paymentmethod=vpnhoodiappay and payments can carry the store order id as the
  * transaction id — which doubles as the idempotency key, since store order ids are
  * globally unique. The addon records payments via localAPI AddInvoicePayment.
  *
@@ -19,7 +19,7 @@ if (!defined("WHMCS")) {
     die("This file cannot be accessed directly");
 }
 
-function vpnhoodiap_MetaData(): array
+function vpnhoodiappay_MetaData(): array
 {
     return [
         'DisplayName'                 => 'App Store Purchase (VpnHood IAP)',
@@ -29,7 +29,7 @@ function vpnhoodiap_MetaData(): array
     ];
 }
 
-function vpnhoodiap_config(): array
+function vpnhoodiappay_config(): array
 {
     return [
         'FriendlyName' => [
@@ -50,7 +50,7 @@ function vpnhoodiap_config(): array
  * the addon). Returning a static note keeps the client area from rendering a dead
  * "Pay Now" flow if this gateway is ever exposed by mistake.
  */
-function vpnhoodiap_link(array $params): string
+function vpnhoodiappay_link(array $params): string
 {
     return '<p>Billed through the app store.</p>';
 }

@@ -37,7 +37,17 @@ require_once __DIR__ . '/lib/IapRepository.php';
 require_once __DIR__ . '/lib/Auth/IdentityProviderInterface.php';
 require_once __DIR__ . '/lib/Auth/GoogleIdentityProvider.php';
 require_once __DIR__ . '/lib/Auth/SessionService.php';
+require_once __DIR__ . '/lib/Stores/Dto/PurchaseRecord.php';
+require_once __DIR__ . '/lib/Stores/Dto/StoreNotification.php';
+require_once __DIR__ . '/lib/Stores/StoreAdapterInterface.php';
+require_once __DIR__ . '/lib/Stores/StoreAdapterRegistry.php';
+require_once __DIR__ . '/lib/Stores/GooglePlay/GooglePlayApiClient.php';
+require_once __DIR__ . '/lib/Stores/GooglePlay/GooglePlayAdapter.php';
 require_once __DIR__ . '/lib/Provisioning/AccountService.php';
+require_once __DIR__ . '/lib/Provisioning/ClientProvisioner.php';
+require_once __DIR__ . '/lib/Provisioning/OrderProvisioner.php';
+require_once __DIR__ . '/lib/Provisioning/DeliveryReader.php';
+require_once __DIR__ . '/lib/Provisioning/EntitlementService.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -72,11 +82,14 @@ try {
     // action dispatch. Unauthenticated actions are rate-limited per IP;
     // authenticated actions resolve the bearer session first.
     $data = match ($action) {
-        'ping'        => vpnhoodiap_actionPing($repo, $remoteIp),
-        'auth.token'  => vpnhoodiap_actionAuthToken($repo, $body, $remoteIp),
-        'auth.revoke' => vpnhoodiap_actionAuthRevoke(),
-        'me.get'      => vpnhoodiap_actionMeGet($repo),
-        default       => throw new ApiException("Unknown action: $action", 400),
+        'ping'            => vpnhoodiap_actionPing($repo, $remoteIp),
+        'auth.token'      => vpnhoodiap_actionAuthToken($repo, $body, $remoteIp),
+        'auth.revoke'     => vpnhoodiap_actionAuthRevoke(),
+        'me.get'          => vpnhoodiap_actionMeGet($repo),
+        'purchase.verify' => vpnhoodiap_actionPurchaseVerify($repo, $body, $remoteIp),
+        'entitlement.get' => vpnhoodiap_actionEntitlementGet($repo),
+        'plans.get'       => vpnhoodiap_actionPlansGet($repo, $body),
+        default           => throw new ApiException("Unknown action: $action", 400),
     };
 
     $repo->log(null, $action, $remoteIp, 200, vpnhoodiap_redact($body), vpnhoodiap_redact($data));
@@ -198,6 +211,102 @@ function vpnhoodiap_actionMeGet(IapRepository $repo): array
         ],
         'state'   => $state,
     ];
+}
+
+/**
+ * The primary purchase flow: validate the store proof, provision, return the
+ * access code — one synchronous call, no client polling.
+ *
+ * { action: "purchase.verify", store: "googleplay", packageName: "com...", proof: {...} }
+ * → { state: "provisioned", accessCode, expiresAt, planId }
+ *   or state: "pending" | "awaiting_email_verification" (no code yet)
+ */
+function vpnhoodiap_actionPurchaseVerify(IapRepository $repo, array $body, string $remoteIp): array
+{
+    $user = (new \WHMCS\Module\Addon\VpnHoodIap\Auth\SessionService())->resolve(vpnhoodiap_bearerToken());
+    if ($repo->requestCount($remoteIp, 'purchase.verify', 300) > 30) {
+        throw new ApiException('Too many requests.', 429);
+    }
+
+    $store = (string) ($body['store'] ?? '');
+    $packageName = (string) ($body['packageName'] ?? '');
+    $proof = $body['proof'] ?? null;
+    if ($store === '' || $packageName === '' || !is_array($proof)) {
+        throw new ApiException('store, packageName and proof are required.', 400);
+    }
+    $app = $repo->findAppByPackageName($store, $packageName);
+    if ($app === null) {
+        throw new ApiException('Unknown application.', 403);
+    }
+
+    $adapter = \WHMCS\Module\Addon\VpnHoodIap\Stores\StoreAdapterRegistry::get($store);
+    try {
+        $record = $adapter->verifyPurchase($app, $proof);
+    } catch (\RuntimeException $e) {
+        $repo->log((int) $user['id'], 'purchase.verify', $remoteIp, 400, $packageName, $e->getMessage());
+        throw new ApiException('The purchase could not be validated with the store.', 400);
+    }
+
+    return (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\EntitlementService($repo))
+        ->redeem($app, $record, $user, $adapter);
+}
+
+/** Current entitlements of the signed-in user (latest provisioned purchase per plan). */
+function vpnhoodiap_actionEntitlementGet(IapRepository $repo): array
+{
+    $user = (new \WHMCS\Module\Addon\VpnHoodIap\Auth\SessionService())->resolve(vpnhoodiap_bearerToken());
+    $rows = \WHMCS\Database\Capsule::table('mod_vpnhood_iap_purchases')
+        ->where('user_id', (int) $user['id'])
+        ->where('status', 'provisioned')
+        ->orderByDesc('id')
+        ->limit(10)
+        ->get()->map(fn ($row) => (array) $row)->all();
+
+    $reader = new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\DeliveryReader();
+    $entitlements = [];
+    foreach ($rows as $row) {
+        $expiry = $row['expiry_time'] !== null ? strtotime((string) $row['expiry_time']) : null;
+        if ($expiry !== null && $expiry < time()) {
+            continue;
+        }
+        $entitlements[] = [
+            'state'      => 'provisioned',
+            'accessCode' => $row['service_id'] !== null ? $reader->readAccessCode((int) $row['service_id']) : null,
+            'expiresAt'  => $expiry !== null ? gmdate('c', $expiry) : null,
+        ];
+    }
+    return ['entitlements' => $entitlements];
+}
+
+/**
+ * The sellable plans for one app+store — WHMCS is the source of truth for
+ * WHAT is sellable; the store prices it. Unmapped plans simply don't appear.
+ */
+function vpnhoodiap_actionPlansGet(IapRepository $repo, array $body): array
+{
+    $store = (string) ($body['store'] ?? '');
+    $packageName = (string) ($body['packageName'] ?? '');
+    if ($store === '' || $packageName === '') {
+        throw new ApiException('store and packageName are required.', 400);
+    }
+    $app = $repo->findAppByPackageName($store, $packageName);
+    if ($app === null) {
+        throw new ApiException('Unknown application.', 403);
+    }
+    $plans = [];
+    foreach ($repo->allProductMappings() as $mapping) {
+        if ((int) $mapping['app_id'] !== (int) $app['id'] || !$mapping['enabled']) {
+            continue;
+        }
+        $plans[] = [
+            'planId'         => $mapping['store_base_plan_id'] !== ''
+                ? $mapping['store_product_id'] . '/' . $mapping['store_base_plan_id']
+                : $mapping['store_product_id'],
+            'storeProductId' => $mapping['store_product_id'],
+            'basePlanId'     => $mapping['store_base_plan_id'],
+        ];
+    }
+    return ['plans' => $plans];
 }
 
 // ---------------------------------------------------------------- helpers --

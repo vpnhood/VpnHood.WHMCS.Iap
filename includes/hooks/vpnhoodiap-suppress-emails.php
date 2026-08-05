@@ -7,8 +7,8 @@
  * invoice lifecycle mail ("Invoice Created", payment reminders, overdue notices,
  * payment confirmations) would tell them to pay again or confirm a payment they made
  * elsewhere. This hook aborts those templates for invoices that belong to the
- * vpnhoodiap bookkeeping gateway, and only those — every other invoice on the install
- * mails exactly as before.
+ * vpnhoodiappay bookkeeping gateway, and only those — every other invoice on the
+ * install mails exactly as before.
  *
  * Verified on the dev WHMCS (2026-08-04): EmailPreSend fires for invoice templates with
  * relid = invoice id, and returning ['abortsend' => true] suppresses the send.
@@ -51,7 +51,7 @@ add_hook('EmailPreSend', 1, function (array $vars) {
         return [];
     }
 
-    if ($paymentMethod === 'vpnhoodiap') {
+    if ($paymentMethod === 'vpnhoodiappay') {
         return ['abortsend' => true];
     }
 

@@ -31,6 +31,20 @@ if (iapModuleActive($db)) {
     finish();
 }
 
+// -- bookkeeping gateway (required for AddOrder paymentmethod) ---------------
+$gatewayActive = one($db, "SELECT 1 x FROM tblpaymentgateways WHERE gateway='vpnhoodiappay' LIMIT 1") !== null;
+if (!$gatewayActive) {
+    $r = localAPI('ActivateModule', ['moduleType' => 'gateway', 'moduleName' => 'vpnhoodiappay']);
+    $gatewayActive = one($db, "SELECT 1 x FROM tblpaymentgateways WHERE gateway='vpnhoodiappay' LIMIT 1") !== null;
+    if (!$gatewayActive) {
+        bad('gateway activation failed: ' . json_encode($r));
+    } else {
+        ok('vpnhoodiappay gateway activated');
+    }
+} else {
+    ok('vpnhoodiappay gateway already active');
+}
+
 // -- tables -----------------------------------------------------------------
 $tables = [
     'mod_vpnhood_iap_apps',
