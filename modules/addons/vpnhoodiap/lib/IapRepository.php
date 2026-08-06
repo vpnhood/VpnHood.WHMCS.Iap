@@ -75,7 +75,10 @@ class IapRepository
         }
         try {
             $result = localAPI('DecryptPassword', ['password2' => $value]);
-            $plain = (string) ($result['password'] ?? '');
+            // WHMCS HTML-escapes API output, credentials included: a JSON secret comes
+            // back with &quot; for every quote and fails to parse. Undo it — a real
+            // secret never contains literal HTML entities, a JSON one cannot.
+            $plain = html_entity_decode((string) ($result['password'] ?? ''), ENT_QUOTES | ENT_HTML5);
             if ($plain !== '' && !preg_match('/[^\x20-\x7E\r\n\t]/', $plain)) {
                 return $plain;
             }
