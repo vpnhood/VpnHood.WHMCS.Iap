@@ -72,6 +72,43 @@ class GooglePlayApiClient
     }
 
     /**
+     * orders.get — what the buyer actually paid for one store order (regional
+     * price, currency, refund state). Purely informational for this module:
+     * accounting always books the WHMCS product price; this is captured onto
+     * the purchase row so support can see the real charge without Play Console.
+     * Requires the "View financial data" Play permission (already mandatory
+     * for the voided-purchases sweep).
+     *
+     * @return array{amount:string, currency:string}|null null when the order
+     *         carries no total (should not happen for processed orders)
+     */
+    public function getOrderAmount(string $orderId): ?array
+    {
+        $order = $this->call('GET', '/orders/' . rawurlencode($orderId));
+        $total = (array) ($order['total'] ?? []);
+        if (!isset($total['currencyCode'])) {
+            return null;
+        }
+        return [
+            'amount'   => self::formatMoney((string) ($total['units'] ?? '0'), (int) ($total['nanos'] ?? 0)),
+            'currency' => (string) $total['currencyCode'],
+        ];
+    }
+
+    /** google.type.Money (units + nanos) → plain decimal string ("46.99"). */
+    public static function formatMoney(string $units, int $nanos): string
+    {
+        $sign = str_starts_with($units, '-') || $nanos < 0 ? '-' : '';
+        $units = ltrim($units, '-');
+        $cents = (int) round(abs($nanos) / 10_000_000); // nanos → hundredths
+        if ($cents >= 100) { // rounding overflow: .999999999 → +1 unit
+            $units = (string) ((int) $units + intdiv($cents, 100));
+            $cents %= 100;
+        }
+        return sprintf('%s%s.%02d', $sign, $units === '' ? '0' : $units, $cents);
+    }
+
+    /**
      * purchases.voidedpurchases.list — refunded/voided purchases since a time.
      * type=1 includes both one-time and subscription voids. Follows pagination.
      *

@@ -130,6 +130,35 @@ test('voided purchases follows pagination', function () use ($saPrivatePem) {
     assertSame(['v1', 'v2'], array_column($voided, 'purchaseToken'));
 });
 
+test('getOrderAmount parses google.type.Money and money edge cases format right', function () use ($saPrivatePem) {
+    $log = [];
+    $http = fakeHttp($log, [[
+        'match'    => '/orders/GPA.111',
+        'response' => ['status' => 200, 'body' => '', 'json' => [
+            'orderId' => 'GPA.111',
+            'total'   => ['currencyCode' => 'USD', 'units' => '46', 'nanos' => 990000000],
+        ]],
+    ]]);
+    $client = new GooglePlayApiClient(serviceAccount($saPrivatePem), PACKAGE, $http);
+    assertSame(['amount' => '46.99', 'currency' => 'USD'], $client->getOrderAmount('GPA.111'));
+
+    assertSame('7.99', GooglePlayApiClient::formatMoney('7', 990000000));
+    assertSame('260.00', GooglePlayApiClient::formatMoney('260', 0));
+    assertSame('0.50', GooglePlayApiClient::formatMoney('0', 500000000));
+    assertSame('2.00', GooglePlayApiClient::formatMoney('1', 999999999)); // rounding carries
+    assertSame('-3.25', GooglePlayApiClient::formatMoney('-3', -250000000));
+});
+
+test('a total-less order (trial) yields null, not a fake zero', function () use ($saPrivatePem) {
+    $log = [];
+    $http = fakeHttp($log, [[
+        'match'    => '/orders/GPA.222',
+        'response' => ['status' => 200, 'body' => '', 'json' => ['orderId' => 'GPA.222']],
+    ]]);
+    $client = new GooglePlayApiClient(serviceAccount($saPrivatePem), PACKAGE, $http);
+    assertSame(null, $client->getOrderAmount('GPA.222'));
+});
+
 // ---------------------------------------------------------------- adapter --
 
 function adapterWith(array $subscriptionDoc, string $saPrivatePem, array &$log): GooglePlayAdapter
@@ -157,6 +186,35 @@ test('verifyPurchase maps an active subscription document', function () use ($sa
     assertSame(false, $record->acknowledged);
     assertSame(false, $record->isTest);
     assertTrue($record->isEntitled(), 'active unexpired subscription is entitled');
+    assertSame(null, $record->amount, 'no orders.get response scripted — the record must stay price-less, never fail');
+});
+
+test('verifyPurchase enriches the record with the real charge from orders.get', function () use ($saPrivatePem) {
+    $log = [];
+    $http = fakeHttp($log, [
+        ['match' => 'subscriptionsv2', 'response' => ['status' => 200, 'body' => '', 'json' => activeSubscriptionDoc()]],
+        ['match' => '/orders/GPA.3333-4444-5555-66666', 'response' => ['status' => 200, 'body' => '', 'json' => [
+            'total' => ['currencyCode' => 'TRY', 'units' => '259', 'nanos' => 990000000],
+        ]]],
+    ]);
+    $factory = fn (array $app) => new GooglePlayApiClient(serviceAccount($saPrivatePem), PACKAGE, $http);
+    $record = (new GooglePlayAdapter($factory))->verifyPurchase(['id' => 1], ['purchaseToken' => 'tok-A']);
+
+    assertSame('259.99', $record->amount);
+    assertSame('TRY', $record->currency);
+});
+
+test('a failing orders.get never fails verification (missing financial permission)', function () use ($saPrivatePem) {
+    $log = [];
+    $http = fakeHttp($log, [
+        ['match' => 'subscriptionsv2', 'response' => ['status' => 200, 'body' => '', 'json' => activeSubscriptionDoc()]],
+        ['match' => '/orders/', 'response' => ['status' => 403, 'body' => '', 'json' => ['error' => ['message' => 'The caller does not have permission']]]],
+    ]);
+    $factory = fn (array $app) => new GooglePlayApiClient(serviceAccount($saPrivatePem), PACKAGE, $http);
+    $record = (new GooglePlayAdapter($factory))->verifyPurchase(['id' => 1], ['purchaseToken' => 'tok-A']);
+
+    assertSame(PurchaseRecord::STATE_ACTIVE, $record->state);
+    assertSame(null, $record->amount);
 });
 
 test('subscription state table maps every documented state', function () use ($saPrivatePem) {

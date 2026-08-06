@@ -74,9 +74,22 @@ class EntitlementService
                 ->where('purchase_key', $record->purchaseKey)
                 ->first();
 
-            // ---- already redeemed: idempotent replay
+            // webhook-driven re-provisioning has no session and old records may
+            // carry no uid — the ledger row remembers who bought it
+            if ($user === null && !empty($row['user_id'])) {
+                $user = $this->repo->getUser((int) $row['user_id']);
+            }
+
+            // ---- already redeemed: idempotent replay — but only onto a service
+            // that still exists. A terminated/deleted service while the store
+            // still entitles (late renewal, out-of-order events) falls through
+            // and provisions anew; a resurrected status flip is never attempted.
             if ($row['status'] === 'provisioned' && $row['service_id'] !== null) {
-                return $this->entitlementFor($record, (int) $row['service_id']);
+                $serviceStatus = (string) Capsule::table('tblhosting')
+                    ->where('id', (int) $row['service_id'])->value('domainstatus');
+                if (in_array($serviceStatus, ['Active', 'Suspended'], true)) {
+                    return $this->entitlementFor($record, (int) $row['service_id']);
+                }
             }
 
             // ---- store-side state gates
@@ -145,6 +158,18 @@ class EntitlementService
                 throw $e instanceof ApiException ? $e : new ApiException('Provisioning failed.', 502);
             }
 
+            // the real charge belongs to the purchase, not to each invoice: the
+            // primary invoice carries it; bundle-secondary invoices get the
+            // generic wording so amounts are never double-stated
+            foreach ($placed as $index => $order) {
+                $orders->annotateInvoice(
+                    (int) $order['invoiceId'],
+                    $record->store,
+                    $index === 0 ? $record->amount : null,
+                    $index === 0 ? $record->currency : null
+                );
+            }
+
             $primary = $placed[0];
             $this->updateRow($row, [
                 'status'         => 'provisioned',
@@ -202,7 +227,7 @@ class EntitlementService
     /** Update the ledger row with state + the record's rolling facts. */
     private function updateRow(array $row, array $changes, PurchaseRecord $record): void
     {
-        Capsule::table('mod_vpnhood_iap_purchases')->where('id', $row['id'])->update(array_merge([
+        $rolling = [
             'store_order_id' => $record->storeOrderId,
             'expiry_time'    => $record->expiryTimeUnix !== null ? date('Y-m-d H:i:s', $record->expiryTimeUnix) : null,
             'auto_renewing'  => $record->autoRenewing ? 1 : 0,
@@ -210,7 +235,13 @@ class EntitlementService
             'linked_purchase_key' => $record->linkedPurchaseKey,
             'raw_payload'    => json_encode($record->raw),
             'updated_at'     => date('Y-m-d H:i:s'),
-        ], $changes));
+        ];
+        // informational: the store's real charge; a fetch miss keeps the last known value
+        if ($record->amount !== null) {
+            $rolling['store_amount'] = $record->amount;
+            $rolling['store_currency'] = $record->currency;
+        }
+        Capsule::table('mod_vpnhood_iap_purchases')->where('id', $row['id'])->update(array_merge($rolling, $changes));
     }
 
     /** Loud ops: system activity log + module log (daily digest reads these). */

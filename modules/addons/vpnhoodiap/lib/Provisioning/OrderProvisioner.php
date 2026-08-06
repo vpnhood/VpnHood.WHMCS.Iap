@@ -101,6 +101,79 @@ class OrderProvisioner
         ]);
     }
 
+    /**
+     * Make the invoice tell the truth to anyone who ever opens it: the money
+     * moved at the store, the WHMCS amount is internal bookkeeping. Appends the
+     * real charge when the store reported one. Best-effort — a cosmetic line
+     * must never fail provisioning.
+     */
+    public function annotateInvoice(int $invoiceId, string $store, ?string $amount, ?string $currency): void
+    {
+        if ($invoiceId <= 0) {
+            return;
+        }
+        $note = 'Billed via ' . self::storeLabel($store) . ' — nothing is due here; this record is for bookkeeping.';
+        $note .= $amount !== null && $currency !== null
+            ? " The store charged $amount $currency (see your store receipt)."
+            : ' See your store receipt for the exact charge.';
+        try {
+            // UpdateInvoice treats the line arrays as one unit: every provided
+            // line needs description + amount + taxed together
+            $updates = ['invoiceid' => $invoiceId];
+            foreach (Capsule::table('tblinvoiceitems')->where('invoiceid', $invoiceId)->get() as $item) {
+                if (str_contains((string) $item->description, 'Billed via')) {
+                    continue; // already annotated (renewal replay)
+                }
+                $updates['itemdescription'][$item->id] = $item->description . "\n" . $note;
+                $updates['itemamount'][$item->id] = (string) $item->amount;
+                $updates['itemtaxed'][$item->id] = (int) $item->taxed;
+            }
+            if (count($updates) > 1) {
+                localAPI('UpdateInvoice', $updates);
+            }
+        } catch (\Throwable $e) {
+            $this->repo->log(null, 'invoice.annotate', '', 0, ['invoiceid' => $invoiceId], $e->getMessage());
+        }
+    }
+
+    /**
+     * A terminated store service must not leave its future renewal invoice
+     * behind: the subscription is gone at the store, so that Unpaid invoice
+     * would sit forever (mail is suppressed, nobody can pay it) as admin
+     * clutter. Only this module's own gateway is ever touched.
+     */
+    public function cancelUnpaidRenewalInvoices(int $serviceId): void
+    {
+        if ($serviceId <= 0) {
+            return;
+        }
+        try {
+            $invoiceIds = Capsule::table('tblinvoiceitems as it')
+                ->join('tblinvoices as i', 'i.id', '=', 'it.invoiceid')
+                ->where('it.type', 'Hosting')
+                ->where('it.relid', $serviceId)
+                ->where('i.status', 'Unpaid')
+                ->where('i.paymentmethod', self::GATEWAY)
+                ->distinct()->pluck('it.invoiceid')->all();
+            foreach ($invoiceIds as $invoiceId) {
+                localAPI('UpdateInvoice', ['invoiceid' => (int) $invoiceId, 'status' => 'Cancelled']);
+            }
+        } catch (\Throwable $e) {
+            $this->repo->log(null, 'invoice.cleanup', '', 0, ['serviceid' => $serviceId], $e->getMessage());
+        }
+    }
+
+    /** Store id → the name a customer knows it by. */
+    public static function storeLabel(string $store): string
+    {
+        return match ($store) {
+            'googleplay' => 'Google Play',
+            'appstore'   => 'the Apple App Store',
+            'microsoft'  => 'the Microsoft Store',
+            default      => 'the app store',
+        };
+    }
+
     /** Catalog cycle months → WHMCS billing cycle name. */
     public static function billingCycle(int $months): string
     {

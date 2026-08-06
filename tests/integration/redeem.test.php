@@ -25,13 +25,16 @@ requireIapLib(
     'Provisioning/ClientProvisioner.php',
     'Provisioning/OrderProvisioner.php',
     'Provisioning/DeliveryReader.php',
-    'Provisioning/EntitlementService.php'
+    'Provisioning/EntitlementService.php',
+    'Provisioning/RenewalService.php'
 );
 
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\VpnHoodIap\ApiException;
 use WHMCS\Module\Addon\VpnHoodIap\IapRepository;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\EntitlementService;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\RenewalService;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\PurchaseRecord;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\StoreNotification;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\StoreAdapterInterface;
@@ -202,7 +205,8 @@ try {
     Capsule::table('mod_vpnhood_iap_users')->where('id', $linkedUserId)->update(['client_id' => (int) $buyer['id']]);
 
     // ---- 4. happy path: pre-linked user, mapped SKU → real provisioning
-    $happy = makeRecord(['obfuscatedUid' => $linkedUid]);
+    // carries the store's real charge — must land on the row + the invoice text
+    $happy = makeRecord(['obfuscatedUid' => $linkedUid, 'amount' => '46.99', 'currency' => 'USD']);
     $adapter = new FakeStoreAdapter($happy);
     $result = $service->redeem($app, $happy, $repo->getUser($linkedUserId), $adapter);
 
@@ -225,6 +229,71 @@ try {
     $adapter->finalizeCalls === 1
         ? ok('replay does not re-acknowledge')
         : bad("finalize called {$adapter->finalizeCalls} times after replay");
+
+    // ---- 6. captured store charge: on the row and in the invoice text --------
+    $purchaseRow = one($db, 'SELECT * FROM mod_vpnhood_iap_purchases WHERE purchase_key=?', [$happy->purchaseKey]);
+    ($purchaseRow['store_amount'] !== null && (float) $purchaseRow['store_amount'] === 46.99 && $purchaseRow['store_currency'] === 'USD')
+        ? ok('real store charge captured on the purchase row (46.99 USD)')
+        : bad('store charge not captured: ' . json_encode([$purchaseRow['store_amount'], $purchaseRow['store_currency']]));
+
+    $firstServiceId = (int) $purchaseRow['service_id'];
+    $invoiceItem = one(
+        $db,
+        "SELECT it.description FROM tblorders o JOIN tblinvoiceitems it ON it.invoiceid = o.invoiceid WHERE o.id=? LIMIT 1",
+        [(int) $purchaseRow['whmcs_order_id']]
+    );
+    (str_contains((string) $invoiceItem['description'], 'Billed via Google Play')
+        && str_contains((string) $invoiceItem['description'], '46.99 USD'))
+        ? ok('invoice line explains the store billing and the real charge')
+        : bad('invoice line not annotated: ' . json_encode($invoiceItem));
+
+    // ---- 7. terminate leaves an unpaid renewal invoice → cleanup cancels it --
+    $draft = localAPI('CreateInvoice', [
+        'userid' => (int) $buyer['id'], 'status' => 'Unpaid', 'sendinvoice' => '0',
+        'paymentmethod' => 'vpnhoodiappay',
+        'itemdescription1' => "renewal fixture $marker", 'itemamount1' => '7.90', 'itemtaxed1' => '0',
+    ]);
+    $renewalInvoiceId = (int) ($draft['invoiceid'] ?? 0);
+    // shape the line the way GenInvoices does, so the cleanup query matches it
+    Capsule::table('tblinvoiceitems')->where('invoiceid', $renewalInvoiceId)
+        ->update(['type' => 'Hosting', 'relid' => $firstServiceId]);
+
+    localAPI('ModuleTerminate', ['serviceid' => $firstServiceId]);
+    (new OrderProvisioner($repo))->cancelUnpaidRenewalInvoices($firstServiceId);
+    $renewalInvoiceStatus = (string) one($db, 'SELECT status FROM tblinvoices WHERE id=?', [$renewalInvoiceId])['status'];
+    $renewalInvoiceStatus === 'Cancelled'
+        ? ok('terminate cleanup cancelled the leftover unpaid renewal invoice')
+        : bad("leftover renewal invoice is $renewalInvoiceStatus, expected Cancelled");
+
+    // ---- 8. late renewal on the terminated service → fresh provisioning ------
+    $renewal = makeRecord([
+        'obfuscatedUid' => $linkedUid,
+        'storeOrderId'  => 'ITEST.RENEW-' . strtoupper(bin2hex(random_bytes(4))),
+        'acknowledged'  => true, // the original purchase was acknowledged long ago
+        'amount'        => '46.99',
+        'currency'      => 'USD',
+    ]);
+    $renewResult = (new RenewalService($repo))->renew($app, $renewal->purchaseKey, new FakeStoreAdapter($renewal));
+    $renewResult === 'reprovisioned'
+        ? ok('late renewal on a terminated service provisions anew')
+        : bad("late renewal returned '$renewResult', expected reprovisioned");
+
+    $rowAfter = one($db, 'SELECT * FROM mod_vpnhood_iap_purchases WHERE purchase_key=?', [$renewal->purchaseKey]);
+    $newServiceId = (int) $rowAfter['service_id'];
+    $createdOrderIds[] = (int) $rowAfter['whmcs_order_id'];
+    ($rowAfter['status'] === 'provisioned' && $newServiceId > 0 && $newServiceId !== $firstServiceId)
+        ? ok("purchase re-linked to a fresh service (#$firstServiceId → #$newServiceId)")
+        : bad('purchase row after late renewal: ' . json_encode([$rowAfter['status'], $rowAfter['service_id']]));
+
+    $newService = one($db, 'SELECT domainstatus, userid FROM tblhosting WHERE id=?', [$newServiceId]);
+    ($newService && $newService['domainstatus'] === 'Active' && (int) $newService['userid'] === (int) $buyer['id'])
+        ? ok('fresh service is Active and belongs to the buyer')
+        : bad('fresh service wrong: ' . json_encode($newService));
+
+    $renewTx = one($db, 'SELECT transid FROM tblaccounts WHERE transid=?', [$renewal->storeOrderId]);
+    $renewTx !== null
+        ? ok('fresh order paid with the renewal\'s own store order id')
+        : bad('no payment recorded for the re-provisioned order');
 } finally {
     // -- cleanup -------------------------------------------------------------
     foreach ($createdOrderIds as $orderId) {
@@ -240,6 +309,11 @@ try {
     Capsule::table('mod_vpnhood_iap_users')->where('provider_subject', 'like', "$marker%")->delete();
     Capsule::table('mod_vpnhood_iap_products')->where('app_id', $appId)->delete();
     Capsule::table('mod_vpnhood_iap_apps')->where('id', $appId)->delete();
+    // the hand-made renewal-invoice fixture (deleting an order does not touch it)
+    foreach (Capsule::table('tblinvoiceitems')->where('description', 'like', "renewal fixture $marker%")->pluck('invoiceid')->all() as $fixtureInvoiceId) {
+        Capsule::table('tblinvoiceitems')->where('invoiceid', (int) $fixtureInvoiceId)->delete();
+        Capsule::table('tblinvoices')->where('id', (int) $fixtureInvoiceId)->delete();
+    }
     ok('fixtures cleaned up (order terminated + deleted)');
 }
 
