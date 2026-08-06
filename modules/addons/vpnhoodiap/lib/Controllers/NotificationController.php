@@ -5,6 +5,7 @@ namespace WHMCS\Module\Addon\VpnHoodIap\Controllers;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\VpnHoodIap\IapRepository;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\EntitlementService;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\RenewalService;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\StoreNotification;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\StoreAdapterInterface;
@@ -102,12 +103,14 @@ class NotificationController
                 return $notification->eventType;
 
             case StoreNotification::EXPIRED:
-                $this->terminateService($notification, 'expired');
+                // a revocation also expires the subscription moments later — that
+                // trailing event must not relabel a refunded purchase as expired
+                $this->terminateService($notification, 'expired', downgradeRefunded: false);
                 return 'expired';
 
             case StoreNotification::REVOKED:
                 $this->terminateService($notification, 'refunded');
-                return 'revoked';
+                return 'revoked-' . $this->refundPayment($notification);
 
             default:
                 return 'unknown-recorded';
@@ -134,13 +137,28 @@ class NotificationController
         }
     }
 
-    private function terminateService(StoreNotification $notification, string $status): void
+    private function terminateService(StoreNotification $notification, string $status, bool $downgradeRefunded = true): void
     {
         $serviceId = $this->serviceIdFor($notification);
         if ($serviceId !== null) {
             localAPI('ModuleTerminate', ['serviceid' => $serviceId]);
         }
-        $this->updatePurchase($notification, ['status' => $status]);
+        $this->updatePurchase($notification, ['status' => $status], $downgradeRefunded ? [] : ['refunded']);
+    }
+
+    /** The store took the money back — put it back in WHMCS too. */
+    private function refundPayment(StoreNotification $notification): string
+    {
+        if ($notification->purchaseKey === null) {
+            return 'skipped-no-payment';
+        }
+        $row = Capsule::table('mod_vpnhood_iap_purchases')
+            ->where('store', $notification->store)
+            ->where('purchase_key', $notification->purchaseKey)
+            ->first();
+        return $row === null
+            ? 'skipped-no-payment'
+            : (new RefundService($this->repo))->refund((array) $row);
     }
 
     private function serviceIdFor(StoreNotification $notification): ?int
@@ -155,15 +173,19 @@ class NotificationController
         return $serviceId !== null ? (int) $serviceId : null;
     }
 
-    private function updatePurchase(StoreNotification $notification, array $changes): void
+    /** @param string[] $keepStatuses statuses the update must not overwrite */
+    private function updatePurchase(StoreNotification $notification, array $changes, array $keepStatuses = []): void
     {
         if ($notification->purchaseKey === null) {
             return;
         }
-        Capsule::table('mod_vpnhood_iap_purchases')
+        $query = Capsule::table('mod_vpnhood_iap_purchases')
             ->where('store', $notification->store)
-            ->where('purchase_key', $notification->purchaseKey)
-            ->update(array_merge($changes, ['updated_at' => date('Y-m-d H:i:s')]));
+            ->where('purchase_key', $notification->purchaseKey);
+        if ($keepStatuses !== []) {
+            $query->whereNotIn('status', $keepStatuses);
+        }
+        $query->update(array_merge($changes, ['updated_at' => date('Y-m-d H:i:s')]));
     }
 
     // ------------------------------------------------------------- events --

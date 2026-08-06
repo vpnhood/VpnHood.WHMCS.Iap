@@ -1,7 +1,8 @@
 <?php
 /**
- * suppress-emails.test.php — the EmailPreSend hook aborts invoice mail for
- * vpnhoodiap-paid invoices and leaves every other invoice's mail alone.
+ * suppress-emails.test.php — the EmailPreSend hook aborts WHMCS mail for records
+ * that belong to the vpnhoodiap gateway (invoice lifecycle AND the product welcome
+ * email) and leaves every other invoice's and service's mail alone.
  *
  * Runs ON the dev server. Creates two draft invoices for the test buyer via
  * localAPI (one on the vpnhoodiap bookkeeping gateway, one on banktransfer),
@@ -81,6 +82,37 @@ if (!emailPreSendAborts('Password Reset Validation', $iapInvoiceId)) {
     ok('non-invoice template passes through untouched');
 } else {
     bad('non-invoice template was wrongly aborted');
+}
+
+// -- product welcome mail: fired by module-create, NOT covered by AcceptOrder's
+//    sendemail:false — the live regression that leaked "New Product Information"
+//    to a store buyer. The template is per-product, so the hook keys on the
+//    template TYPE, not a name list.
+$productTemplate = (string) \WHMCS\Database\Capsule::table('tblemailtemplates')
+    ->where('type', 'product')->where('name', 'Other Product/Service Welcome Email')->value('name');
+if ($productTemplate === '') {
+    bad('fixture missing: no product welcome template on this install');
+} else {
+    $iapService = \WHMCS\Database\Capsule::table('tblhosting')
+        ->where('paymentmethod', 'vpnhoodiappay')->orderByDesc('id')->first(['id']);
+    $otherService = \WHMCS\Database\Capsule::table('tblhosting')
+        ->where('paymentmethod', '!=', 'vpnhoodiappay')->orderByDesc('id')->first(['id']);
+
+    if ($iapService === null) {
+        bad('fixture missing: no vpnhoodiappay service to test the welcome mail against');
+    } elseif (emailPreSendAborts($productTemplate, (int) $iapService->id)) {
+        ok("product welcome mail aborted for the store service #{$iapService->id}");
+    } else {
+        bad("product welcome mail NOT aborted for the store service #{$iapService->id}");
+    }
+
+    if ($otherService !== null) {
+        if (!emailPreSendAborts($productTemplate, (int) $otherService->id)) {
+            ok('product welcome mail passes through for a non-store service');
+        } else {
+            bad("product welcome mail wrongly aborted for service #{$otherService->id}");
+        }
+    }
 }
 
 // -- cleanup ----------------------------------------------------------------

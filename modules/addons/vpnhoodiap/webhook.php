@@ -42,6 +42,7 @@ require_once __DIR__ . '/lib/Provisioning/ClientProvisioner.php';
 require_once __DIR__ . '/lib/Provisioning/OrderProvisioner.php';
 require_once __DIR__ . '/lib/Provisioning/DeliveryReader.php';
 require_once __DIR__ . '/lib/Provisioning/EntitlementService.php';
+require_once __DIR__ . '/lib/Provisioning/RefundService.php';
 require_once __DIR__ . '/lib/Provisioning/RenewalService.php';
 require_once __DIR__ . '/lib/Controllers/NotificationController.php';
 
