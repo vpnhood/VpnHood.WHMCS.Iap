@@ -111,7 +111,12 @@ function vpnhoodiap_activate(): array
         if (!$schema->hasTable('mod_vpnhood_iap_users')) {
             $schema->create('mod_vpnhood_iap_users', function ($table) {
                 $table->increments('id');
-                $table->string('provider', 16); // google | apple | microsoft (identity provider)
+                // THE ACCOUNT IS THE PERSON, one per verified email address. Sign-in
+                // proofs live in mod_vpnhood_iap_identities (several per account):
+                // a known (provider, subject) always wins, a new provider proving a
+                // known address joins that account. provider/provider_subject here
+                // only mirror the most recent sign-in for the admin's benefit.
+                $table->string('provider', 16); // google | apple | microsoft (last sign-in)
                 $table->string('provider_subject');
                 $table->string('email');
                 $table->boolean('email_verified_claim')->default(false);
@@ -119,7 +124,24 @@ function vpnhoodiap_activate(): array
                 $table->string('external_uid', 36)->unique(); // UUID: GooglePlay obfuscatedAccountId AND Apple appAccountToken
                 $table->timestamp('created_at')->nullable();
                 $table->timestamp('updated_at')->nullable();
-                $table->unique(['provider', 'provider_subject']);
+                $table->unique('email');
+                $table->index(['provider', 'provider_subject']);
+            });
+        }
+
+        // sign-in proofs: several per account. This is what keeps an account stable
+        // when a provider changes its email, and what "link another sign-in method"
+        // will append to later.
+        if (!$schema->hasTable('mod_vpnhood_iap_identities')) {
+            $schema->create('mod_vpnhood_iap_identities', function ($table) {
+                $table->increments('id');
+                $table->integer('user_id')->unsigned()->index();
+                $table->string('provider', 16);
+                $table->string('provider_subject');
+                $table->string('email'); // the address this identity presented last
+                $table->timestamp('created_at')->nullable();
+                $table->timestamp('updated_at')->nullable();
+                $table->unique(['provider', 'provider_subject'], 'iap_identities_provider_subject');
             });
         }
 
@@ -222,6 +244,109 @@ function vpnhoodiap_upgrade(array $vars): void
     // installs activated before this ran (API/automation) have no access row and
     // are invisible in the Addons menu until someone notices
     vpnhoodiap_ensureAdminAccess();
+
+    vpnhoodiap_migrateToEmailIdentity();
+    vpnhoodiap_migrateToLinkedIdentities();
+}
+
+/**
+ * Installs that predate the identities table have each account's only known proof
+ * in the users columns — copy it over so those users resolve by identity (rule 1)
+ * instead of falling through to the email match on every sign-in. Idempotent.
+ */
+function vpnhoodiap_migrateToLinkedIdentities(): void
+{
+    $schema = Capsule::schema();
+    if (!$schema->hasTable('mod_vpnhood_iap_users')) {
+        return;
+    }
+    if (!$schema->hasTable('mod_vpnhood_iap_identities')) {
+        $schema->create('mod_vpnhood_iap_identities', function ($table) {
+            $table->increments('id');
+            $table->integer('user_id')->unsigned()->index();
+            $table->string('provider', 16);
+            $table->string('provider_subject');
+            $table->string('email');
+            $table->timestamp('created_at')->nullable();
+            $table->timestamp('updated_at')->nullable();
+            $table->unique(['provider', 'provider_subject'], 'iap_identities_provider_subject');
+        });
+    }
+
+    $now = date('Y-m-d H:i:s');
+    foreach (Capsule::table('mod_vpnhood_iap_users')->get() as $user) {
+        if ((string) $user->provider === '' || (string) $user->provider_subject === '') {
+            continue;
+        }
+        $exists = Capsule::table('mod_vpnhood_iap_identities')
+            ->where('provider', $user->provider)
+            ->where('provider_subject', $user->provider_subject)
+            ->exists();
+        if (!$exists) {
+            Capsule::table('mod_vpnhood_iap_identities')->insert([
+                'user_id'          => (int) $user->id,
+                'provider'         => $user->provider,
+                'provider_subject' => $user->provider_subject,
+                'email'            => $user->email,
+                'created_at'       => $now,
+                'updated_at'       => $now,
+            ]);
+        }
+    }
+}
+
+/**
+ * Re-key users on the email (see IapRepository::findOrCreateUser). Installs created
+ * before this shipped are keyed on (provider, provider_subject), so the same person
+ * signing in with a second provider would have received a second account.
+ *
+ * Emails are lowercased first, then the unique index moves. If two rows already share
+ * an address the index cannot be applied — that is a genuine split account whose
+ * purchases must be merged by hand, so it is reported loudly rather than papered over;
+ * lookups stay deterministic (oldest row) until it is resolved.
+ */
+function vpnhoodiap_migrateToEmailIdentity(): void
+{
+    $schema = Capsule::schema();
+    if (!$schema->hasTable('mod_vpnhood_iap_users')) {
+        return;
+    }
+
+    Capsule::statement('UPDATE mod_vpnhood_iap_users SET email = LOWER(TRIM(email)) WHERE email <> LOWER(TRIM(email))');
+
+    $duplicates = Capsule::table('mod_vpnhood_iap_users')
+        ->select('email')
+        ->groupBy('email')
+        ->havingRaw('COUNT(*) > 1')
+        ->pluck('email')
+        ->all();
+    if ($duplicates !== []) {
+        logActivity('vpnhoodiap: cannot key accounts by email — these addresses have more than one user row and must be merged manually: '
+            . implode(', ', array_slice($duplicates, 0, 20)));
+        return;
+    }
+
+    try {
+        $schema->table('mod_vpnhood_iap_users', function ($table) {
+            $table->unique('email');
+        });
+    } catch (\Throwable $e) {
+        // already unique on a re-run — the index is the goal, not the attempt
+    }
+
+    // The old key has to go, not just stop being used: one provider account whose
+    // address changes now legitimately produces a second row, which that unique
+    // index would reject.
+    try {
+        $schema->table('mod_vpnhood_iap_users', function ($table) {
+            $table->dropUnique('mod_vpnhood_iap_users_provider_provider_subject_unique');
+        });
+        $schema->table('mod_vpnhood_iap_users', function ($table) {
+            $table->index(['provider', 'provider_subject']);
+        });
+    } catch (\Throwable $e) {
+        // never existed (fresh install) or already dropped
+    }
 }
 
 /**

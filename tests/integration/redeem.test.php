@@ -188,22 +188,18 @@ try {
         : bad('unmapped purchase not parked correctly: ' . json_encode($parked));
 
     // ---- 3. unverified existing email parks (verification is disabled on dev → fail-closed)
-    $unverifiedUserId = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
-        'provider'             => 'google',
-        'provider_subject'     => "$marker-unverified",
-        'email'                => BUYER_EMAIL, // exists in WHMCS, not verifiable
-        'email_verified_claim' => 1,
-        'client_id'            => null,
-        'external_uid'         => IapRepository::uuidV4(),
-        'created_at'           => $now,
-        'updated_at'           => $now,
-    ]);
-    $unverifiedUser = $repo->getUser($unverifiedUserId);
+    // The address IS the account, so this cannot be a second user row for the same
+    // email any more: it is this user with its client link detached, which is exactly
+    // the state a first purchase starts from when that address already exists in WHMCS.
+    Capsule::table('mod_vpnhood_iap_users')->where('id', $linkedUserId)->update(['client_id' => null]);
+    $unverifiedUser = $repo->getUser($linkedUserId);
     $parkRecord = makeRecord(['obfuscatedUid' => $unverifiedUser['external_uid'], 'purchaseKey' => "itest-park-$marker"]);
     $parkResult = $service->redeem($app, $parkRecord, $unverifiedUser, new FakeStoreAdapter($parkRecord));
     $parkResult['state'] === 'awaiting_email_verification'
         ? ok('existing-but-unverified email parks the purchase')
         : bad('unexpected park result: ' . json_encode($parkResult));
+    // re-link for the happy path below
+    Capsule::table('mod_vpnhood_iap_users')->where('id', $linkedUserId)->update(['client_id' => (int) $buyer['id']]);
 
     // ---- 4. happy path: pre-linked user, mapped SKU → real provisioning
     $happy = makeRecord(['obfuscatedUid' => $linkedUid]);
