@@ -23,10 +23,10 @@ class ClientProvisioner
      */
     public function createClient(string $email, ?string $displayName): int
     {
-        $nameParts = preg_split('/\s+/', trim((string) $displayName), 2) ?: [];
+        [$firstName, $lastName] = self::splitName($displayName);
         $result = localAPI('AddClient', [
-            'firstname'       => $nameParts[0] !== '' && isset($nameParts[0]) ? $nameParts[0] : 'VpnHood',
-            'lastname'        => $nameParts[1] ?? 'Customer',
+            'firstname'       => $firstName,
+            'lastname'        => $lastName,
             'email'           => $email,
             'password2'       => bin2hex(random_bytes(16)),
             'country'         => 'US',
@@ -49,5 +49,44 @@ class ClientProvisioner
         }
 
         return $clientId;
+    }
+
+    /**
+     * Keep the WHMCS client's name in step with the identity provider's — the
+     * IdP is the source of truth for who the person is, and every sign-in or
+     * purchase carries the freshest value. No-op without a name (Apple sends it
+     * only once) or when the client already matches. Best-effort: a name is
+     * cosmetic and must never fail a sign-in or a purchase.
+     */
+    public function syncClient(int $clientId, ?string $displayName): void
+    {
+        if (trim((string) $displayName) === '') {
+            return;
+        }
+        [$firstName, $lastName] = self::splitName($displayName);
+        try {
+            $client = \WHMCS\Database\Capsule::table('tblclients')
+                ->where('id', $clientId)->first(['firstname', 'lastname']);
+            if ($client === null || ((string) $client->firstname === $firstName && (string) $client->lastname === $lastName)) {
+                return;
+            }
+            localAPI('UpdateClient', [
+                'clientid'       => $clientId,
+                'firstname'      => $firstName,
+                'lastname'       => $lastName,
+                'skipvalidation' => true,
+            ]);
+        } catch (\Throwable $e) {
+            // tolerated — see above
+        }
+    }
+
+    /** @return array{string, string} WHMCS requires both parts non-empty. */
+    private static function splitName(?string $displayName): array
+    {
+        $nameParts = preg_split('/\s+/', trim((string) $displayName), 2) ?: [];
+        $firstName = isset($nameParts[0]) && $nameParts[0] !== '' ? $nameParts[0] : 'VpnHood';
+        $lastName = isset($nameParts[1]) && $nameParts[1] !== '' ? $nameParts[1] : 'Customer';
+        return [$firstName, $lastName];
     }
 }

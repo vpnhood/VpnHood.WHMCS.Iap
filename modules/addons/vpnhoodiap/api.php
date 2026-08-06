@@ -26,6 +26,7 @@ use WHMCS\Module\Addon\VpnHoodIap\Auth\GoogleIdentityProvider;
 use WHMCS\Module\Addon\VpnHoodIap\Auth\SessionService;
 use WHMCS\Module\Addon\VpnHoodIap\IapRepository;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountService;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\ClientProvisioner;
 
 // Bootstrap WHMCS (gives us Capsule, localAPI, models, etc.).
 require_once __DIR__ . '/../../../init.php';
@@ -164,18 +165,25 @@ function vpnhoodiap_actionAuthToken(IapRepository $repo, array $body, string $re
         throw new ApiException('The signed-in email is not verified with the identity provider.', 403);
     }
 
-    $user = $repo->findOrCreateUser($identityProvider->providerId(), $identity['subject'], $identity['email'], true);
+    $user = $repo->findOrCreateUser($identityProvider->providerId(), $identity['subject'], $identity['email'], true,
+        $identity['name'] ?? null);
 
     // attach gate: link an existing verified WHMCS account by email; new emails
     // stay unlinked until first purchase creates their client.
     $state = 'ok';
-    if ($user['client_id'] === null) {
+    $clientId = $user['client_id'] !== null ? (int) $user['client_id'] : null;
+    if ($clientId === null) {
         $resolution = (new AccountService())->resolveClientForEmail($identity['email']);
         if ($resolution['clientId'] !== null) {
-            $repo->linkUserClient((int) $user['id'], $resolution['clientId']);
+            $clientId = (int) $resolution['clientId'];
+            $repo->linkUserClient((int) $user['id'], $clientId);
         } elseif ($resolution['state'] === AccountService::STATE_EMAIL_UNVERIFIED) {
             $state = 'email_unverified';
         }
+    }
+    if ($clientId !== null) {
+        // the IdP just gave us fresh data — mirror it onto the WHMCS client
+        (new ClientProvisioner())->syncClient($clientId, $identity['name'] ?? null);
     }
 
     $session = (new SessionService())->issue((int) $user['id']);
