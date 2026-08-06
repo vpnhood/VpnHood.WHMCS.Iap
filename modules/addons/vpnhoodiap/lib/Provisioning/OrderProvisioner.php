@@ -163,6 +163,57 @@ class OrderProvisioner
         }
     }
 
+    /**
+     * Make the PAID invoice carry the store's value instead of the book price:
+     * the machinery (payment event, _Renew, dedup) has already fired, so this
+     * is bookkeeping-only. Exact when the store charged in the client's own
+     * currency; 0.00 when it charged in another one — the explicit "the money
+     * lives at the store" flag (the annotation text carries the real foreign
+     * amount). Never converts. No real charge known → the book price stays.
+     *
+     * Order of operations is deliberate and dev-verified: transaction first,
+     * then the invoice lines — the invoice stays Paid and no client credit is
+     * ever created. Only this module's own records are ever touched (the
+     * transaction is looked up by OUR transid, the invoice was placed by us).
+     */
+    public function applyStoreValue(int $invoiceId, string $transactionId, ?string $amount, ?string $currency,
+        int $clientId, bool $isPrimary): void
+    {
+        if ($invoiceId <= 0 || $transactionId === '' || $amount === null || $currency === null) {
+            return;
+        }
+        // bundle-secondary invoices always zero: the whole charge is stated once
+        $newTotal = $isPrimary && strcasecmp($currency, self::clientCurrencyCode($clientId)) === 0
+            ? $amount
+            : '0.00';
+        try {
+            $transaction = Capsule::table('tblaccounts')->where('transid', $transactionId)->first(['id', 'amountin']);
+            if ($transaction !== null && (float) $transaction->amountin !== (float) $newTotal) {
+                localAPI('UpdateTransaction', ['transactionid' => (int) $transaction->id, 'amountin' => $newTotal]);
+            }
+            $updates = ['invoiceid' => $invoiceId];
+            $first = true;
+            foreach (Capsule::table('tblinvoiceitems')->where('invoiceid', $invoiceId)->get() as $item) {
+                $updates['itemdescription'][$item->id] = $item->description;
+                $updates['itemamount'][$item->id] = $first ? $newTotal : '0.00';
+                $updates['itemtaxed'][$item->id] = 0; // the store handled tax; never re-tax
+                $first = false;
+            }
+            if (count($updates) > 1) {
+                localAPI('UpdateInvoice', $updates);
+            }
+        } catch (\Throwable $e) {
+            $this->repo->log(null, 'invoice.storevalue', '', 0, ['invoiceid' => $invoiceId], $e->getMessage());
+        }
+    }
+
+    /** Client id → its WHMCS currency code ('' when unresolvable — never matches). */
+    public static function clientCurrencyCode(int $clientId): string
+    {
+        $currencyId = (int) Capsule::table('tblclients')->where('id', $clientId)->value('currency');
+        return (string) (Capsule::table('tblcurrencies')->where('id', $currencyId)->value('code') ?? '');
+    }
+
     /** Store id → the name a customer knows it by. */
     public static function storeLabel(string $store): string
     {
