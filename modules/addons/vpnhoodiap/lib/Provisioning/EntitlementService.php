@@ -143,12 +143,14 @@ class EntitlementService
                 foreach (array_values($mappings) as $index => $mapping) {
                     $transactionId = ($record->storeOrderId ?? $record->purchaseKey)
                         . ($index > 0 ? '-' . ($index + 1) : '');
-                    $placed[] = $orders->placeOrder(
+                    $order = $orders->placeOrder(
                         $clientId,
                         (int) $mapping['whmcs_product_id'],
                         (int) $mapping['billing_cycle_months'],
                         $transactionId
                     );
+                    $order['transactionId'] = $transactionId;
+                    $placed[] = $order;
                 }
             } catch (\Throwable $e) {
                 foreach ($placed as $order) {
@@ -167,6 +169,14 @@ class EntitlementService
                     $record->store,
                     $index === 0 ? $record->amount : null,
                     $index === 0 ? $record->currency : null
+                );
+                $orders->applyStoreValue(
+                    (int) $order['invoiceId'],
+                    (string) $order['transactionId'],
+                    $record->amount,
+                    $record->currency,
+                    $clientId,
+                    isPrimary: $index === 0
                 );
             }
 

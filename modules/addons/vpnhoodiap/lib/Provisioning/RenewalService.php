@@ -74,15 +74,18 @@ class RenewalService
         }
 
         if ($invoiceId > 0) {
+            $paymentTransactionId = $transactionId !== '' ? $transactionId : $purchaseKey . '-' . time();
             $payment = localAPI('AddInvoicePayment', [
                 'invoiceid' => $invoiceId,
-                'transid'   => $transactionId !== '' ? $transactionId : $purchaseKey . '-' . time(),
+                'transid'   => $paymentTransactionId,
                 'gateway'   => OrderProvisioner::GATEWAY,
                 'noemail'   => true,
             ]);
             if (($payment['result'] ?? '') === 'success') {
-                (new OrderProvisioner($this->repo))
-                    ->annotateInvoice($invoiceId, $adapter->storeId(), $record->amount, $record->currency);
+                $orders = new OrderProvisioner($this->repo);
+                $orders->annotateInvoice($invoiceId, $adapter->storeId(), $record->amount, $record->currency);
+                $orders->applyStoreValue($invoiceId, $paymentTransactionId,
+                    $record->amount, $record->currency, $clientId, isPrimary: true);
                 $this->updateRow((int) $row->id, $record, 'provisioned');
                 return 'renewed';
             }
@@ -114,11 +117,16 @@ class RenewalService
     private function recordRenewalRevenue(int $clientId, int $serviceId, string $transactionId,
         string $purchaseKey, PurchaseRecord $record): void
     {
-        // Always the WHMCS book price: accounting stays in the client's own
-        // currency. The store's real charge (possibly a different currency) is
-        // informational — it lives on the purchase row and in invoice text,
-        // never in the money tables.
+        // Same store-value rule as the invoices: the real charge when the store
+        // billed in the client's own currency, 0.00 when it billed in another
+        // (never converted), and only when no real charge is known at all does
+        // the WHMCS book price stand in.
         $amount = (float) Capsule::table('tblhosting')->where('id', $serviceId)->value('amount');
+        if ($record->amount !== null && $record->currency !== null) {
+            $amount = strcasecmp($record->currency, OrderProvisioner::clientCurrencyCode($clientId)) === 0
+                ? (float) $record->amount
+                : 0.00;
+        }
 
         $result = localAPI('AddTransaction', [
             'userid'        => $clientId,

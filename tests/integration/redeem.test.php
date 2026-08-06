@@ -247,6 +247,20 @@ try {
         ? ok('invoice line explains the store billing and the real charge')
         : bad('invoice line not annotated: ' . json_encode($invoiceItem));
 
+    // currency matched (USD client) → the PAID invoice and its transaction now
+    // carry the store's value instead of the book price
+    $moneyRow = one(
+        $db,
+        "SELECT i.status, i.total, a.amountin FROM tblorders o
+         JOIN tblinvoices i ON i.id = o.invoiceid
+         LEFT JOIN tblaccounts a ON a.invoiceid = i.id
+         WHERE o.id=?",
+        [(int) $purchaseRow['whmcs_order_id']]
+    );
+    ($moneyRow['status'] === 'Paid' && (float) $moneyRow['total'] === 46.99 && (float) $moneyRow['amountin'] === 46.99)
+        ? ok('matched currency: invoice + transaction rewritten to the real 46.99, still Paid')
+        : bad('store-value rewrite (matched): ' . json_encode($moneyRow));
+
     // ---- 7. terminate leaves an unpaid renewal invoice → cleanup cancels it --
     $draft = localAPI('CreateInvoice', [
         'userid' => (int) $buyer['id'], 'status' => 'Unpaid', 'sendinvoice' => '0',
@@ -266,12 +280,15 @@ try {
         : bad("leftover renewal invoice is $renewalInvoiceStatus, expected Cancelled");
 
     // ---- 8. late renewal on the terminated service → fresh provisioning ------
+    // charged in TRY: the currency-mismatch case — books must show 0.00, flag
+    // that the money lives at the store, and stay Paid
+    $creditBefore = (float) one($db, 'SELECT credit FROM tblclients WHERE id=?', [(int) $buyer['id']])['credit'];
     $renewal = makeRecord([
         'obfuscatedUid' => $linkedUid,
         'storeOrderId'  => 'ITEST.RENEW-' . strtoupper(bin2hex(random_bytes(4))),
         'acknowledged'  => true, // the original purchase was acknowledged long ago
-        'amount'        => '46.99',
-        'currency'      => 'USD',
+        'amount'        => '259.99',
+        'currency'      => 'TRY',
     ]);
     $renewResult = (new RenewalService($repo))->renew($app, $renewal->purchaseKey, new FakeStoreAdapter($renewal));
     $renewResult === 'reprovisioned'
@@ -290,10 +307,21 @@ try {
         ? ok('fresh service is Active and belongs to the buyer')
         : bad('fresh service wrong: ' . json_encode($newService));
 
-    $renewTx = one($db, 'SELECT transid FROM tblaccounts WHERE transid=?', [$renewal->storeOrderId]);
+    $renewTx = one($db, 'SELECT transid, amountin, invoiceid FROM tblaccounts WHERE transid=?', [$renewal->storeOrderId]);
     $renewTx !== null
         ? ok('fresh order paid with the renewal\'s own store order id')
         : bad('no payment recorded for the re-provisioned order');
+
+    $mismatchInvoice = one($db, 'SELECT status, total FROM tblinvoices WHERE id=?', [(int) ($renewTx['invoiceid'] ?? 0)]);
+    ((float) ($renewTx['amountin'] ?? -1) === 0.00
+        && $mismatchInvoice && $mismatchInvoice['status'] === 'Paid' && (float) $mismatchInvoice['total'] === 0.00)
+        ? ok('mismatched currency (TRY): invoice + transaction zeroed, still Paid')
+        : bad('store-value rewrite (mismatch): ' . json_encode([$renewTx, $mismatchInvoice]));
+
+    $creditAfter = (float) one($db, 'SELECT credit FROM tblclients WHERE id=?', [(int) $buyer['id']])['credit'];
+    $creditAfter === $creditBefore
+        ? ok('client credit balance untouched by the rewrites')
+        : bad("client credit changed: $creditBefore -> $creditAfter");
 } finally {
     // -- cleanup -------------------------------------------------------------
     foreach ($createdOrderIds as $orderId) {
