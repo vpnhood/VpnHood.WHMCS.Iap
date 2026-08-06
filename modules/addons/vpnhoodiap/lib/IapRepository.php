@@ -247,36 +247,75 @@ class IapRepository
     }
 
     /**
-     * Upsert the module user for a verified sign-in identity. The identity key
-     * is (provider, subject) — email is an attribute that can change on the
-     * provider side; when it does, the stale WHMCS client link is dropped so
-     * the attach gate re-runs against the new email.
+     * The account for an address. Ordered by id so that an install whose unique index
+     * could not be applied (pre-existing duplicates) still resolves to one stable row
+     * — the oldest, which is the one purchases were provisioned against.
+     */
+    public function findUserByEmail(string $email): ?array
+    {
+        $row = Capsule::table('mod_vpnhood_iap_users')
+            ->where('email', self::normalizeEmail($email))
+            ->orderBy('id')
+            ->first();
+        return $row === null ? null : (array) $row;
+    }
+
+    /** The account key. Case and surrounding space never distinguish two people. */
+    public static function normalizeEmail(string $email): string
+    {
+        return strtolower(trim($email));
+    }
+
+    /**
+     * Resolve a verified sign-in to THE account — the person — creating it when new.
+     *
+     *   1. A known identity (provider, subject) always wins. This is what keeps an
+     *      account stable when the provider changes its email address.
+     *   2. A NEW identity whose verified email matches an existing account joins that
+     *      account: Google today, Apple or a password login tomorrow, same address,
+     *      same account, same external_uid — so a purchase made under one provider
+     *      is still bound (the stores echo external_uid back) after signing in with
+     *      another. Only safe because the caller has already rejected sign-ins the
+     *      provider did not mark email_verified — an unverified address would let
+     *      anyone claim someone else's account by naming it.
+     *   3. Otherwise this is a new person: account + first linked identity.
+     *
+     * The account keeps the email it was created with; a provider-side address
+     * change updates the identity row only (rule 1 found it, nothing to re-key).
+     * provider/provider_subject on the account mirror the most recent sign-in for
+     * the admin's benefit — resolution never reads them.
      */
     public function findOrCreateUser(string $provider, string $subject, string $email, bool $emailVerifiedClaim): array
     {
         $now = date('Y-m-d H:i:s');
-        $existing = Capsule::table('mod_vpnhood_iap_users')
+        $email = self::normalizeEmail($email);
+
+        // -- 1. known identity
+        $identity = Capsule::table('mod_vpnhood_iap_identities')
             ->where('provider', $provider)
             ->where('provider_subject', $subject)
             ->first();
-
-        if ($existing !== null) {
-            $user = (array) $existing;
-            $update = [];
-            if ($user['email'] !== $email) {
-                $update = ['email' => $email, 'client_id' => null];
+        if ($identity !== null) {
+            $user = $this->getUser((int) $identity->user_id);
+            if ($user === null) {
+                throw new \RuntimeException("Identity #{$identity->id} points at a missing user row.");
             }
-            if ((bool) $user['email_verified_claim'] !== $emailVerifiedClaim) {
-                $update['email_verified_claim'] = $emailVerifiedClaim ? 1 : 0;
+            if ((string) $identity->email !== $email) {
+                Capsule::table('mod_vpnhood_iap_identities')
+                    ->where('id', $identity->id)
+                    ->update(['email' => $email, 'updated_at' => $now]);
             }
-            if ($update !== []) {
-                $update['updated_at'] = $now;
-                Capsule::table('mod_vpnhood_iap_users')->where('id', $user['id'])->update($update);
-                $user = array_merge($user, $update);
-            }
-            return $user;
+            return $this->recordSignIn($user, $provider, $subject, $emailVerifiedClaim, $now);
         }
 
+        // -- 2. new identity, known address
+        $user = $this->findUserByEmail($email);
+        if ($user !== null) {
+            $this->linkIdentity((int) $user['id'], $provider, $subject, $email, $now);
+            return $this->recordSignIn($user, $provider, $subject, $emailVerifiedClaim, $now);
+        }
+
+        // -- 3. new person
         try {
             $id = Capsule::table('mod_vpnhood_iap_users')->insertGetId([
                 'provider'             => $provider,
@@ -288,21 +327,64 @@ class IapRepository
                 'updated_at'           => $now,
             ]);
         } catch (\Throwable $e) {
-            // lost a concurrent-insert race on unique (provider, subject) — reread
-            $row = Capsule::table('mod_vpnhood_iap_users')
-                ->where('provider', $provider)
-                ->where('provider_subject', $subject)
-                ->first();
+            // lost a concurrent-insert race on unique (email) — reread and link
+            $row = $this->findUserByEmail($email);
             if ($row === null) {
                 throw $e;
             }
-            return (array) $row;
+            $this->linkIdentity((int) $row['id'], $provider, $subject, $email, $now);
+            return $row;
         }
+        $this->linkIdentity((int) $id, $provider, $subject, $email, $now);
         $user = $this->getUser((int) $id);
         if ($user === null) {
             throw new \RuntimeException('User row disappeared right after insert.');
         }
         return $user;
+    }
+
+    /** Mirror the sign-in onto the account row (admin display only — never resolution). */
+    private function recordSignIn(array $user, string $provider, string $subject, bool $emailVerifiedClaim, string $now): array
+    {
+        $update = [];
+        if ($user['provider'] !== $provider || $user['provider_subject'] !== $subject) {
+            $update = ['provider' => $provider, 'provider_subject' => $subject];
+        }
+        if ((bool) $user['email_verified_claim'] !== $emailVerifiedClaim) {
+            $update['email_verified_claim'] = $emailVerifiedClaim ? 1 : 0;
+        }
+        if ($update !== []) {
+            $update['updated_at'] = $now;
+            Capsule::table('mod_vpnhood_iap_users')->where('id', $user['id'])->update($update);
+            $user = array_merge($user, $update);
+        }
+        return $user;
+    }
+
+    /** Attach a sign-in proof to an account. Losing the unique-insert race is fine — the identity exists. */
+    private function linkIdentity(int $userId, string $provider, string $subject, string $email, string $now): void
+    {
+        try {
+            Capsule::table('mod_vpnhood_iap_identities')->insert([
+                'user_id'          => $userId,
+                'provider'         => $provider,
+                'provider_subject' => $subject,
+                'email'            => $email,
+                'created_at'       => $now,
+                'updated_at'       => $now,
+            ]);
+        } catch (\Throwable) {
+            // unique (provider, subject) already present — a concurrent request linked it
+        }
+    }
+
+    /** All sign-in proofs attached to an account, oldest first. */
+    public function identitiesForUser(int $userId): array
+    {
+        return Capsule::table('mod_vpnhood_iap_identities')
+            ->where('user_id', $userId)
+            ->orderBy('id')
+            ->get()->map(fn ($row) => (array) $row)->all();
     }
 
     public function linkUserClient(int $userId, int $clientId): void
