@@ -119,6 +119,7 @@ function vpnhoodiap_activate(): array
                 $table->string('provider', 16); // google | apple | microsoft (last sign-in)
                 $table->string('provider_subject');
                 $table->string('email');
+                $table->string('display_name')->nullable(); // latest name the IdP presented; synced onto the client
                 $table->boolean('email_verified_claim')->default(false);
                 $table->integer('client_id')->unsigned()->nullable()->index();
                 $table->string('external_uid', 36)->unique(); // UUID: GooglePlay obfuscatedAccountId AND Apple appAccountToken
@@ -247,6 +248,22 @@ function vpnhoodiap_upgrade(array $vars): void
 
     vpnhoodiap_migrateToEmailIdentity();
     vpnhoodiap_migrateToLinkedIdentities();
+    vpnhoodiap_migrateToDisplayName();
+}
+
+/**
+ * Installs that predate display-name capture lack the column; the value itself
+ * back-fills naturally on each account's next sign-in. Idempotent.
+ */
+function vpnhoodiap_migrateToDisplayName(): void
+{
+    $schema = Capsule::schema();
+    if ($schema->hasTable('mod_vpnhood_iap_users')
+        && !$schema->hasColumn('mod_vpnhood_iap_users', 'display_name')) {
+        $schema->table('mod_vpnhood_iap_users', function ($table) {
+            $table->string('display_name')->nullable();
+        });
+    }
 }
 
 /**

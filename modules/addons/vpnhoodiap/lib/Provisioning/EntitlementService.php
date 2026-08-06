@@ -107,6 +107,7 @@ class EntitlementService
                 throw new ApiException('This purchase cannot be attributed to an account.', 409);
             }
             $clientId = $user['client_id'] !== null ? (int) $user['client_id'] : null;
+            $clients = new ClientProvisioner();
             if ($clientId === null) {
                 $accounts = new AccountService();
                 $resolution = $accounts->resolveClientForEmail((string) $user['email']);
@@ -116,9 +117,11 @@ class EntitlementService
                     return ['state' => 'awaiting_email_verification', 'accessCode' => null, 'expiresAt' => null, 'planId' => null];
                 }
                 $clientId = $resolution['clientId']
-                    ?? (new ClientProvisioner())->createClient((string) $user['email'], null);
+                    ?? $clients->createClient((string) $user['email'], $user['display_name'] ?? null);
                 $this->repo->linkUserClient((int) $user['id'], $clientId);
             }
+            // keep the client in step with the account's latest known name
+            $clients->syncClient($clientId, $user['display_name'] ?? null);
 
             // ---- order + provision (one order per mapping row; bundles = several)
             $orders = new OrderProvisioner($this->repo);

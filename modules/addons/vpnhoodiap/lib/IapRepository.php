@@ -288,10 +288,11 @@ class IapRepository
      * provider/provider_subject on the account mirror the most recent sign-in for
      * the admin's benefit — resolution never reads them.
      */
-    public function findOrCreateUser(string $provider, string $subject, string $email, bool $emailVerifiedClaim): array
+    public function findOrCreateUser(string $provider, string $subject, string $email, bool $emailVerifiedClaim, ?string $displayName): array
     {
         $now = date('Y-m-d H:i:s');
         $email = self::normalizeEmail($email);
+        $displayName = trim((string) $displayName) === '' ? null : trim((string) $displayName);
 
         // -- 1. known identity
         $identity = Capsule::table('mod_vpnhood_iap_identities')
@@ -308,14 +309,14 @@ class IapRepository
                     ->where('id', $identity->id)
                     ->update(['email' => $email, 'updated_at' => $now]);
             }
-            return $this->recordSignIn($user, $provider, $subject, $emailVerifiedClaim, $now);
+            return $this->recordSignIn($user, $provider, $subject, $emailVerifiedClaim, $displayName, $now);
         }
 
         // -- 2. new identity, known address
         $user = $this->findUserByEmail($email);
         if ($user !== null) {
             $this->linkIdentity((int) $user['id'], $provider, $subject, $email, $now);
-            return $this->recordSignIn($user, $provider, $subject, $emailVerifiedClaim, $now);
+            return $this->recordSignIn($user, $provider, $subject, $emailVerifiedClaim, $displayName, $now);
         }
 
         // -- 3. new person
@@ -324,6 +325,7 @@ class IapRepository
                 'provider'             => $provider,
                 'provider_subject'     => $subject,
                 'email'                => $email,
+                'display_name'         => $displayName,
                 'email_verified_claim' => $emailVerifiedClaim ? 1 : 0,
                 'external_uid'         => self::uuidV4(),
                 'created_at'           => $now,
@@ -347,7 +349,7 @@ class IapRepository
     }
 
     /** Mirror the sign-in onto the account row (admin display only — never resolution). */
-    private function recordSignIn(array $user, string $provider, string $subject, bool $emailVerifiedClaim, string $now): array
+    private function recordSignIn(array $user, string $provider, string $subject, bool $emailVerifiedClaim, ?string $displayName, string $now): array
     {
         $update = [];
         if ($user['provider'] !== $provider || $user['provider_subject'] !== $subject) {
@@ -355,6 +357,11 @@ class IapRepository
         }
         if ((bool) $user['email_verified_claim'] !== $emailVerifiedClaim) {
             $update['email_verified_claim'] = $emailVerifiedClaim ? 1 : 0;
+        }
+        // the IdP is the source of truth for the person's name; a sign-in that
+        // carries none (Apple after the first) leaves the last known name alone
+        if ($displayName !== null && ($user['display_name'] ?? null) !== $displayName) {
+            $update['display_name'] = $displayName;
         }
         if ($update !== []) {
             $update['updated_at'] = $now;

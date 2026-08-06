@@ -34,11 +34,20 @@ $repo = new IapRepository();
 
 try {
     // -- first sign-in: Google ------------------------------------------------
-    $google = $repo->findOrCreateUser('google', "google-$marker", $email, true);
+    $google = $repo->findOrCreateUser('google', "google-$marker", $email, true, 'Randy Blake');
     ok("google sign-in created account #{$google['id']} ({$google['external_uid']})");
 
+    ($google['display_name'] ?? null) === 'Randy Blake'
+        ? ok('the provider name is captured on the account')
+        : bad('display_name not captured: ' . json_encode($google['display_name'] ?? null));
+
     // -- rule 2: same person, different provider, same address ----------------
-    $apple = $repo->findOrCreateUser('apple', "apple-$marker", $email, true);
+    // Apple after the first sign-in carries no name — the known name must survive
+    $apple = $repo->findOrCreateUser('apple', "apple-$marker", $email, true, null);
+
+    ($apple['display_name'] ?? null) === 'Randy Blake'
+        ? ok('a name-less sign-in leaves the last known name alone')
+        : bad('name lost on name-less sign-in: ' . json_encode($apple['display_name'] ?? null));
 
     if ((int) $apple['id'] === (int) $google['id']) {
         ok('apple sign-in landed on the SAME account');
@@ -58,7 +67,10 @@ try {
         : bad(count($identities) . ' identities linked, expected 2');
 
     // -- rule 1: provider changes the email — the account survives ------------
-    $renamed = $repo->findOrCreateUser('google', "google-$marker", "renamed-$email", true);
+    $renamed = $repo->findOrCreateUser('google', "google-$marker", "renamed-$email", true, 'Randy B. Blake');
+    ($renamed['display_name'] ?? null) === 'Randy B. Blake'
+        ? ok('a changed provider name updates the account')
+        : bad('display_name not refreshed: ' . json_encode($renamed['display_name'] ?? null));
     if ((int) $renamed['id'] === (int) $google['id']) {
         ok('provider-side email change keeps the SAME account (identity wins)');
     } else {
@@ -71,7 +83,7 @@ try {
     }
 
     // -- rule 2 matches case/space-insensitively ------------------------------
-    $shouty = $repo->findOrCreateUser('microsoft', "ms-$marker", '  ' . strtoupper($email) . ' ', true);
+    $shouty = $repo->findOrCreateUser('microsoft', "ms-$marker", '  ' . strtoupper($email) . ' ', true, null);
     if ((int) $shouty['id'] === (int) $google['id']) {
         ok('address matching ignores case and surrounding space');
     } else {
@@ -79,7 +91,7 @@ try {
     }
 
     // -- a different address from an unknown identity is a different person ---
-    $other = $repo->findOrCreateUser('google', "google2-$marker", "other-$email", true);
+    $other = $repo->findOrCreateUser('google', "google2-$marker", "other-$email", true, null);
     if ((int) $other['id'] !== (int) $google['id']) {
         ok('a different address is a different account');
     } else {
@@ -94,7 +106,7 @@ try {
 
     // -- the client link travels with the account, whatever proves it ---------
     Capsule::table('mod_vpnhood_iap_users')->where('id', $google['id'])->update(['client_id' => 424242]);
-    $afterLink = $repo->findOrCreateUser('apple', "apple2-$marker", $email, true);
+    $afterLink = $repo->findOrCreateUser('apple', "apple2-$marker", $email, true, null);
     if ((int) ($afterLink['client_id'] ?? 0) === 424242) {
         ok('WHMCS client link survives signing in with another provider');
     } else {
