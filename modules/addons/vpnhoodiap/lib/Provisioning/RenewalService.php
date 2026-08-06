@@ -81,8 +81,41 @@ class RenewalService
                 'nextduedate' => date('Y-m-d', $record->expiryTimeUnix),
             ]);
         }
+        $this->recordRenewalRevenue($clientId, $serviceId, $transactionId, $purchaseKey, $record);
         $this->updateRow((int) $row->id, $record, 'provisioned');
         return 'resynced';
+    }
+
+    /**
+     * Book the money for a renewal WHMCS never invoiced. Without this the store
+     * collected a payment that appears nowhere in WHMCS reporting — and the
+     * replay guard above keys on the store order id living in tblaccounts, so
+     * the transaction is also what makes a repeated notification a no-op.
+     *
+     * Best-effort by design: the customer is already entitled (the store charged
+     * them and the due date is synced), so a bookkeeping failure must never undo
+     * that — it is logged for the admin instead.
+     */
+    private function recordRenewalRevenue(int $clientId, int $serviceId, string $transactionId,
+        string $purchaseKey, PurchaseRecord $record): void
+    {
+        // the store's own gross when it reports one, else what WHMCS bills for this service
+        $amount = $record->amount !== null && $record->amount !== ''
+            ? (float) $record->amount
+            : (float) Capsule::table('tblhosting')->where('id', $serviceId)->value('amount');
+
+        $result = localAPI('AddTransaction', [
+            'userid'        => $clientId,
+            'paymentmethod' => OrderProvisioner::GATEWAY,
+            'transid'       => $transactionId !== '' ? $transactionId : $purchaseKey . '-' . time(),
+            'amountin'      => $amount,
+            'date'          => date('Y-m-d'),
+            'description'   => "App store renewal for service #$serviceId",
+        ]);
+        if (($result['result'] ?? '') !== 'success') {
+            $this->repo->log(null, 'renew.transaction', '', 0,
+                ['serviceid' => $serviceId, 'transid' => $transactionId], $result);
+        }
     }
 
     /** The newest Unpaid invoice carrying this service's renewal line. */

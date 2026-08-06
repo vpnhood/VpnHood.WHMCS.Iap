@@ -48,6 +48,7 @@ add_hook('DailyCronJob', 1, function () {
     require_once $moduleDir . '/lib/Provisioning/OrderProvisioner.php';
     require_once $moduleDir . '/lib/Provisioning/DeliveryReader.php';
     require_once $moduleDir . '/lib/Provisioning/EntitlementService.php';
+    require_once $moduleDir . '/lib/Provisioning/RefundService.php';
     require_once $moduleDir . '/lib/Provisioning/RenewalService.php';
 
     if (!\WHMCS\Module\Addon\VpnHoodIap\IapRepository::isModuleActive()) {
@@ -111,9 +112,10 @@ add_hook('DailyCronJob', 1, function () {
                 if ($row->service_id !== null) {
                     localAPI('ModuleTerminate', ['serviceid' => (int) $row->service_id]);
                 }
+                $refund = (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo))->refund((array) $row);
                 Capsule::table('mod_vpnhood_iap_purchases')->where('id', $row->id)
                     ->update(['status' => 'refunded', 'updated_at' => date('Y-m-d H:i:s')]);
-                localAPI('LogActivity', ['description' => "vpnhoodiap: purchase {$voidedKey} voided at the store — service terminated."]);
+                localAPI('LogActivity', ['description' => "vpnhoodiap: purchase {$voidedKey} voided at the store — service terminated, refund $refund."]);
             }
         } catch (\Throwable $e) {
             $repo->log(null, 'cron.voided', '', 0, ['app' => $app['id']], $e->getMessage());

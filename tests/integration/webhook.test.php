@@ -3,8 +3,8 @@
  * webhook.test.php — NotificationController dispatch inside the real dev
  * WHMCS with a fake adapter (auth already covered by unit tests): inbox
  * dedup on (store, message_id), tenant/package guard, TEST handling,
- * CANCELED lifecycle transition, and the never-5xx guarantee when
- * processing throws.
+ * CANCELED lifecycle transition, REVOKED booking the money back, and the
+ * never-5xx guarantee when processing throws.
  */
 
 require __DIR__ . '/lib/common.php';
@@ -20,6 +20,7 @@ requireIapLib(
     'Provisioning/OrderProvisioner.php',
     'Provisioning/DeliveryReader.php',
     'Provisioning/EntitlementService.php',
+    'Provisioning/RefundService.php',
     'Provisioning/RenewalService.php',
     'Controllers/NotificationController.php'
 );
@@ -144,6 +145,54 @@ try {
         ? ok('CANCELED flips auto-renew off and keeps the entitlement row')
         : bad('canceled dispatch: ' . json_encode([$result, $row]));
 
+    // ---- REVOKED → terminate + the recorded charge goes back (idempotent)
+    $buyer = clientByEmail($db, BUYER_EMAIL);
+    if (!$buyer) {
+        bad('fixture missing: ' . BUYER_EMAIL . ' — cannot exercise the refund path');
+    } else {
+        $chargeId = strtoupper($marker) . '-CHARGE';
+        // the charge as OrderProvisioner would have recorded it
+        $charge = localAPI('AddTransaction', [
+            'userid' => (int) $buyer['id'], 'paymentmethod' => 'vpnhoodiappay',
+            'transid' => $chargeId, 'amountin' => '7.90', 'date' => date('Y-m-d'),
+            'description' => 'vpnhoodiap webhook test charge',
+        ]);
+        ($charge['result'] ?? '') === 'success'
+            ? ok('test charge recorded')
+            : bad('test charge failed: ' . json_encode($charge));
+        Capsule::table('mod_vpnhood_iap_purchases')->where('purchase_key', "$marker-tok")
+            ->update(['store_order_id' => $chargeId, 'client_id' => (int) $buyer['id']]);
+
+        $adapter->next = notif($marker, StoreNotification::REVOKED, "$marker-m5", "$marker-tok", $package);
+        $result = $controller->handle($app, $adapter, [], '{}', []);
+        $row = one($db, 'SELECT status FROM mod_vpnhood_iap_purchases WHERE purchase_key=?', ["$marker-tok"]);
+        ($result['status'] === 200 && $row['status'] === 'refunded'
+            && $result['body']['data']['handled'] === 'revoked-refunded')
+            ? ok('REVOKED marks the purchase refunded and books the refund')
+            : bad('revoked dispatch: ' . json_encode([$result, $row]));
+
+        $refund = one($db, 'SELECT amountout FROM tblaccounts WHERE transid=?', ["$chargeId-refund"]);
+        ($refund !== null && abs((float) $refund['amountout'] - 7.90) < 0.001)
+            ? ok('refund transaction carries the charged amount back out')
+            : bad('refund transaction: ' . json_encode($refund));
+
+        // replayed revocation must not double-book
+        $adapter->next = notif($marker, StoreNotification::REVOKED, "$marker-m6", "$marker-tok", $package);
+        $result = $controller->handle($app, $adapter, [], '{}', []);
+        $count = (int) one($db, 'SELECT COUNT(*) c FROM tblaccounts WHERE transid=?', ["$chargeId-refund"])['c'];
+        ($result['body']['data']['handled'] === 'revoked-skipped-already' && $count === 1)
+            ? ok('replayed revocation books nothing twice')
+            : bad('refund replay: ' . json_encode([$result['body']['data'] ?? null, $count]));
+
+        // the trailing EXPIRED Google sends after a revocation must not relabel it
+        $adapter->next = notif($marker, StoreNotification::EXPIRED, "$marker-m7", "$marker-tok", $package);
+        $controller->handle($app, $adapter, [], '{}', []);
+        $row = one($db, 'SELECT status FROM mod_vpnhood_iap_purchases WHERE purchase_key=?', ["$marker-tok"]);
+        $row['status'] === 'refunded'
+            ? ok('EXPIRED after a revocation keeps the purchase refunded')
+            : bad("trailing EXPIRED relabeled the purchase: {$row['status']}");
+    }
+
     // ---- processing failure (refresh throws) → recorded failed, still 200
     $adapter->next = notif($marker, StoreNotification::PURCHASED, "$marker-m4", "$marker-tok2", $package);
     $result = $controller->handle($app, $adapter, [], '{}', []);
@@ -155,6 +204,7 @@ try {
     Capsule::table('mod_vpnhood_iap_events')->where('message_id', 'like', "$marker-%")->delete();
     Capsule::table('mod_vpnhood_iap_purchases')->where('app_id', $appId)->delete();
     Capsule::table('mod_vpnhood_iap_apps')->where('id', $appId)->delete();
+    Capsule::table('tblaccounts')->where('transid', 'like', strtoupper($marker) . '-CHARGE%')->delete();
     ok('fixtures cleaned up');
 }
 
