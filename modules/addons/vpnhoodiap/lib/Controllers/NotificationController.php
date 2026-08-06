@@ -5,6 +5,7 @@ namespace WHMCS\Module\Addon\VpnHoodIap\Controllers;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\VpnHoodIap\IapRepository;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\EntitlementService;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\RenewalService;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\StoreNotification;
@@ -142,6 +143,9 @@ class NotificationController
         $serviceId = $this->serviceIdFor($notification);
         if ($serviceId !== null) {
             localAPI('ModuleTerminate', ['serviceid' => $serviceId]);
+            // the subscription is gone at the store — its pending renewal
+            // invoice can never be paid and must not linger as clutter
+            (new OrderProvisioner($this->repo))->cancelUnpaidRenewalInvoices($serviceId);
         }
         $this->updatePurchase($notification, ['status' => $status], $downgradeRefunded ? [] : ['refunded']);
     }

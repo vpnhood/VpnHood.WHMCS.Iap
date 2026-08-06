@@ -698,11 +698,16 @@ function vpnhoodiap_renderPurchases(IapRepository $repo): void
 {
     $rows = $repo->recentPurchases(50);
     echo '<table class="table table-condensed table-striped"><thead><tr>'
-        . '<th>ID</th><th>Store</th><th>Order Id</th><th>Status</th><th>Client</th><th>Service</th><th>Expiry</th><th>Updated</th></tr></thead><tbody>';
+        . '<th>ID</th><th>Store</th><th>Order Id</th><th>Status</th><th>Client</th><th>Service</th>'
+        . '<th title="what the buyer actually paid at the store — informational, never booked">Store Paid</th>'
+        . '<th>Expiry</th><th>Updated</th></tr></thead><tbody>';
     if (empty($rows)) {
-        echo '<tr><td colspan="8" class="text-center text-muted">No purchases recorded yet.</td></tr>';
+        echo '<tr><td colspan="9" class="text-center text-muted">No purchases recorded yet.</td></tr>';
     }
     foreach ($rows as $r) {
+        $paid = $r['store_amount'] !== null && $r['store_amount'] !== ''
+            ? htmlspecialchars($r['store_amount'] . ' ' . (string) $r['store_currency'])
+            : '—';
         echo '<tr>'
             . '<td>' . (int) $r['id'] . '</td>'
             . '<td>' . htmlspecialchars($r['store']) . '</td>'
@@ -710,6 +715,7 @@ function vpnhoodiap_renderPurchases(IapRepository $repo): void
             . '<td>' . htmlspecialchars($r['status']) . '</td>'
             . '<td>' . ($r['client_id'] ? '<a href="clientssummary.php?userid=' . (int) $r['client_id'] . '">#' . (int) $r['client_id'] . '</a>' : '—') . '</td>'
             . '<td>' . ($r['service_id'] ? '#' . (int) $r['service_id'] : '—') . '</td>'
+            . '<td>' . $paid . '</td>'
             . '<td>' . htmlspecialchars((string) $r['expiry_time']) . '</td>'
             . '<td>' . htmlspecialchars((string) $r['updated_at']) . '</td>'
             . '</tr>';

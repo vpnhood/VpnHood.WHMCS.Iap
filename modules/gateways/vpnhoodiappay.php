@@ -22,7 +22,7 @@ if (!defined("WHMCS")) {
 function vpnhoodiappay_MetaData(): array
 {
     return [
-        'DisplayName'                 => 'App Store Purchase (VpnHood IAP)',
+        'DisplayName'                 => 'In-App Purchase (billed by the app store)',
         'APIVersion'                  => '1.1',
         'DisableLocalCreditCardInput' => true,
         'TokenisedStorage'            => false,
@@ -34,7 +34,7 @@ function vpnhoodiappay_config(): array
     return [
         'FriendlyName' => [
             'Type'  => 'System',
-            'Value' => 'App Store Purchase (VpnHood IAP)',
+            'Value' => 'In-App Purchase (billed by the app store)',
         ],
         'Description' => [
             'Type'  => 'System',

@@ -186,13 +186,53 @@ class GooglePlayAdapter implements StoreAdapterInterface
     {
         $client = ($this->apiClientFactory)($app);
         try {
-            return $this->mapSubscription($purchaseToken, $client->getSubscription($purchaseToken));
+            $record = $this->mapSubscription($purchaseToken, $client->getSubscription($purchaseToken));
         } catch (\RuntimeException $subscriptionError) {
             if ($productId === '') {
                 throw $subscriptionError;
             }
-            return $this->mapProduct($purchaseToken, $productId, $client->getProduct($productId, $purchaseToken));
+            $record = $this->mapProduct($purchaseToken, $productId, $client->getProduct($productId, $purchaseToken));
         }
+        return $this->withOrderAmount($client, $record);
+    }
+
+    /**
+     * subscriptionsv2 carries no price, so the real charge (regional price and
+     * currency) comes from orders.get on the current order id. Informational
+     * only — a failure (missing financial permission, propagation lag on a
+     * fresh order) must never fail verification, so the record simply stays
+     * price-less for this cycle.
+     */
+    private function withOrderAmount(GooglePlayApiClient $client, PurchaseRecord $record): PurchaseRecord
+    {
+        if ($record->amount !== null || $record->storeOrderId === null) {
+            return $record;
+        }
+        try {
+            $paid = $client->getOrderAmount($record->storeOrderId);
+        } catch (\Throwable $e) {
+            return $record;
+        }
+        if ($paid === null) {
+            return $record;
+        }
+        return new PurchaseRecord(
+            store: $record->store,
+            purchaseKey: $record->purchaseKey,
+            storeOrderId: $record->storeOrderId,
+            storeProductId: $record->storeProductId,
+            basePlanId: $record->basePlanId,
+            obfuscatedUid: $record->obfuscatedUid,
+            state: $record->state,
+            expiryTimeUnix: $record->expiryTimeUnix,
+            autoRenewing: $record->autoRenewing,
+            acknowledged: $record->acknowledged,
+            linkedPurchaseKey: $record->linkedPurchaseKey,
+            isTest: $record->isTest,
+            amount: $paid['amount'],
+            currency: $paid['currency'],
+            raw: $record->raw,
+        );
     }
 
     private function mapSubscription(string $purchaseToken, array $subscription): PurchaseRecord

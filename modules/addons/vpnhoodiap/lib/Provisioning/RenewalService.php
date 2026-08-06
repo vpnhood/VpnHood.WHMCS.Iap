@@ -46,6 +46,19 @@ class RenewalService
             return 'skipped-not-entitled';
         }
 
+        // A renewal for a service WHMCS already terminated (late or out-of-order
+        // delivery after an expiry): the customer is entitled at the store but the
+        // service and its token are gone. Never resurrect a terminated service —
+        // provision anew through the one tested path. redeem() is idempotent and
+        // re-links the ledger row to the fresh service.
+        $serviceStatus = (string) Capsule::table('tblhosting')->where('id', $serviceId)->value('domainstatus');
+        if (!in_array($serviceStatus, ['Active', 'Suspended'], true)) {
+            $result = (new EntitlementService($this->repo))->redeem($app, $record, null, $adapter);
+            return ($result['state'] ?? '') === 'provisioned'
+                ? 'reprovisioned'
+                : 'reprovision-' . ($result['state'] ?? 'failed');
+        }
+
         // dedup: if this store order id already paid an invoice, this event is a replay
         $transactionId = $record->storeOrderId ?? '';
         if ($transactionId !== '' && Capsule::table('tblaccounts')->where('transid', $transactionId)->exists()) {
@@ -68,6 +81,8 @@ class RenewalService
                 'noemail'   => true,
             ]);
             if (($payment['result'] ?? '') === 'success') {
+                (new OrderProvisioner($this->repo))
+                    ->annotateInvoice($invoiceId, $adapter->storeId(), $record->amount, $record->currency);
                 $this->updateRow((int) $row->id, $record, 'provisioned');
                 return 'renewed';
             }
@@ -99,10 +114,11 @@ class RenewalService
     private function recordRenewalRevenue(int $clientId, int $serviceId, string $transactionId,
         string $purchaseKey, PurchaseRecord $record): void
     {
-        // the store's own gross when it reports one, else what WHMCS bills for this service
-        $amount = $record->amount !== null && $record->amount !== ''
-            ? (float) $record->amount
-            : (float) Capsule::table('tblhosting')->where('id', $serviceId)->value('amount');
+        // Always the WHMCS book price: accounting stays in the client's own
+        // currency. The store's real charge (possibly a different currency) is
+        // informational — it lives on the purchase row and in invoice text,
+        // never in the money tables.
+        $amount = (float) Capsule::table('tblhosting')->where('id', $serviceId)->value('amount');
 
         $result = localAPI('AddTransaction', [
             'userid'        => $clientId,
@@ -133,12 +149,18 @@ class RenewalService
 
     private function updateRow(int $rowId, PurchaseRecord $record, string $status): void
     {
-        Capsule::table('mod_vpnhood_iap_purchases')->where('id', $rowId)->update([
+        $changes = [
             'status'         => $status,
             'store_order_id' => $record->storeOrderId,
             'expiry_time'    => $record->expiryTimeUnix !== null ? date('Y-m-d H:i:s', $record->expiryTimeUnix) : null,
             'auto_renewing'  => $record->autoRenewing ? 1 : 0,
             'updated_at'     => date('Y-m-d H:i:s'),
-        ]);
+        ];
+        // informational: the real charge of the latest cycle; a miss keeps the last known
+        if ($record->amount !== null) {
+            $changes['store_amount'] = $record->amount;
+            $changes['store_currency'] = $record->currency;
+        }
+        Capsule::table('mod_vpnhood_iap_purchases')->where('id', $rowId)->update($changes);
     }
 }

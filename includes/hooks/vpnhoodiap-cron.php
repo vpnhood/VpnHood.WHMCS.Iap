@@ -81,6 +81,12 @@ add_hook('DailyCronJob', 1, function () {
                     'expiry_time'   => $record->expiryTimeUnix !== null ? date('Y-m-d H:i:s', $record->expiryTimeUnix) : null,
                     'updated_at'    => date('Y-m-d H:i:s'),
                 ];
+                // informational: the real store charge (also back-fills rows from
+                // before this was captured); a fetch miss keeps the last known
+                if ($record->amount !== null) {
+                    $changes['store_amount'] = $record->amount;
+                    $changes['store_currency'] = $record->currency;
+                }
                 // expired on the store but still provisioned here → terminate (with grace)
                 $graceDays = max(0, (int) $repo->setting('TerminateGraceDays'));
                 if (
@@ -91,6 +97,8 @@ add_hook('DailyCronJob', 1, function () {
                 ) {
                     if ($purchase['service_id'] !== null) {
                         localAPI('ModuleTerminate', ['serviceid' => (int) $purchase['service_id']]);
+                        (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner($repo))
+                            ->cancelUnpaidRenewalInvoices((int) $purchase['service_id']);
                     }
                     $changes['status'] = $record->state === \WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\PurchaseRecord::STATE_REVOKED
                         ? 'refunded' : 'expired';
@@ -111,6 +119,8 @@ add_hook('DailyCronJob', 1, function () {
                 }
                 if ($row->service_id !== null) {
                     localAPI('ModuleTerminate', ['serviceid' => (int) $row->service_id]);
+                    (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner($repo))
+                        ->cancelUnpaidRenewalInvoices((int) $row->service_id);
                 }
                 $refund = (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo))->refund((array) $row);
                 Capsule::table('mod_vpnhood_iap_purchases')->where('id', $row->id)
