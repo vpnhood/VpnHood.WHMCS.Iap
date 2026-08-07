@@ -197,7 +197,8 @@ To browse the API instead, open any Swagger UI against
 ## The client
 
 The reference implementation is **`VpnHood.AppLib.Portal`** in the [VpnHood] repo —
-`PortalApiClient` (transport, problem+json → `PortalApiException.Code`),
+`PortalApiClient` (the typed stub; problem+json surfaces as the toolkit's
+standard `ApiException`, machine code in `Data["Code"]`),
 `PortalAuthenticationProvider` (sessions), `PortalAccountProvider` (account and
 entitlements) and `PortalOrderProcessor` (purchases). Changing an endpoint's contract
 means changing that client, this page and `openapi.json` in the same change set.
