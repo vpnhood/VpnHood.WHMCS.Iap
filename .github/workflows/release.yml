@@ -267,7 +267,7 @@ jobs:
 
           for f in \
             modules/addons/vpnhoodiap/vpnhoodiap.php \
-            modules/addons/vpnhoodiap/api.php \
+            modules/addons/vpnhoodiap/api.php \n            modules/addons/vpnhoodiap/openapi.json \
             modules/addons/vpnhoodiap/webhook.php \
             modules/addons/vpnhoodiap/lib/IapRepository.php \
             modules/addons/vpnhoodiap/lib/Jwt.php \

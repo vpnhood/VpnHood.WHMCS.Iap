@@ -32,8 +32,8 @@ final class StoreAdapterRegistry
         return match ($store) {
             'googleplay' => new GooglePlayAdapter(),
             'appstore'   => new AppStoreAdapter(),
-            'microsoft'  => throw new ApiException("Store '$store' is not supported yet.", 501),
-            default      => throw new ApiException("Unknown store: $store", 400),
+            'microsoft'  => throw new ApiException("Store '$store' is not supported yet.", 501, 'store_not_supported'),
+            default      => throw new ApiException("Unknown store: $store", 400, 'unknown_store'),
         };
     }
 }

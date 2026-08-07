@@ -51,7 +51,7 @@ class OrderProvisioner
         $invoiceId = (int) ($add['invoiceid'] ?? 0);
         $serviceId = (int) (explode(',', (string) ($add['productids'] ?? ''))[0] ?? 0);
         if ($orderId <= 0 || $serviceId <= 0) {
-            throw new ApiException('Order creation failed.', 502);
+            throw new ApiException('Order creation failed.', 502, 'provisioning_failed');
         }
 
         try {
@@ -77,7 +77,7 @@ class OrderProvisioner
             ]);
         } catch (\Throwable $e) {
             $this->safeDeleteOrder($orderId);
-            throw $e instanceof ApiException ? $e : new ApiException('Provisioning failed.', 502);
+            throw $e instanceof ApiException ? $e : new ApiException('Provisioning failed.', 502, 'provisioning_failed');
         }
 
         return ['orderId' => $orderId, 'invoiceId' => $invoiceId, 'serviceId' => $serviceId];

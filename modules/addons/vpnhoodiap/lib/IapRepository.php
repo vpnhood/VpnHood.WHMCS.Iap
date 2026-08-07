@@ -171,10 +171,20 @@ class IapRepository
     /** Public webhook URL for an app row (secret path token included). */
     public function webhookUrl(array $app): string
     {
-        $systemUrl = rtrim((string) Capsule::table('tblconfiguration')
-            ->where('setting', 'SystemURL')->value('value'), '/');
-        return $systemUrl . '/modules/addons/vpnhoodiap/webhook.php?store='
+        return $this->systemUrl() . '/modules/addons/vpnhoodiap/webhook.php?store='
             . rawurlencode((string) $app['store']) . '&t=' . rawurlencode((string) $app['webhook_token']);
+    }
+
+    /** Base URL of the Portal API — what an app is configured to talk to. */
+    public function portalApiUrl(): string
+    {
+        return $this->systemUrl() . '/modules/addons/vpnhoodiap/api.php';
+    }
+
+    private function systemUrl(): string
+    {
+        return rtrim((string) Capsule::table('tblconfiguration')
+            ->where('setting', 'SystemURL')->value('value'), '/');
     }
 
     // -- catalog ------------------------------------------------------------

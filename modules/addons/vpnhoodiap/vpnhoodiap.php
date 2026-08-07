@@ -581,6 +581,14 @@ function vpnhoodiap_output(array $vars): void
 function vpnhoodiap_renderApps(IapRepository $repo, string $modulelink, int $editId): void
 {
     $apps = $repo->allApps();
+
+    // the two URLs an integrator needs: where the app points, and where the store
+    // posts. The contract itself is served from the first one.
+    $apiUrl = $repo->portalApiUrl();
+    echo '<p class="text-muted" style="margin-bottom:12px">Portal API for your apps: '
+        . '<code>' . htmlspecialchars($apiUrl) . '</code> — '
+        . '<a href="' . htmlspecialchars($apiUrl) . '/openapi.json" target="_blank" rel="noopener">API document</a></p>';
+
     echo '<table class="table table-striped"><thead><tr>'
         . '<th>ID</th><th>Store</th><th>Package / Bundle</th><th>Status</th><th>Webhook URL</th><th></th></tr></thead><tbody>';
     if (empty($apps)) {
