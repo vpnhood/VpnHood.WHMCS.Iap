@@ -1,0 +1,583 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "VpnHood Portal API",
+    "version": "1.0",
+    "summary": "The API a VpnHood app uses to sign in, redeem an app-store purchase, and receive its access code.",
+    "description": "The Portal API is the contract between a VpnHood client app and whatever backend runs the customer's account. It is deliberately backend-neutral: it speaks of sessions, accounts, plans, purchases, entitlements and access codes, and never of the billing system behind them. Today it is implemented by the `vpnhoodiap` WHMCS addon; a different backend can implement the same document without any client change.\n\n**Flow.** The app signs in with an identity token from Google or Apple (`POST /auth/sessions`) and receives an opaque session token. It buys in the app store, then posts the store's proof (`POST /billing/purchases`); the portal re-validates that proof directly with the store, provisions the subscription, and returns the access code in the same response — there is no polling loop. Store webhooks drive renewals, cancellations and refunds afterwards, so `GET /account/entitlements` is always the current truth.\n\n**Trust.** Proofs and identity tokens are pointers, never evidence: every one is re-verified against the issuing store or identity provider on arrival. A purchase must carry the signed-in user's own attribution id (`obfuscatedAccountId` on Google, `appAccountToken` on Apple), so a stolen store token cannot be redeemed into another account.",
+    "license": {
+      "name": "LGPL-2.1-only",
+      "identifier": "LGPL-2.1-only"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://{host}/modules/addons/vpnhoodiap/api.php",
+      "description": "A WHMCS install running the vpnhoodiap addon. The resource path follows the script path (PHP PATH_INFO), so no rewrite rule is needed. Hosts that strip PATH_INFO accept the same routes as `?path=/account`.",
+      "variables": {
+        "host": {
+          "default": "whmcs.example.com",
+          "description": "The WHMCS hostname of the hub or of a white-label partner."
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "service",
+      "description": "Liveness and the machine-readable contract."
+    },
+    {
+      "name": "auth",
+      "description": "Sessions: sign in with an identity provider, sign out."
+    },
+    {
+      "name": "account",
+      "description": "The signed-in account and what it is entitled to."
+    },
+    {
+      "name": "billing",
+      "description": "Plans and store purchases."
+    }
+  ],
+  "paths": {
+    "/system/status": {
+      "get": {
+        "tags": ["service"],
+        "operationId": "getStatus",
+        "summary": "Service probe",
+        "description": "Proves the portal is installed, active and able to reach its database. Answers 404 while the addon is deactivated, which is how a client detects a portal that is not configured.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The portal is serving.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Status" },
+                "example": { "status": "ok", "api": "1.0", "time": "2026-08-06T23:18:15+00:00" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": ["service"],
+        "operationId": "getOpenApiDocument",
+        "summary": "This document",
+        "description": "The OpenAPI description of the portal as installed. Point Swagger UI or a client generator straight at it.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.1 document.",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/auth/sessions": {
+      "post": {
+        "tags": ["auth"],
+        "operationId": "createSession",
+        "summary": "Sign in",
+        "description": "Exchanges an identity provider's id token for a portal session token.\n\nThe id token is verified against the provider's published keys, and its audience must be one of the OAuth client ids registered for this app. The provider must state that the email is verified — the portal matches accounts by email, so an unproven mailbox is refused outright.\n\nIf a customer account with that email already exists and is verified, the session is linked to it. If one exists but has never verified its email, sign-in still succeeds with `state: \"email_unverified\"` and purchases park until verification: pre-registering someone else's address must not capture their purchases.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SignInRequest" },
+              "example": {
+                "provider": "google",
+                "idToken": "eyJhbGciOiJSUzI1NiIsImtpZCI6…",
+                "packageName": "com.vpnhood.connect.android"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Signed in; the session token is in the body.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Session" },
+                "example": {
+                  "accessToken": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+                  "expiresAt": "2026-09-05T23:18:15+00:00",
+                  "userId": "2a5ab102-2595-496f-9e15-67c81cd3424e",
+                  "account": { "email": "someone@example.com", "emailVerified": true },
+                  "state": "ok"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": {
+            "description": "The id token is missing, malformed, expired, or not issued to this app (`invalid_id_token`).",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          },
+          "403": {
+            "description": "The package name is not a registered app (`unknown_app`), or the provider has not verified the email (`provider_email_unverified`).",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/auth/sessions/current": {
+      "delete": {
+        "tags": ["auth"],
+        "operationId": "deleteCurrentSession",
+        "summary": "Sign out",
+        "description": "Revokes the presented session token server-side. Idempotent: an unknown or already revoked token also answers 204, so a client can always complete a local sign-out.",
+        "responses": {
+          "204": { "description": "The session is revoked." }
+        }
+      }
+    },
+    "/account": {
+      "get": {
+        "tags": ["account"],
+        "operationId": "getAccount",
+        "summary": "The signed-in account",
+        "responses": {
+          "200": {
+            "description": "The account behind the session.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AccountInfo" },
+                "example": {
+                  "userId": "2a5ab102-2595-496f-9e15-67c81cd3424e",
+                  "account": { "email": "someone@example.com", "emailVerified": true },
+                  "state": "ok"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/billing/plans": {
+      "get": {
+        "tags": ["billing"],
+        "operationId": "listPlans",
+        "summary": "Sellable plans for one app and store",
+        "description": "The portal is the source of truth for **what** may be sold; the store owns the price and the localisation. A store product that is not mapped in the portal catalog does not appear here and cannot be redeemed — an unmapped purchase parks instead of guessing at an entitlement.",
+        "parameters": [
+          {
+            "name": "store",
+            "in": "query",
+            "required": true,
+            "schema": { "$ref": "#/components/schemas/StoreId" }
+          },
+          {
+            "name": "packageName",
+            "in": "query",
+            "required": true,
+            "description": "The app's package name (Android) or bundle id (iOS).",
+            "schema": { "type": "string" },
+            "example": "com.vpnhood.connect.android"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The mapped, enabled plans.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PlanList" },
+                "example": {
+                  "items": [
+                    { "planId": "premium/monthly", "storeProductId": "premium", "basePlanId": "monthly" },
+                    { "planId": "premium/yearly", "storeProductId": "premium", "basePlanId": "yearly" }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/UnknownApp" }
+        }
+      }
+    },
+    "/billing/purchases": {
+      "post": {
+        "tags": ["billing"],
+        "operationId": "createPurchase",
+        "summary": "Redeem a store purchase",
+        "description": "Turns a completed app-store purchase into a provisioned subscription and returns its access code — one synchronous call.\n\nThe portal re-fetches the purchase from the store API (the posted proof is only a pointer), checks that it was attributed to the signed-in user, maps it to a plan, provisions, and only then acknowledges the purchase with the store. If anything fails the purchase is left unacknowledged on purpose: Google auto-refunds an unacknowledged subscription within a few days, so a customer is never charged for something that was never delivered.\n\n**Idempotent.** The store purchase key is the anchor; redeeming the same purchase again returns the same entitlement and never creates a second order. Retrying after a network failure is always safe.\n\n**202 means not yet.** `pending` — the store has not settled the payment (deferred or slow payment methods); retry shortly. `awaiting_email_verification` — an existing customer account holds this email and has not verified it; the purchase is recorded and resumes automatically once the customer verifies.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PurchaseRequest" },
+              "examples": {
+                "googlePlay": {
+                  "summary": "Google Play",
+                  "value": {
+                    "store": "googleplay",
+                    "packageName": "com.vpnhood.connect.android",
+                    "proof": { "purchaseToken": "kjhgfd…", "productId": "premium" }
+                  }
+                },
+                "appStore": {
+                  "summary": "Apple App Store (StoreKit 2 signed transaction)",
+                  "value": {
+                    "store": "appstore",
+                    "packageName": "com.vpnhood.connect",
+                    "proof": { "jws": "eyJhbGciOiJFUzI1NiIsIng1YyI6…" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Provisioned; the access code is in the body.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Entitlement" },
+                "example": {
+                  "state": "provisioned",
+                  "accessCode": "PREM-4H2K-9QX7",
+                  "expiresAt": "2026-09-06T10:12:00+00:00",
+                  "planId": "premium/monthly"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted but not deliverable yet — see `state`.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Entitlement" },
+                "example": { "state": "pending", "accessCode": null, "expiresAt": null, "planId": null }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request (`bad_request`), an unknown store (`unknown_store`), or a proof the store would not confirm (`purchase_invalid`).",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": {
+            "description": "Unregistered app (`unknown_app`), or the purchase is attributed to a different account (`purchase_account_mismatch`).",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          },
+          "409": {
+            "description": "The purchase carries no attribution the portal can resolve to an account (`purchase_unattributed`). It is recorded for an administrator; nothing was provisioned.",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          },
+          "410": {
+            "description": "The purchase is no longer active at the store — expired, cancelled or refunded (`purchase_inactive`).",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          },
+          "422": {
+            "description": "The store product is not mapped to a plan on this portal (`plan_not_available`). The purchase is parked and an administrator alerted; it is never guessed at.",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "501": {
+            "description": "The store is known but not implemented on this portal yet (`store_not_supported`).",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          },
+          "502": {
+            "description": "Provisioning failed downstream (`provisioning_failed`). Nothing is left half-created and the purchase is not acknowledged, so it is safe to retry.",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          },
+          "503": {
+            "description": "Another request is redeeming this same purchase (`purchase_in_progress`). Retry shortly.",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          }
+        }
+      }
+    },
+    "/account/entitlements": {
+      "get": {
+        "tags": ["account"],
+        "operationId": "listEntitlements",
+        "summary": "What the account currently holds",
+        "description": "The live entitlements of the signed-in account, newest first, expired ones omitted. This — not the purchase response — is the truth after a renewal, cancellation or refund, because store webhooks keep it current. An empty list means the account has nothing active.",
+        "responses": {
+          "200": {
+            "description": "The account's live entitlements.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EntitlementList" },
+                "example": {
+                  "items": [
+                    {
+                      "state": "provisioned",
+                      "accessCode": "PREM-4H2K-9QX7",
+                      "expiresAt": "2026-09-06T10:12:00+00:00"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The opaque session token from `POST /auth/sessions`, as `Authorization: Bearer <token>`. It is 64 hex characters, valid for 30 days, stored only as a hash, and revocable — deliberately not a JWT.\n\nThe same token is also accepted in an `X-Portal-Token` header, for proxies that strip `Authorization`."
+      },
+      "portalToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Portal-Token",
+        "description": "The session token, for proxies that strip `Authorization`."
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "The request is malformed or missing a required field (`bad_request`).",
+        "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+      },
+      "Unauthorized": {
+        "description": "No session token, or it is expired or revoked (`unauthorized`). Sign in again.",
+        "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+      },
+      "UnknownApp": {
+        "description": "The package name is not a registered app on this portal (`unknown_app`).",
+        "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+      },
+      "NotFound": {
+        "description": "No such resource — or the portal is not activated on this install (`not_found`).",
+        "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+      },
+      "RateLimited": {
+        "description": "Too many requests from this address (`rate_limited`).",
+        "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+      }
+    },
+    "schemas": {
+      "Status": {
+        "type": "object",
+        "required": ["status", "api", "time"],
+        "properties": {
+          "status": { "type": "string", "const": "ok" },
+          "api": { "type": "string", "description": "The contract version this portal serves. There is no version in the path: a breaking change ships as a new endpoint beside the old one, so an app that cannot be updated keeps working.", "example": "1.0" },
+          "time": { "type": "string", "format": "date-time", "description": "Server time (UTC), for clock-skew checks." }
+        }
+      },
+      "StoreId": {
+        "type": "string",
+        "description": "The app store a purchase or plan belongs to.",
+        "enum": ["googleplay", "appstore", "microsoft"],
+        "example": "googleplay"
+      },
+      "AccountState": {
+        "type": "string",
+        "description": "`ok` — the account is usable. `email_unverified` — a customer account with this email exists but has never verified it, so purchases park until it does.",
+        "enum": ["ok", "email_unverified"]
+      },
+      "Account": {
+        "type": "object",
+        "required": ["email", "emailVerified"],
+        "properties": {
+          "email": { "type": "string", "format": "email" },
+          "emailVerified": { "type": "boolean" }
+        }
+      },
+      "SignInRequest": {
+        "type": "object",
+        "required": ["provider", "idToken", "packageName"],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": ["google", "apple"],
+            "description": "The identity provider that issued the id token."
+          },
+          "idToken": {
+            "type": "string",
+            "description": "The provider's id token (Google `id_token`, Apple `identityToken`). Verified against the provider's keys; its audience must be one of the app's registered OAuth client ids."
+          },
+          "packageName": {
+            "type": "string",
+            "description": "The app's package name (Android) or bundle id (iOS). Selects which registered app — and therefore which credentials and catalog — the request belongs to."
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "required": ["accessToken", "expiresAt", "userId", "account", "state"],
+        "properties": {
+          "accessToken": { "type": "string", "description": "The session token. Send it as a bearer token on every other call." },
+          "expiresAt": { "type": "string", "format": "date-time" },
+          "userId": {
+            "type": "string",
+            "description": "The account's stable, non-enumerable id, carrying no personal data. The app passes it to the store as `obfuscatedAccountId` (Google) or `appAccountToken` (Apple) so a purchase can be tied back to its buyer."
+          },
+          "account": { "$ref": "#/components/schemas/Account" },
+          "state": { "$ref": "#/components/schemas/AccountState" }
+        }
+      },
+      "AccountInfo": {
+        "type": "object",
+        "required": ["userId", "account", "state"],
+        "properties": {
+          "userId": { "type": "string" },
+          "account": { "$ref": "#/components/schemas/Account" },
+          "state": { "$ref": "#/components/schemas/AccountState" }
+        }
+      },
+      "Plan": {
+        "type": "object",
+        "required": ["planId", "storeProductId", "basePlanId"],
+        "properties": {
+          "planId": {
+            "type": "string",
+            "description": "The portal's identifier for the plan: `storeProductId` or `storeProductId/basePlanId`.",
+            "example": "premium/monthly"
+          },
+          "storeProductId": { "type": "string", "description": "The product id as it exists in the store.", "example": "premium" },
+          "basePlanId": { "type": "string", "description": "The base plan / billing period within the store product; empty when the product has none.", "example": "monthly" }
+        }
+      },
+      "PlanList": {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/Plan" } }
+        }
+      },
+      "PurchaseRequest": {
+        "type": "object",
+        "required": ["store", "packageName", "proof"],
+        "properties": {
+          "store": { "$ref": "#/components/schemas/StoreId" },
+          "packageName": { "type": "string", "description": "The app's package name (Android) or bundle id (iOS)." },
+          "proof": {
+            "description": "What the store handed the app at purchase. It is a pointer, not evidence: the portal always re-fetches the purchase from the store API before acting on it.",
+            "oneOf": [
+              { "$ref": "#/components/schemas/GooglePlayProof" },
+              { "$ref": "#/components/schemas/AppStoreProof" }
+            ]
+          }
+        }
+      },
+      "GooglePlayProof": {
+        "type": "object",
+        "title": "Google Play proof",
+        "required": ["purchaseToken"],
+        "properties": {
+          "purchaseToken": { "type": "string", "description": "The `purchaseToken` from Play Billing." },
+          "productId": { "type": "string", "description": "The purchased product id, when the client knows it." }
+        }
+      },
+      "AppStoreProof": {
+        "type": "object",
+        "title": "App Store proof",
+        "description": "Either the StoreKit 2 signed transaction (preferred) or a bare transaction id.",
+        "properties": {
+          "jws": { "type": "string", "description": "The StoreKit 2 `jwsRepresentation` of the transaction." },
+          "transactionId": { "type": "string", "description": "The original transaction id, when no signed transaction is available." }
+        },
+        "anyOf": [
+          { "required": ["jws"] },
+          { "required": ["transactionId"] }
+        ]
+      },
+      "EntitlementState": {
+        "type": "string",
+        "description": "`provisioned` — delivered, `accessCode` is present. `pending` — the store has not settled the payment yet. `awaiting_email_verification` — parked until the customer verifies the email that already exists on this portal.",
+        "enum": ["provisioned", "pending", "awaiting_email_verification"]
+      },
+      "Entitlement": {
+        "type": "object",
+        "required": ["state", "accessCode", "expiresAt"],
+        "properties": {
+          "state": { "$ref": "#/components/schemas/EntitlementState" },
+          "accessCode": {
+            "type": ["string", "null"],
+            "description": "The code the client redeems for premium access. Present only while `state` is `provisioned`."
+          },
+          "expiresAt": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "When the entitlement lapses unless the store renews it. Null when the plan does not expire."
+          },
+          "planId": {
+            "type": ["string", "null"],
+            "description": "The plan that was redeemed. Returned by `POST /billing/purchases`; omitted when listing entitlements."
+          }
+        }
+      },
+      "EntitlementList": {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/Entitlement" } }
+        }
+      },
+      "Problem": {
+        "type": "object",
+        "description": "RFC 9457 problem detail. `code` is the contract — branch on it; `detail` is prose for logs and support and may change.",
+        "required": ["type", "title", "status", "code", "detail"],
+        "properties": {
+          "type": { "type": "string", "format": "uri" },
+          "title": { "type": "string" },
+          "status": { "type": "integer" },
+          "code": { "$ref": "#/components/schemas/ErrorCode" },
+          "detail": { "type": "string" }
+        },
+        "example": {
+          "type": "https://docs.vpnhood.com/portal-api/errors/unauthorized",
+          "title": "Unauthorized",
+          "status": 401,
+          "code": "unauthorized",
+          "detail": "Unauthorized."
+        }
+      },
+      "ErrorCode": {
+        "type": "string",
+        "description": "Stable machine codes. Anything unrecognised should be treated as a generic failure of its HTTP status class.",
+        "enum": [
+          "bad_request",
+          "unauthorized",
+          "forbidden",
+          "not_found",
+          "method_not_allowed",
+          "conflict",
+          "gone",
+          "unprocessable",
+          "rate_limited",
+          "upstream_error",
+          "unavailable",
+          "internal_error",
+          "unsupported_provider",
+          "unknown_app",
+          "invalid_id_token",
+          "provider_email_unverified",
+          "unknown_store",
+          "store_not_supported",
+          "purchase_invalid",
+          "purchase_inactive",
+          "purchase_account_mismatch",
+          "purchase_unattributed",
+          "purchase_in_progress",
+          "plan_not_available",
+          "provisioning_failed"
+        ]
+      }
+    }
+  }
+}

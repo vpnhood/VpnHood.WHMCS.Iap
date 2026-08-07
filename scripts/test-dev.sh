@@ -74,16 +74,15 @@ run_integration_test() {
   fi
 }
 
-# One HTTP probe: POST $2 (or GET when $2 is GET) to $1, expect status $3 and
-# body containing $4.
+# One HTTP probe: $1 $2 with body $3 ('-' = none), expecting status $4 and a
+# body containing $5. Runs from the server itself, so it also proves the route
+# survives the real web server (PATH_INFO in particular).
 probe() {
-  local url="$1" payload="$2" want_code="$3" want_body="$4" label="$5"
-  local resp code body
-  if [ "$payload" = "GET" ]; then
-    resp="$("${SSH[@]}" "curl -sk -m 30 -w '\n%{http_code}' '$url'")"
-  else
-    resp="$("${SSH[@]}" "curl -sk -m 30 -w '\n%{http_code}' -X POST '$url' -H 'Content-Type: application/json' -d '$payload'")"
-  fi
+  local method="$1" url="$2" payload="$3" want_code="$4" want_body="$5" label="$6"
+  local resp code body curl_cmd
+  curl_cmd="curl -sk -m 30 -w '\n%{http_code}' -X $method '$url'"
+  [ "$payload" = "-" ] || curl_cmd="$curl_cmd -H 'Content-Type: application/json' -d '$payload'"
+  resp="$("${SSH[@]}" "$curl_cmd")"
   code="$(printf '%s' "$resp" | tail -n1)"
   body="$(printf '%s' "$resp" | sed '$d')"
   if [ "$code" = "$want_code" ] && printf '%s' "$body" | grep -q "$want_body"; then
@@ -94,16 +93,28 @@ probe() {
   fi
 }
 
+# The Portal API contract as a black box: routing, verbs, auth and the
+# problem+json error shape. Nothing here needs store credentials or a session.
 run_endpoints() {
   echo "== Endpoint checks (deployed api.php / webhook.php)"
   local api="$SITE_URL/modules/addons/vpnhoodiap/api.php"
   local hook="$SITE_URL/modules/addons/vpnhoodiap/webhook.php"
-  probe "$api" '{"action":"ping"}'    200 '"success":true'  'ping answers the success envelope'
-  probe "$api" '{"action":"nope"}'    400 '"success":false' 'unknown action is a clean 400'
-  probe "$api" 'not json'             400 '"success":false' 'non-JSON body is a clean 400'
-  probe "$api" 'GET'                  405 '"success":false' 'GET is rejected with 405'
-  probe "$hook?store=bogus&t=x"  '{}' 404 '"success":false' 'webhook: unknown store is 404'
-  probe "$hook?store=googleplay&t=wrong-token" '{}' 401 '"success":false' 'webhook: bad token is 401'
+
+  probe GET "$api/system/status" - 200 '"status":"ok"' 'status answers over PATH_INFO'
+  probe GET "$api?path=/system/status" - 200 '"status":"ok"' 'the ?path= form routes identically'
+  probe GET "$api/openapi.json" - 200 '"openapi"' 'the contract is served from the module'
+  probe GET "$api/nope" - 404 '"code":"not_found"' 'unknown resource is a clean 404'
+  probe GET "$api/account" - 401 '"code":"unauthorized"' 'a protected resource needs a session'
+  probe POST "$api/account" '{}' 405 '"code":"method_not_allowed"' 'wrong verb on a real resource is 405'
+  probe GET "$api/account/entitlements" - 401 '"code":"unauthorized"' 'entitlements need a session'
+  probe POST "$api/billing/purchases" '{}' 401 '"code":"unauthorized"' 'purchases need a session'
+  probe POST "$api/auth/sessions" '{}' 400 '"code":"bad_request"' 'sign-in without an id token is a clean 400'
+  probe POST "$api/auth/sessions" 'not json' 400 '"code":"bad_request"' 'non-JSON body is a clean 400'
+  probe POST "$api/auth/sessions" '{"provider":"nope","idToken":"x","packageName":"y"}' \
+    400 '"code":"unsupported_provider"' 'an unknown sign-in provider names itself'
+
+  probe POST "$hook?store=bogus&t=x" '{}' 404 '"success":false' 'webhook: unknown store is 404'
+  probe POST "$hook?store=googleplay&t=wrong-token" '{}' 401 '"success":false' 'webhook: bad token is 401'
 }
 
 TARGETS=("${@:-all}")

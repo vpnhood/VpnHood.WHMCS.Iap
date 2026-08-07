@@ -13,7 +13,7 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
 }
 
 /**
- * The single idempotent redemption core. Both purchase.verify (client path,
+ * The single idempotent redemption core. Both POST /billing/purchases (client path,
  * with a session user) and webhook PURCHASED (no session) converge here.
  *
  * Serialization: a MySQL advisory lock on (store, purchase_key) — NOT a DB
@@ -43,7 +43,7 @@ class EntitlementService
         // ---- binding guard (client path): the purchase must carry the session
         // user's own external uid, or someone is replaying a stolen token.
         if ($sessionUser !== null && $record->obfuscatedUid !== $sessionUser['external_uid']) {
-            throw new ApiException('This purchase belongs to a different account.', 403);
+            throw new ApiException('This purchase belongs to a different account.', 403, 'purchase_account_mismatch');
         }
 
         // ---- attribute the purchase to a module user
@@ -57,7 +57,7 @@ class EntitlementService
         $lockName = 'vpnhoodiap.' . $record->store . '.' . sha1($record->purchaseKey);
         $acquired = (int) (Capsule::select('SELECT GET_LOCK(?, 30) AS l', [$lockName])[0]->l ?? 0);
         if ($acquired !== 1) {
-            throw new ApiException('This purchase is being processed. Try again shortly.', 503);
+            throw new ApiException('This purchase is being processed. Try again shortly.', 503, 'purchase_in_progress');
         }
         try {
             return $this->redeemLocked($app, $record, $user, $adapter);
@@ -99,7 +99,7 @@ class EntitlementService
             }
             if (!$record->isEntitled()) {
                 $this->updateRow($row, ['status' => 'expired', 'last_error' => 'not entitled at redeem time: ' . $record->state], $record);
-                throw new ApiException('This purchase is no longer active.', 410);
+                throw new ApiException('This purchase is no longer active.', 410, 'purchase_inactive');
             }
 
             // ---- catalog gate: unmapped SKUs park loudly, never provision, never ack
@@ -110,14 +110,14 @@ class EntitlementService
                     'last_error' => "no catalog mapping for {$record->storeProductId}/{$record->basePlanId}",
                 ], $record);
                 $this->alertAdmins("vpnhoodiap: purchase for UNMAPPED SKU {$record->storeProductId}/{$record->basePlanId} parked (app #{$app['id']}).");
-                throw new ApiException('This product is not available yet. Please contact support.', 422);
+                throw new ApiException('This product is not available yet. Please contact support.', 422, 'plan_not_available');
             }
 
             // ---- account gate
             if ($user === null) {
                 $this->updateRow($row, ['status' => 'pending', 'last_error' => 'no signed-in user for this purchase uid'], $record);
                 $this->alertAdmins("vpnhoodiap: purchase {$record->purchaseKey} has no attributable user; parked.");
-                throw new ApiException('This purchase cannot be attributed to an account.', 409);
+                throw new ApiException('This purchase cannot be attributed to an account.', 409, 'purchase_unattributed');
             }
             $clientId = $user['client_id'] !== null ? (int) $user['client_id'] : null;
             $clients = new ClientProvisioner();
@@ -157,7 +157,7 @@ class EntitlementService
                     $orders->safeDeleteOrder($order['orderId']);
                 }
                 $this->updateRow($row, ['status' => 'failed', 'last_error' => substr($e->getMessage(), 0, 500)], $record);
-                throw $e instanceof ApiException ? $e : new ApiException('Provisioning failed.', 502);
+                throw $e instanceof ApiException ? $e : new ApiException('Provisioning failed.', 502, 'provisioning_failed');
             }
 
             // the real charge belongs to the purchase, not to each invoice: the

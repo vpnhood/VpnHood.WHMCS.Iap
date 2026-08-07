@@ -22,7 +22,7 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
  *
  * Apple has no acknowledge step, so finalize() is a no-op — the
  * never-ack-before-provision refund valve does not exist here; a wedged
- * provisioning surfaces through purchase.verify's error and the daily
+ * provisioning surfaces through POST /billing/purchases's error and the daily
  * reconciliation instead.
  */
 class AppStoreAdapter implements StoreAdapterInterface

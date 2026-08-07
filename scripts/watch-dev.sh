@@ -3,7 +3,7 @@
 # watch-dev.sh — live tail of the vpnhoodiap pipeline on the dev WHMCS, so a
 # purchase can be followed from the device in real time:
 #
-#   API calls      auth.token, purchase.verify, entitlement.get … (status + action)
+#   API calls      POST /auth/sessions, POST /billing/purchases … (status + route)
 #   Store events   RTDN/ASSN notifications as they are received and processed
 #   Purchases      the state machine, with the WHMCS order/service it produced
 #   Alerts         anything the module logged as an admin alert

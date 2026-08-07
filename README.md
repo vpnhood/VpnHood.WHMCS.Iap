@@ -21,9 +21,9 @@ sequenceDiagram
     participant WHMCS as WHMCS core
     participant Prov as Provisioning module
 
-    App->>Iap: auth.token (Google/Apple id token)
+    App->>Iap: POST /auth/sessions (Google/Apple id token)
     App->>Store: buy subscription
-    App->>Iap: purchase.verify {store, proof}
+    App->>Iap: POST /billing/purchases {store, proof}
     Iap->>Store: re-validate against the store API
     Iap->>WHMCS: AddOrder → AddInvoicePayment → AcceptOrder(autosetup)
     WHMCS->>Prov: provision (vpnhoodstore / vpnhoodpartner)
@@ -31,10 +31,10 @@ sequenceDiagram
     Store-->>Iap: webhooks: renew / cancel / refund / expire
 ```
 
-1. **Sign-in** — the app posts a Google/Apple id token to `api.php` (`auth.token`); the
+1. **Sign-in** — the app posts a Google/Apple id token to `POST /auth/sessions`; the
    module creates or links a WHMCS client by email (verified emails only) and returns an
    opaque session token.
-2. **Purchase** — the app buys in the store and posts its proof (`purchase.verify`); the
+2. **Purchase** — the app buys in the store and posts its proof (`POST /billing/purchases`); the
    module re-validates against the store API, then uses **only WHMCS-native machinery**:
    `AddOrder` on the mapped product → `AddInvoicePayment` (transid = store order id) →
    `AcceptOrder(autosetup)`. WHMCS itself runs whatever provisioning module the product
@@ -78,6 +78,8 @@ packages copy the module verbatim and never restamp it.
 
 ```text
 modules/addons/vpnhoodiap/          the addon: admin UI, tables, api.php, webhook.php
+modules/addons/vpnhoodiap/openapi.json  the Portal API contract, served at /openapi.json
+docs/PORTAL-API.md                  the Portal API, explained
 modules/gateways/vpnhoodiappay.php     bookkeeping gateway (store is the merchant of record)
 includes/hooks/vpnhoodiap-suppress-emails.php   aborts WHMCS invoice mail for store-paid invoices
 scripts/set-version.sh              propagate ./VERSION into the module

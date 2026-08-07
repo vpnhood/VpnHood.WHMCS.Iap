@@ -45,11 +45,13 @@ the partner package (VpnHood.WHMCS.Partner). Design doc: `<Vh root>/.user/billin
 ## Cross-repo contract
 
 - The client apps talk to `api.php` (the "VpnHood Portal API" client lives in the
-  VpnHood repo, `VpnHood.AppLib.Portal`). Changing an action's contract requires
-  updating that client in the same change set.
+  VpnHood repo, `VpnHood.AppLib.Portal`). The contract is `modules/addons/vpnhoodiap/
+  openapi.json` — served at `GET /openapi.json` — with `docs/PORTAL-API.md` as its
+  narrative. Changing an endpoint means changing api.php, openapi.json, PORTAL-API.md
+  and that client in the SAME change set.
 - `api.php` **implements** the Portal API contract; it does not own it. The wire
   vocabulary is portal-neutral (session, account, entitlement, plans, access code)
-  so a future non-WHMCS backend can implement the same actions without any client
+  so a future non-WHMCS backend can implement the same document without any client
   change. **No WHMCS concept on the wire, ever** — no WHMCS client/invoice/order/
   service ids, no WHMCS error strings; errors are neutral machine codes.
 - The hub and partner release pipelines bundle this repo's released files. Layout

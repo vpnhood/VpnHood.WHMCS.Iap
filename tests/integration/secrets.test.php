@@ -4,7 +4,7 @@
  * WHMCS EncryptPassword/DecryptPassword, byte-for-byte.
  *
  * Regression: WHMCS HTML-escapes localAPI output, so a JSON credential came back
- * with &quot; for every quote, json_decode failed, and every live purchase.verify
+ * with &quot; for every quote, json_decode failed, and every live purchase redemption
  * died with "stored Google credentials are not valid service-account JSON" —
  * found by the first real Google purchase (2026-08-06), invisible to the fake
  * adapter because only real store adapters decrypt credentials.
