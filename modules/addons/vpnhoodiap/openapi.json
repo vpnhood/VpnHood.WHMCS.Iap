@@ -89,7 +89,7 @@
         "tags": ["auth"],
         "operationId": "createSession",
         "summary": "Sign in",
-        "description": "Exchanges an identity provider's id token for a portal session token.\n\nThe id token is verified against the provider's published keys, and its audience must be one of the OAuth client ids registered for this app. The provider must state that the email is verified — the portal matches accounts by email, so an unproven mailbox is refused outright.\n\nIf a customer account with that email already exists and is verified, the session is linked to it. If one exists but has never verified its email, sign-in still succeeds with `state: \"email_unverified\"` and purchases park until verification: pre-registering someone else's address must not capture their purchases.",
+        "description": "Exchanges an identity provider's id token for a portal session token.\n\nThe id token is verified against the provider's published keys, and its audience must be one of the OAuth client ids registered for this app. The provider must state that the email is verified — the portal matches accounts by email, so an unproven mailbox is refused outright.\n\nIf a customer account with that email already exists, the session is linked to it; a new address stays unlinked until its first purchase creates the account. Nothing here waits on a second, portal-side confirmation of the address: the provider already proved it. Where a purchase attaches to a customer account that existed beforehand, the portal's own web area stays closed for that account until it confirms the address — a purely portal-side concern that this API neither reports nor gates on.",
         "security": [],
         "requestBody": {
           "required": true,
@@ -114,8 +114,7 @@
                   "accessToken": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
                   "expiresAt": "2026-09-05T23:18:15+00:00",
                   "userId": "2a5ab102-2595-496f-9e15-67c81cd3424e",
-                  "account": { "email": "someone@example.com", "emailVerified": true },
-                  "state": "ok"
+                  "account": { "email": "someone@example.com" }
                 }
               }
             }
@@ -157,8 +156,7 @@
                 "schema": { "$ref": "#/components/schemas/AccountInfo" },
                 "example": {
                   "userId": "2a5ab102-2595-496f-9e15-67c81cd3424e",
-                  "account": { "email": "someone@example.com", "emailVerified": true },
-                  "state": "ok"
+                  "account": { "email": "someone@example.com" }
                 }
               }
             }
@@ -215,7 +213,7 @@
         "tags": ["billing"],
         "operationId": "createPurchase",
         "summary": "Redeem a store purchase",
-        "description": "Turns a completed app-store purchase into a provisioned subscription and returns its access code — one synchronous call.\n\nThe portal re-fetches the purchase from the store API (the posted proof is only a pointer), checks that it was attributed to the signed-in user, maps it to a plan, provisions, and only then acknowledges the purchase with the store. If anything fails the purchase is left unacknowledged on purpose: Google auto-refunds an unacknowledged subscription within a few days, so a customer is never charged for something that was never delivered.\n\n**Idempotent.** The store purchase key is the anchor; redeeming the same purchase again returns the same entitlement and never creates a second order. Retrying after a network failure is always safe.\n\n**202 means not yet.** `pending` — the store has not settled the payment (deferred or slow payment methods); retry shortly. `awaiting_email_verification` — an existing customer account holds this email and has not verified it; the purchase is recorded and resumes automatically once the customer verifies.",
+        "description": "Turns a completed app-store purchase into a provisioned subscription and returns its access code — one synchronous call.\n\nThe portal re-fetches the purchase from the store API (the posted proof is only a pointer), checks that it was attributed to the signed-in user, maps it to a plan, provisions, and only then acknowledges the purchase with the store. If anything fails the purchase is left unacknowledged on purpose: Google auto-refunds an unacknowledged subscription within a few days, so a customer is never charged for something that was never delivered.\n\n**Idempotent.** The store purchase key is the anchor; redeeming the same purchase again returns the same entitlement and never creates a second order. Retrying after a network failure is always safe.\n\n**202 means not yet.** `pending` — the store has not settled the payment (deferred or slow payment methods); retry shortly.\n\n**One live subscription per account.** A second purchase while another is still active is refused with 409 rather than provisioned, and deliberately left unacknowledged so the store refunds it. An upgrade or resubscribe is not a second subscription — it carries the purchase it replaces and is provisioned normally.",
         "requestBody": {
           "required": true,
           "content": {
@@ -384,17 +382,11 @@
         "enum": ["googleplay", "appstore", "microsoft"],
         "example": "googleplay"
       },
-      "AccountState": {
-        "type": "string",
-        "description": "`ok` — the account is usable. `email_unverified` — a customer account with this email exists but has never verified it, so purchases park until it does.",
-        "enum": ["ok", "email_unverified"]
-      },
       "Account": {
         "type": "object",
-        "required": ["email", "emailVerified"],
+        "required": ["email"],
         "properties": {
-          "email": { "type": "string", "format": "email" },
-          "emailVerified": { "type": "boolean" }
+          "email": { "type": "string", "format": "email" }
         }
       },
       "SignInRequest": {
@@ -418,7 +410,7 @@
       },
       "Session": {
         "type": "object",
-        "required": ["accessToken", "expiresAt", "userId", "account", "state"],
+        "required": ["accessToken", "expiresAt", "userId", "account"],
         "properties": {
           "accessToken": { "type": "string", "description": "The session token. Send it as a bearer token on every other call." },
           "expiresAt": { "type": "string", "format": "date-time" },
@@ -426,17 +418,15 @@
             "type": "string",
             "description": "The account's stable, non-enumerable id, carrying no personal data. The app passes it to the store as `obfuscatedAccountId` (Google) or `appAccountToken` (Apple) so a purchase can be tied back to its buyer."
           },
-          "account": { "$ref": "#/components/schemas/Account" },
-          "state": { "$ref": "#/components/schemas/AccountState" }
+          "account": { "$ref": "#/components/schemas/Account" }
         }
       },
       "AccountInfo": {
         "type": "object",
-        "required": ["userId", "account", "state"],
+        "required": ["userId", "account"],
         "properties": {
           "userId": { "type": "string" },
-          "account": { "$ref": "#/components/schemas/Account" },
-          "state": { "$ref": "#/components/schemas/AccountState" }
+          "account": { "$ref": "#/components/schemas/Account" }
         }
       },
       "Plan": {
@@ -498,8 +488,8 @@
       },
       "EntitlementState": {
         "type": "string",
-        "description": "`provisioned` — delivered, `accessCode` is present. `pending` — the store has not settled the payment yet. `awaiting_email_verification` — parked until the customer verifies the email that already exists on this portal.",
-        "enum": ["provisioned", "pending", "awaiting_email_verification"]
+        "description": "`provisioned` — delivered, `accessCode` is present. `pending` — the store has not settled the payment yet.",
+        "enum": ["provisioned", "pending"]
       },
       "Entitlement": {
         "type": "object",

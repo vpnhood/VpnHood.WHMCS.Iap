@@ -207,6 +207,34 @@ class OrderProvisioner
         }
     }
 
+    /**
+     * Record which store sold this service, as a service property on the service
+     * itself. The provisioning module (vpnhoodstore on the hub, vpnhoodpartner on a
+     * partner install) reads it back to badge the client area and the admin service
+     * page, so a customer and an admin can both see that the money moved at Google
+     * Play rather than here — and that cancellations belong there too.
+     *
+     * Provisioning-agnostic on purpose: this writes a WHMCS service property through
+     * the service model, never a vpnhoodstore/vpnhoodpartner function, so the same
+     * call serves every provisioning module and the rule about not reaching into
+     * them still holds. The property name is the contract between the two sides.
+     *
+     * Best-effort: a badge is presentation, and must never fail a provisioned order.
+     */
+    public function tagServiceStore(int $serviceId, string $store): void
+    {
+        if ($serviceId <= 0) {
+            return;
+        }
+        try {
+            $service = \WHMCS\Service\Service::find($serviceId);
+            $service?->serviceProperties->save(['purchasedVia' => $store]);
+        } catch (\Throwable $e) {
+            $this->repo->log(null, 'service.storetag', '', 0, ['serviceid' => $serviceId, 'store' => $store],
+                $e->getMessage());
+        }
+    }
+
     /** Client id → its WHMCS currency code ('' when unresolvable — never matches). */
     public static function clientCurrencyCode(int $clientId): string
     {

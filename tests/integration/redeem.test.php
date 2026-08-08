@@ -190,19 +190,76 @@ try {
         ? ok('unmapped purchase parked with a loud error')
         : bad('unmapped purchase not parked correctly: ' . json_encode($parked));
 
-    // ---- 3. unverified existing email parks (verification is disabled on dev → fail-closed)
+    // ---- 3. unverified existing email provisions anyway, and gates the client area
     // The address IS the account, so this cannot be a second user row for the same
     // email any more: it is this user with its client link detached, which is exactly
     // the state a first purchase starts from when that address already exists in WHMCS.
+    // The purchase must NOT wait on WHMCS-side verification — the store already proved
+    // the buyer. What waits is the portal, via requires_email_verification.
     Capsule::table('mod_vpnhood_iap_users')->where('id', $linkedUserId)->update(['client_id' => null]);
+    // the buyer fixture's WHMCS user is verified (that is scenario B); force the
+    // unverified state this section is about, and put it back afterwards
+    $buyerVerifiedAt = Capsule::table('tblusers')->where('email', BUYER_EMAIL)->value('email_verified_at');
+    Capsule::table('tblusers')->where('email', BUYER_EMAIL)->update(['email_verified_at' => null]);
     $unverifiedUser = $repo->getUser($linkedUserId);
-    $parkRecord = makeRecord(['obfuscatedUid' => $unverifiedUser['external_uid'], 'purchaseKey' => "itest-park-$marker"]);
-    $parkResult = $service->redeem($app, $parkRecord, $unverifiedUser, new FakeStoreAdapter($parkRecord));
-    $parkResult['state'] === 'awaiting_email_verification'
-        ? ok('existing-but-unverified email parks the purchase')
-        : bad('unexpected park result: ' . json_encode($parkResult));
-    // re-link for the happy path below
-    Capsule::table('mod_vpnhood_iap_users')->where('id', $linkedUserId)->update(['client_id' => (int) $buyer['id']]);
+    $gateRecord = makeRecord(['obfuscatedUid' => $unverifiedUser['external_uid'], 'purchaseKey' => "itest-gate-$marker"]);
+    $gateResult = $service->redeem($app, $gateRecord, $unverifiedUser, new FakeStoreAdapter($gateRecord));
+    $gateResult['state'] === 'provisioned'
+        ? ok('existing-but-unverified email still provisions')
+        : bad('unexpected result for unverified existing email: ' . json_encode($gateResult));
+    (is_string($gateResult['accessCode']) && $gateResult['accessCode'] !== '')
+        ? ok('access code delivered despite the unconfirmed address')
+        : bad('no access code for unverified existing email: ' . json_encode($gateResult));
+    ((int) Capsule::table('mod_vpnhood_iap_users')->where('id', $linkedUserId)
+        ->value('requires_email_verification') === 1)
+        ? ok('client area gated until the address is confirmed')
+        : bad('requires_email_verification was not set');
+    $gateOrderId = (int) Capsule::table('mod_vpnhood_iap_purchases')
+        ->where('purchase_key', "itest-gate-$marker")->value('whmcs_order_id');
+    if ($gateOrderId > 0) {
+        $createdOrderIds[] = $gateOrderId;
+    }
+
+    // ---- 3b. one active store subscription per account: a SECOND live key is refused
+    // before provisioning, so it is never acknowledged and the store refunds it.
+    $secondRecord = makeRecord(['obfuscatedUid' => $unverifiedUser['external_uid'], 'purchaseKey' => "itest-second-$marker"]);
+    try {
+        $service->redeem($app, $secondRecord, $repo->getUser($linkedUserId), new FakeStoreAdapter($secondRecord));
+        bad('a second concurrent subscription was provisioned');
+    } catch (ApiException $e) {
+        $e->getHttpStatus() === 409
+            ? ok('second concurrent subscription refused with 409')
+            : bad('second subscription rejected with wrong status ' . $e->getHttpStatus());
+    }
+    $refused = one($db, "SELECT status FROM mod_vpnhood_iap_purchases WHERE purchase_key=?", ["itest-second-$marker"]);
+    ($refused && $refused['status'] === 'failed')
+        ? ok('refused purchase recorded as failed, left unacknowledged')
+        : bad('refused purchase not recorded correctly: ' . json_encode($refused));
+
+    // an upgrade/resubscribe REPLACES the live key rather than adding to it — allowed
+    $upgrade = makeRecord([
+        'obfuscatedUid'     => $unverifiedUser['external_uid'],
+        'purchaseKey'       => "itest-upgrade-$marker",
+        'linkedPurchaseKey' => "itest-gate-$marker",
+    ]);
+    $upgradeResult = $service->redeem($app, $upgrade, $repo->getUser($linkedUserId), new FakeStoreAdapter($upgrade));
+    $upgradeResult['state'] === 'provisioned'
+        ? ok('upgrade/resubscribe supersedes the live key instead of being blocked')
+        : bad('upgrade was blocked: ' . json_encode($upgradeResult));
+    $upgradeOrderId = (int) Capsule::table('mod_vpnhood_iap_purchases')
+        ->where('purchase_key', "itest-upgrade-$marker")->value('whmcs_order_id');
+    if ($upgradeOrderId > 0) {
+        $createdOrderIds[] = $upgradeOrderId;
+    }
+
+    // retire both live keys so the happy path below is this account's only subscription
+    Capsule::table('mod_vpnhood_iap_purchases')
+        ->whereIn('purchase_key', ["itest-gate-$marker", "itest-upgrade-$marker"])
+        ->update(['status' => 'canceled']);
+    // re-link and restore the fixture's verified state for the happy path below
+    Capsule::table('tblusers')->where('email', BUYER_EMAIL)->update(['email_verified_at' => $buyerVerifiedAt]);
+    Capsule::table('mod_vpnhood_iap_users')->where('id', $linkedUserId)
+        ->update(['client_id' => (int) $buyer['id'], 'requires_email_verification' => 0]);
 
     // ---- 4. happy path: pre-linked user, mapped SKU → real provisioning
     // carries the store's real charge — must land on the row + the invoice text

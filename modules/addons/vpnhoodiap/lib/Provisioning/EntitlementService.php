@@ -119,19 +119,57 @@ class EntitlementService
                 $this->alertAdmins("vpnhoodiap: purchase {$record->purchaseKey} has no attributable user; parked.");
                 throw new ApiException('This purchase cannot be attributed to an account.', 409, 'purchase_unattributed');
             }
+            // ---- one active store subscription per account
+            //
+            // The app never lets a premium user reach checkout, so a second live
+            // purchase key means something anomalous. Refuse it BEFORE provisioning:
+            // the adapter's finalize never runs, the purchase stays unacknowledged,
+            // and the store auto-refunds it — the buyer is made whole without us
+            // holding money for a subscription they cannot use.
+            //
+            // Renewals never arrive here (same key → the idempotent replay above
+            // returns first), and an upgrade/resubscribe carries the key it
+            // replaces, so a replacement is allowed through rather than blocked.
+            $liveKeys = Capsule::table('mod_vpnhood_iap_purchases')
+                ->where('user_id', (int) $user['id'])
+                ->where('status', 'provisioned')
+                ->where('purchase_key', '!=', $record->purchaseKey)
+                ->where(function ($query) {
+                    $query->whereNull('expiry_time')->orWhere('expiry_time', '>', date('Y-m-d H:i:s'));
+                })
+                ->pluck('purchase_key')->all();
+            $supersedes = $record->linkedPurchaseKey !== null
+                && in_array($record->linkedPurchaseKey, $liveKeys, true);
+            if ($liveKeys !== [] && !$supersedes) {
+                $this->updateRow($row, [
+                    'status'     => 'failed',
+                    'last_error' => 'account already holds an active store subscription',
+                ], $record);
+                $this->alertAdmins("vpnhoodiap: purchase {$record->purchaseKey} refused — user #{$user['id']}"
+                    . ' already holds an active store subscription; left unacknowledged for store refund.');
+                throw new ApiException('This account already has an active subscription.', 409,
+                    'subscription_already_active');
+            }
+
             $clientId = $user['client_id'] !== null ? (int) $user['client_id'] : null;
             $clients = new ClientProvisioner();
             if ($clientId === null) {
-                $accounts = new AccountService();
-                $resolution = $accounts->resolveClientForEmail((string) $user['email']);
-                if ($resolution['state'] === AccountService::STATE_EMAIL_UNVERIFIED) {
-                    $this->updateRow($row, ['status' => 'awaiting_email_verification', 'last_error' => null], $record);
-                    $accounts->sendVerificationEmail((string) $user['email']);
-                    return ['state' => 'awaiting_email_verification', 'accessCode' => null, 'expiresAt' => null, 'planId' => null];
-                }
+                $resolution = (new AccountService())->resolveClientForEmail((string) $user['email']);
                 $clientId = $resolution['clientId']
                     ?? $clients->createClient((string) $user['email'], $user['display_name'] ?? null);
                 $this->repo->linkUserClient((int) $user['id'], $clientId);
+
+                // A client that already existed was not born from a proven mailbox the
+                // way createClient's is, so the purchase attaches to it but the client
+                // area stays shut for that account until WHMCS confirms the address.
+                // The purchase itself is never held up — the access code ships regardless.
+                if ($resolution['clientId'] !== null) {
+                    $accounts = new AccountService();
+                    if (!$accounts->isEmailVerified((string) $user['email'])) {
+                        $this->repo->requireEmailVerification((int) $user['id']);
+                        $accounts->sendVerificationEmail((string) $user['email']);
+                    }
+                }
             }
             // keep the client in step with the account's latest known name
             $clients->syncClient($clientId, $user['display_name'] ?? null);
@@ -178,6 +216,7 @@ class EntitlementService
                     $clientId,
                     isPrimary: $index === 0
                 );
+                $orders->tagServiceStore((int) $order['serviceId'], $record->store);
             }
 
             $primary = $placed[0];

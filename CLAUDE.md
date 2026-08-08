@@ -28,6 +28,9 @@ the partner package (VpnHood.WHMCS.Partner). Design doc: `<Vh root>/.user/billin
   auto-refund of unacknowledged purchases is the fail-safe.
 - **Own version stream.** `./VERSION` + `scripts/set-version.sh`; consuming packages
   copy the module verbatim and never restamp it (WHMCS keys `_upgrade()` on it).
+- **Bump it for ANY change to the module's files** — templates, hooks, a comment — not
+  only schema or DB changes. WHMCS decides what to reinstall by comparing the stamped
+  version, so an edit shipped under an unchanged number silently never reaches the install.
 - Secrets are stored via WHMCS `EncryptPassword` and are write-only in the admin UI.
   No secrets in this repo, ever.
 

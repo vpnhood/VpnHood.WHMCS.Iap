@@ -35,7 +35,7 @@ function vpnhoodiap_config(): array
     return [
         'name'        => 'VpnHood! In-App Purchase',
         'description' => 'Processes app-store purchases (Google Play / Apple / Microsoft) into WHMCS clients, orders and paid invoices, delivering VpnHood access codes through the install\'s provisioning module.',
-        'version'     => '1.0.1',
+        'version'     => '1.0.2',
         'author'      => 'VpnHood',
         'fields'      => [
             'AdminAlertEmail' => [
@@ -107,7 +107,8 @@ function vpnhoodiap_activate(): array
         }
 
         // one row per signed-in store identity; client_id stays null until the email is
-        // attached (immediately for new/verified emails, after verification otherwise).
+        // attached — at sign-in when a WHMCS client already holds it, otherwise at the
+        // first purchase, which creates one.
         if (!$schema->hasTable('mod_vpnhood_iap_users')) {
             $schema->create('mod_vpnhood_iap_users', function ($table) {
                 $table->increments('id');
@@ -121,6 +122,10 @@ function vpnhoodiap_activate(): array
                 $table->string('email');
                 $table->string('display_name')->nullable(); // latest name the IdP presented; synced onto the client
                 $table->boolean('email_verified_claim')->default(false);
+                // set when a purchase attached to a pre-existing WHMCS client whose
+                // address WHMCS had not confirmed: the client area stays shut for that
+                // account until it does. Never gates the purchase itself.
+                $table->boolean('requires_email_verification')->default(false);
                 $table->integer('client_id')->unsigned()->nullable()->index();
                 $table->string('external_uid', 36)->unique(); // UUID: GooglePlay obfuscatedAccountId AND Apple appAccountToken
                 $table->timestamp('created_at')->nullable();
@@ -173,7 +178,7 @@ function vpnhoodiap_activate(): array
                 $table->integer('service_id')->unsigned()->nullable()->index();
                 $table->integer('whmcs_order_id')->unsigned()->nullable();
                 $table->enum('status', [
-                    'pending', 'awaiting_email_verification', 'provisioned',
+                    'pending', 'provisioned',
                     'on_hold', 'canceled', 'expired', 'refunded', 'failed',
                 ])->default('pending')->index();
                 $table->string('linked_purchase_key')->nullable(); // googleplay resubscribe/upgrade supersession
@@ -249,6 +254,58 @@ function vpnhoodiap_upgrade(array $vars): void
     vpnhoodiap_migrateToEmailIdentity();
     vpnhoodiap_migrateToLinkedIdentities();
     vpnhoodiap_migrateToDisplayName();
+    vpnhoodiap_migrateOffEmailVerificationParking();
+    vpnhoodiap_migrateToClientAreaVerificationGate();
+}
+
+/**
+ * Installs that predate the client-area gate lack the column. It defaults to
+ * false, which is the right answer for every account already on the install:
+ * the gate only ever applies from the purchase that attached to a pre-existing
+ * WHMCS client onward, never retroactively. Idempotent.
+ */
+function vpnhoodiap_migrateToClientAreaVerificationGate(): void
+{
+    $schema = Capsule::schema();
+    if ($schema->hasTable('mod_vpnhood_iap_users')
+        && !$schema->hasColumn('mod_vpnhood_iap_users', 'requires_email_verification')) {
+        $schema->table('mod_vpnhood_iap_users', function ($table) {
+            $table->boolean('requires_email_verification')->default(false);
+        });
+    }
+}
+
+/**
+ * The WHMCS-side email-verification gate is gone: the identity provider already
+ * proves the mailbox, so a purchase never waits on a second confirmation. Rows
+ * parked by the old gate are handed back to the pending lane, where the cron's
+ * store refresh re-drives them into provisioning on its next pass. Narrowing the
+ * enum afterwards is what actually removes the status; MySQL rejects the ALTER
+ * while any row still holds the value, so the re-drive has to come first.
+ * Idempotent: re-running finds no rows and re-applies the same column type.
+ */
+function vpnhoodiap_migrateOffEmailVerificationParking(): void
+{
+    $schema = Capsule::schema();
+    if (!$schema->hasTable('mod_vpnhood_iap_purchases')) {
+        return;
+    }
+
+    Capsule::table('mod_vpnhood_iap_purchases')
+        ->where('status', 'awaiting_email_verification')
+        ->update(['status' => 'pending', 'last_error' => null]);
+
+    try {
+        Capsule::statement(
+            "ALTER TABLE `mod_vpnhood_iap_purchases` MODIFY COLUMN `status`"
+            . " ENUM('pending','provisioned','on_hold','canceled','expired','refunded','failed')"
+            . " NOT NULL DEFAULT 'pending'"
+        );
+    } catch (\Throwable $e) {
+        // the rows are already safe in the pending lane; a column still carrying
+        // the dead value only wastes a byte, so never fail an upgrade over it
+        logModuleCall('vpnhoodiap', 'upgrade.enumNarrow', '', $e->getMessage(), '');
+    }
 }
 
 /**
@@ -465,6 +522,44 @@ function vpnhoodiap_assertCsrf(): void
         || !hash_equals((string) $_SESSION['vpnhoodiap_csrf'], $token)) {
         throw new \RuntimeException('Invalid or expired security token. Please reload the page and try again.');
     }
+}
+
+/**
+ * Client area output — one page, and only ever the email-confirmation gate.
+ *
+ * A purchase that attached itself to a WHMCS client which already existed leaves that
+ * account's portal shut until WHMCS confirms the address (see the verify-gate hook);
+ * this is the page it is sent to, and the only page it can reach. It exists to be
+ * escapable: WHMCS's verification link lives 60 minutes, so the one action here is to
+ * send a fresh one. Nothing about the purchase is gated — the subscription is already
+ * live in the app while this page is showing.
+ */
+function vpnhoodiap_clientarea(array $vars): array
+{
+    require_once __DIR__ . '/lib/Provisioning/AccountService.php';
+
+    $clientId = (int) ($_SESSION['uid'] ?? 0);
+    $email = $clientId > 0
+        ? (string) Capsule::table('tblclients')->where('id', $clientId)->value('email')
+        : '';
+    $sent = false;
+
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['do'] ?? '') === 'resend' && $email !== '') {
+        $sent = (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountService())
+            ->sendVerificationEmail($email);
+    }
+
+    return [
+        'pagetitle'    => 'Confirm your email address',
+        'breadcrumb'   => ['index.php?m=vpnhoodiap' => 'Confirm your email address'],
+        'templatefile' => 'verify-email',
+        'requirelogin' => true,
+        'vars'         => [
+            'email'    => $email,
+            'resent'   => $sent,
+            'attempted' => $_SERVER['REQUEST_METHOD'] === 'POST',
+        ],
+    ];
 }
 
 /**
