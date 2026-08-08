@@ -111,14 +111,23 @@ Three properties worth knowing before integrating:
 | --- | --- | --- |
 | `provisioned` | Delivered | Use `accessCode` |
 | `pending` | The store has not settled the payment (deferred/slow payment methods) | Retry shortly |
-| `awaiting_email_verification` | A customer account already holds this email and has never verified it | Tell the user to check their mail; it resumes by itself |
 
-`awaiting_email_verification` exists to close a real hole: without it, pre-registering
-someone else's email address would capture their purchases. The purchase is validated
-and recorded, but **not acknowledged to the store** — Google auto-refunds an
-unacknowledged subscription after a few days, so an unresolved case ends in the
-customer's favour rather than a silent charge. The same fail-safe covers every
-provisioning failure.
+A purchase is never held up for a portal-side email confirmation. The identity provider
+has already proved the mailbox — sign-in is refused otherwise — so asking the customer
+to confirm the same address again before delivering what they just paid for buys
+nothing. Where a purchase attaches to a customer account that existed *before* it, the
+portal closes that account's **web area** until it confirms the address, which keeps
+someone who pre-registered another person's address from reading their account. That is
+a portal-side concern only: this API neither reports it nor gates on it, and the
+subscription works in the app throughout.
+
+**One live subscription per account.** A second purchase arriving while another is still
+active is refused with `409` instead of provisioned, and deliberately **not acknowledged
+to the store** — Google auto-refunds an unacknowledged subscription after a few days, so
+the customer is made whole rather than paying twice for one entitlement. An upgrade or
+resubscribe is not a second subscription: it carries the purchase it replaces and is
+provisioned normally. The same unacknowledged fail-safe covers every provisioning
+failure.
 
 ## Errors
 

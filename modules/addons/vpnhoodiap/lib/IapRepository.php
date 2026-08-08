@@ -415,6 +415,31 @@ class IapRepository
         ]);
     }
 
+    /**
+     * Mark this account's client area as closed until WHMCS confirms the email.
+     * Set when a purchase attaches to a WHMCS client that already existed — the
+     * store proved the buyer, but nothing yet proves the pre-existing client
+     * record is the same person. The flag alone decides nothing: the gate hook
+     * also re-reads WHMCS's own verification state, so confirming the address
+     * opens the client area whether or not the flag is ever cleared.
+     */
+    public function requireEmailVerification(int $userId): void
+    {
+        Capsule::table('mod_vpnhood_iap_users')->where('id', $userId)->update([
+            'requires_email_verification' => 1,
+            'updated_at'                  => date('Y-m-d H:i:s'),
+        ]);
+    }
+
+    /** The gated accounts for a WHMCS client, if any. Used by the client-area gate hook. */
+    public function clientRequiresEmailVerification(int $clientId): bool
+    {
+        return Capsule::table('mod_vpnhood_iap_users')
+            ->where('client_id', $clientId)
+            ->where('requires_email_verification', 1)
+            ->exists();
+    }
+
     // -- monitors -----------------------------------------------------------
 
     public function recentPurchases(int $limit): array
