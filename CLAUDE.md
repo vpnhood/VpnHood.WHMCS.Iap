@@ -5,7 +5,7 @@
 The `vpnhoodiap` WHMCS addon: app-store purchases (Google Play / Apple / Microsoft) →
 WHMCS client + order + paid invoice → access code delivered by the install's
 provisioning module. Ships verbatim inside BOTH the hub package (VpnHood.WHMCS) and
-the partner package (VpnHood.WHMCS.Partner). Design doc: `<Vh root>/.user/billing-refactor-plan.md`.
+the partner package (VpnHood.WHMCS.Partner). Design doc: `<Vh root>/.user/docs/billing-refactor-plan.md`.
 
 ## Non-negotiable rules
 
