@@ -70,7 +70,7 @@ add_hook('DailyCronJob', 1, function () {
         // open purchases: refresh against the store, re-drive lifecycle drift
         $open = Capsule::table('mod_vpnhood_iap_purchases')
             ->where('app_id', $app['id'])
-            ->whereIn('status', ['provisioned', 'canceled', 'on_hold', 'awaiting_email_verification', 'pending'])
+            ->whereIn('status', ['provisioned', 'canceled', 'on_hold', 'pending'])
             ->orderBy('id')->limit(500)
             ->get()->map(fn ($row) => (array) $row)->all();
         foreach ($open as $purchase) {
@@ -152,14 +152,14 @@ add_hook('DailyCronJob', 1, function () {
         $alertEmail = trim($repo->setting('AdminAlertEmail'));
         if ($alertEmail !== '') {
             $parked = (int) Capsule::table('mod_vpnhood_iap_purchases')
-                ->whereIn('status', ['awaiting_email_verification', 'failed'])->count();
+                ->where('status', 'failed')->count();
             $failedEvents = (int) Capsule::table('mod_vpnhood_iap_events')
                 ->where('status', 'failed')
                 ->where('created_at', '>=', date('Y-m-d H:i:s', time() - 86400))->count();
             if ($parked > 0 || $failedEvents > 0) {
                 localAPI('SendAdminEmail', [
-                    'customsubject' => "vpnhoodiap digest: $parked parked purchases, $failedEvents failed events",
-                    'custommessage' => "Parked purchases (awaiting verification / failed): $parked\n"
+                    'customsubject' => "vpnhoodiap digest: $parked failed purchases, $failedEvents failed events",
+                    'custommessage' => "Failed purchases: $parked\n"
                         . "Failed webhook events in the last 24h: $failedEvents\n\n"
                         . 'Review them in Addons → VpnHood! In-App Purchase.',
                     'type'          => 'system',

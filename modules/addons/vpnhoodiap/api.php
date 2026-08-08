@@ -174,9 +174,7 @@ function vpnhoodiap_getOpenApi(IapRepository $repo, array $request): array
  * POST /auth/sessions — sign in with a provider id token.
  *
  * { provider: "google"|"apple", idToken: "...", packageName: "com..." }
- * → 201 { accessToken, expiresAt, userId, account: { email, emailVerified }, state }
- *   state: "ok" | "email_unverified" (an existing WHMCS account holds this email
- *   but has not verified it — purchases park until it is verified)
+ * → 201 { accessToken, expiresAt, userId, account: { email } }
  */
 function vpnhoodiap_createSession(IapRepository $repo, array $request): array
 {
@@ -217,17 +215,15 @@ function vpnhoodiap_createSession(IapRepository $repo, array $request): array
     $user = $repo->findOrCreateUser($identityProvider->providerId(), $identity['subject'], $identity['email'], true,
         $identity['name'] ?? null);
 
-    // attach gate: link an existing verified WHMCS account by email; new emails
-    // stay unlinked until first purchase creates their client.
-    $state = 'ok';
+    // link an existing WHMCS account by email; new emails stay unlinked until
+    // first purchase creates their client. The IdP already proved the mailbox,
+    // so nothing here waits on a WHMCS-side verification round trip.
     $clientId = $user['client_id'] !== null ? (int) $user['client_id'] : null;
     if ($clientId === null) {
         $resolution = (new AccountService())->resolveClientForEmail($identity['email']);
         if ($resolution['clientId'] !== null) {
             $clientId = (int) $resolution['clientId'];
             $repo->linkUserClient((int) $user['id'], $clientId);
-        } elseif ($resolution['state'] === AccountService::STATE_EMAIL_UNVERIFIED) {
-            $state = 'email_unverified';
         }
     }
     if ($clientId !== null) {
@@ -240,11 +236,7 @@ function vpnhoodiap_createSession(IapRepository $repo, array $request): array
         'accessToken' => $session['token'],
         'expiresAt'   => $session['expiresAt'],
         'userId'      => $user['external_uid'],
-        'account'     => [
-            'email'         => $user['email'],
-            'emailVerified' => $state !== 'email_unverified',
-        ],
-        'state'       => $state,
+        'account'     => ['email' => $user['email']],
     ]];
 }
 
@@ -259,20 +251,9 @@ function vpnhoodiap_deleteCurrentSession(IapRepository $repo, array $request): a
 function vpnhoodiap_getAccount(IapRepository $repo, array $request): array
 {
     $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
-    $state = 'ok';
-    if ($user['client_id'] === null) {
-        $resolution = (new AccountService())->resolveClientForEmail((string) $user['email']);
-        if ($resolution['state'] === AccountService::STATE_EMAIL_UNVERIFIED) {
-            $state = 'email_unverified';
-        }
-    }
     return [200, [
         'userId'  => $user['external_uid'],
-        'account' => [
-            'email'         => $user['email'],
-            'emailVerified' => $state !== 'email_unverified',
-        ],
-        'state'   => $state,
+        'account' => ['email' => $user['email']],
     ]];
 }
 
@@ -282,7 +263,7 @@ function vpnhoodiap_getAccount(IapRepository $repo, array $request): array
  *
  * { store: "googleplay", packageName: "com...", proof: {...} }
  * → 201 { state: "provisioned", accessCode, expiresAt, planId }
- * → 202 { state: "pending" | "awaiting_email_verification", accessCode: null, ... }
+ * → 202 { state: "pending", accessCode: null, ... }
  *
  * Redeeming the same purchase again returns the same entitlement (201): the
  * store purchase key is the idempotency anchor, so a retry never double-orders.
