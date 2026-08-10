@@ -81,7 +81,7 @@ outright.
 1. POST /auth/sessions       → { accessToken, userId, … }
 2. buy in the store, passing userId as
    obfuscatedAccountId (Google) / appAccountToken (Apple)
-3. POST /billing/purchases   → { state: "provisioned", accessCode, expiresAt, planId }
+3. POST /billing/purchases   → { state: "provisioned", accessCode, expiresAt, planId, store }
 4. redeem accessCode in the client — premium is on
 ```
 

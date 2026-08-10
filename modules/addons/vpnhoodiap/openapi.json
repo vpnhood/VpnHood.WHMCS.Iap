@@ -250,7 +250,8 @@
                   "state": "provisioned",
                   "accessCode": "PREM-4H2K-9QX7",
                   "expiresAt": "2026-09-06T10:12:00+00:00",
-                  "planId": "premium/monthly"
+                  "planId": "premium/monthly",
+                  "store": "googleplay"
                 }
               }
             }
@@ -260,7 +261,7 @@
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/Entitlement" },
-                "example": { "state": "pending", "accessCode": null, "expiresAt": null, "planId": null }
+                "example": { "state": "pending", "accessCode": null, "expiresAt": null, "planId": null, "store": "googleplay" }
               }
             }
           },
@@ -318,7 +319,8 @@
                     {
                       "state": "provisioned",
                       "accessCode": "PREM-4H2K-9QX7",
-                      "expiresAt": "2026-09-06T10:12:00+00:00"
+                      "expiresAt": "2026-09-06T10:12:00+00:00",
+                      "store": "googleplay"
                     }
                   ]
                 }
@@ -508,6 +510,10 @@
           "planId": {
             "type": ["string", "null"],
             "description": "The plan that was redeemed. Returned by `POST /billing/purchases`; omitted when listing entitlements."
+          },
+          "store": {
+            "$ref": "#/components/schemas/StoreId",
+            "description": "The store that billed this entitlement. A client offers its native manage-subscription page only when this matches its own store."
           }
         }
       },
