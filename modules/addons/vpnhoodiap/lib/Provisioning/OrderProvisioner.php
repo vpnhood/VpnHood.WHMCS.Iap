@@ -129,7 +129,7 @@ class OrderProvisioner
                 $updates['itemtaxed'][$item->id] = (int) $item->taxed;
             }
             if (count($updates) > 1) {
-                localAPI('UpdateInvoice', $updates);
+                $this->localApi('UpdateInvoice', $updates);
             }
         } catch (\Throwable $e) {
             $this->repo->log(null, 'invoice.annotate', '', 0, ['invoiceid' => $invoiceId], $e->getMessage());
@@ -156,7 +156,7 @@ class OrderProvisioner
                 ->where('i.paymentmethod', self::GATEWAY)
                 ->distinct()->pluck('it.invoiceid')->all();
             foreach ($invoiceIds as $invoiceId) {
-                localAPI('UpdateInvoice', ['invoiceid' => (int) $invoiceId, 'status' => 'Cancelled']);
+                $this->localApi('UpdateInvoice', ['invoiceid' => (int) $invoiceId, 'status' => 'Cancelled']);
             }
         } catch (\Throwable $e) {
             $this->repo->log(null, 'invoice.cleanup', '', 0, ['serviceid' => $serviceId], $e->getMessage());
@@ -187,9 +187,27 @@ class OrderProvisioner
             ? $amount
             : '0.00';
         try {
-            $transaction = Capsule::table('tblaccounts')->where('transid', $transactionId)->first(['id', 'amountin']);
-            if ($transaction !== null && (float) $transaction->amountin !== (float) $newTotal) {
-                localAPI('UpdateTransaction', ['transactionid' => (int) $transaction->id, 'amountin' => $newTotal]);
+            // Every localAPI call here goes through the checked wrapper: these commands
+            // answer a FAILED update with result=error instead of throwing, so calling
+            // them raw made a rejected rewrite indistinguishable from a successful one —
+            // the invoice would move and its payment would silently stay behind.
+            // Scoped to THIS invoice, not to the transid alone: a store order id is not
+            // unique across payments — re-provisioning a terminated service pays the new
+            // invoice with the same store order id — so matching on transid alone picked
+            // the OLDEST payment carrying it and rewrote a previous invoice's transaction
+            // while the current one silently kept the WHMCS book price.
+            $transaction = Capsule::table('tblaccounts')
+                ->where('invoiceid', $invoiceId)
+                ->where('transid', $transactionId)
+                ->first(['id', 'amountin']);
+            if ($transaction === null) {
+                // the payment is the anchor of this rewrite; without it the invoice
+                // would disagree with its own transaction, so never skip in silence
+                $this->repo->log(null, 'invoice.storevalue', '', 0,
+                    ['invoiceid' => $invoiceId, 'transid' => $transactionId],
+                    'no transaction carries this transid — the payment amount was left at the book price');
+            } elseif ((float) $transaction->amountin !== (float) $newTotal) {
+                $this->localApi('UpdateTransaction', ['transactionid' => (int) $transaction->id, 'amountin' => $newTotal]);
             }
             $updates = ['invoiceid' => $invoiceId];
             $first = true;
@@ -200,7 +218,7 @@ class OrderProvisioner
                 $first = false;
             }
             if (count($updates) > 1) {
-                localAPI('UpdateInvoice', $updates);
+                $this->localApi('UpdateInvoice', $updates);
             }
         } catch (\Throwable $e) {
             $this->repo->log(null, 'invoice.storevalue', '', 0, ['invoiceid' => $invoiceId], $e->getMessage());

@@ -316,7 +316,12 @@ try {
     );
     ($moneyRow['status'] === 'Paid' && (float) $moneyRow['total'] === 46.99 && (float) $moneyRow['amountin'] === 46.99)
         ? ok('matched currency: invoice + transaction rewritten to the real 46.99, still Paid')
-        : bad('store-value rewrite (matched): ' . json_encode($moneyRow));
+        : bad('store-value rewrite (matched): ' . json_encode($moneyRow) . ' | order=' . (int) $purchaseRow['whmcs_order_id']
+            . ' payments=' . json_encode($db->query(
+                'SELECT a.id, a.transid, a.amountin FROM tblorders o
+                 JOIN tblinvoices i ON i.id = o.invoiceid
+                 JOIN tblaccounts a ON a.invoiceid = i.id
+                 WHERE o.id = ' . (int) $purchaseRow['whmcs_order_id'])->fetchAll(PDO::FETCH_ASSOC)));
 
     // ---- 7. terminate leaves an unpaid renewal invoice → cleanup cancels it --
     $draft = localAPI('CreateInvoice', [
