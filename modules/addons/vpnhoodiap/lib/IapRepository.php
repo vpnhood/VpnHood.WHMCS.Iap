@@ -236,6 +236,29 @@ class IapRepository
             ->get(['id', 'name', 'paytype'])->map(fn ($row) => (array) $row)->all();
     }
 
+    /**
+     * The provisioned service's recurrence as an ISO-8601 duration ('P1M', 'P1Y', …),
+     * or null for a one-off or unrecognised cycle.
+     *
+     * Read from the service WHMCS actually created rather than from the store: that
+     * service is what the order was placed against, and it spares the entitlement
+     * endpoints a round trip to the store API. The duration form keeps a WHMCS cycle
+     * name off the wire, and it is already the vocabulary the app speaks for store
+     * plan periods.
+     */
+    public static function billingPeriodForService(int $serviceId): ?string
+    {
+        $cycle = (string) Capsule::table('tblhosting')->where('id', $serviceId)->value('billingcycle');
+        return [
+            'Monthly'       => 'P1M',
+            'Quarterly'     => 'P3M',
+            'Semi-Annually' => 'P6M',
+            'Annually'      => 'P1Y',
+            'Biennially'    => 'P2Y',
+            'Triennially'   => 'P3Y',
+        ][$cycle] ?? null;
+    }
+
     // -- users --------------------------------------------------------------
 
     /** RFC 4122 v4 UUID — the external_uid format (Apple appAccountToken requires UUID). */

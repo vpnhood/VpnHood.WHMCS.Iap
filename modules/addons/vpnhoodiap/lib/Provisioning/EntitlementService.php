@@ -35,7 +35,9 @@ class EntitlementService
      * @param array $app the mod_vpnhood_iap_apps row
      * @param PurchaseRecord $record freshly fetched from the store API
      * @param ?array $sessionUser the module user on the client path; null on the webhook path
-     * @return array{state:string, accessCode:?string, expiresAt:?string, planId:?string}
+     * @return array{state:string, accessCode:?string, expiresAt:?string, planId:?string,
+     *               purchasedAt:?string, autoRenewing:?bool, priceAmount:?string,
+     *               priceCurrency:?string, billingPeriod:?string}
      * @throws ApiException
      */
     public function redeem(array $app, PurchaseRecord $record, ?array $sessionUser, StoreAdapterInterface $adapter): array
@@ -88,14 +90,24 @@ class EntitlementService
                 $serviceStatus = (string) Capsule::table('tblhosting')
                     ->where('id', (int) $row['service_id'])->value('domainstatus');
                 if (in_array($serviceStatus, ['Active', 'Suspended'], true)) {
-                    return $this->entitlementFor($record, (int) $row['service_id']);
+                    return $this->entitlementFor($record, (int) $row['service_id'], $row['created_at'] ?? null);
                 }
             }
 
             // ---- store-side state gates
             if ($record->state === PurchaseRecord::STATE_PENDING) {
                 $this->updateRow($row, ['status' => 'pending', 'last_error' => null], $record);
-                return ['state' => 'pending', 'accessCode' => null, 'expiresAt' => null, 'planId' => null];
+                return [
+                    'state'         => 'pending',
+                    'accessCode'    => null,
+                    'expiresAt'     => null,
+                    'planId'        => null,
+                    'purchasedAt'   => null,
+                    'autoRenewing'  => null,
+                    'priceAmount'   => null,
+                    'priceCurrency' => null,
+                    'billingPeriod' => null,
+                ];
             }
             if (!$record->isEntitled()) {
                 $this->updateRow($row, ['status' => 'expired', 'last_error' => 'not entitled at redeem time: ' . $record->state], $record);
@@ -232,19 +244,33 @@ class EntitlementService
             // ---- only now is the store told the purchase was delivered
             $adapter->finalize($app, $record);
 
-            return $this->entitlementFor($record, $primary['serviceId']);
+            return $this->entitlementFor($record, $primary['serviceId'], $row['created_at'] ?? null);
     }
 
-    /** Portal-neutral entitlement payload (no WHMCS ids on the wire). */
-    private function entitlementFor(PurchaseRecord $record, int $serviceId): array
+    /**
+     * Portal-neutral entitlement payload (no WHMCS ids on the wire).
+     *
+     * Everything past `accessCode` exists so the app can describe the subscription
+     * without asking the store a second time: what was paid, whether it renews, and
+     * since when. `billingPeriod` is an ISO-8601 duration rather than a WHMCS cycle
+     * name — the wire vocabulary stays portal-neutral.
+     *
+     * @param ?string $purchasedAt the ledger row's created_at (when we first saw the purchase)
+     */
+    private function entitlementFor(PurchaseRecord $record, int $serviceId, ?string $purchasedAt = null): array
     {
         return [
-            'state'      => 'provisioned',
-            'accessCode' => (new DeliveryReader())->readAccessCode($serviceId),
-            'expiresAt'  => $record->expiryTimeUnix !== null ? gmdate('c', $record->expiryTimeUnix) : null,
-            'planId'     => $record->basePlanId !== ''
+            'state'         => 'provisioned',
+            'accessCode'    => (new DeliveryReader())->readAccessCode($serviceId),
+            'expiresAt'     => $record->expiryTimeUnix !== null ? gmdate('c', $record->expiryTimeUnix) : null,
+            'planId'        => $record->basePlanId !== ''
                 ? $record->storeProductId . '/' . $record->basePlanId
                 : $record->storeProductId,
+            'purchasedAt'   => $purchasedAt !== null ? gmdate('c', strtotime($purchasedAt)) : null,
+            'autoRenewing'  => $record->autoRenewing,
+            'priceAmount'   => $record->amount,
+            'priceCurrency' => $record->currency,
+            'billingPeriod' => IapRepository::billingPeriodForService($serviceId),
         ];
     }
 
