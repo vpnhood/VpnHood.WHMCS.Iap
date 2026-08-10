@@ -47,6 +47,7 @@ use WHMCS\Module\Addon\VpnHoodIap\ApiException;
 use WHMCS\Module\Addon\VpnHoodIap\Auth\GoogleIdentityProvider;
 use WHMCS\Module\Addon\VpnHoodIap\Auth\SessionService;
 use WHMCS\Module\Addon\VpnHoodIap\IapRepository;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountService;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\ClientProvisioner;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\DeliveryReader;
@@ -74,6 +75,7 @@ require_once __DIR__ . '/lib/Stores/GooglePlay/GooglePlayAdapter.php';
 require_once __DIR__ . '/lib/Stores/AppStore/AppleJws.php';
 require_once __DIR__ . '/lib/Stores/AppStore/AppStoreApiClient.php';
 require_once __DIR__ . '/lib/Stores/AppStore/AppStoreAdapter.php';
+require_once __DIR__ . '/lib/Provisioning/AccountDeletionService.php';
 require_once __DIR__ . '/lib/Provisioning/AccountService.php';
 require_once __DIR__ . '/lib/Provisioning/ClientProvisioner.php';
 require_once __DIR__ . '/lib/Provisioning/OrderProvisioner.php';
@@ -90,7 +92,7 @@ const VPNHOODIAP_ROUTES = [
     '/system/status'         => ['GET' => 'vpnhoodiap_getStatus'],
     '/auth/sessions'         => ['POST' => 'vpnhoodiap_createSession'],
     '/auth/sessions/current' => ['DELETE' => 'vpnhoodiap_deleteCurrentSession'],
-    '/account'               => ['GET' => 'vpnhoodiap_getAccount'],
+    '/account'               => ['GET' => 'vpnhoodiap_getAccount', 'DELETE' => 'vpnhoodiap_deleteAccount'],
     '/account/entitlements'  => ['GET' => 'vpnhoodiap_listEntitlements'],
     '/billing/plans'         => ['GET' => 'vpnhoodiap_listPlans'],
     '/billing/purchases'     => ['POST' => 'vpnhoodiap_createPurchase'],
@@ -255,6 +257,24 @@ function vpnhoodiap_getAccount(IapRepository $repo, array $request): array
         'userId'  => $user['external_uid'],
         'account' => ['email' => $user['email']],
     ]];
+}
+
+/**
+ * DELETE /account — "forget me" (Apple 5.1.1(v), Play account deletion, GDPR
+ * Art. 17). The person is erased everywhere at once — sessions on every device,
+ * sign-in identities, the account row — and the WHMCS client behind the retained
+ * invoices is anonymized and closed. Running services are deliberately left
+ * alone: they are open gates with no personal data, and the store's own
+ * subscription lifecycle ends them. Refused with 409 `deletion_blocked` while
+ * the person still has active web services (cancel those in the web client area
+ * first — this API never touches a payment gateway's recurring agreement).
+ */
+function vpnhoodiap_deleteAccount(IapRepository $repo, array $request): array
+{
+    vpnhoodiap_rateLimit($repo, $request, 5, 300);
+    $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
+    (new AccountDeletionService())->deleteUser($user);
+    return [204, null];
 }
 
 /**
