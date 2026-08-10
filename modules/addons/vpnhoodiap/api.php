@@ -294,6 +294,7 @@ function vpnhoodiap_createPurchase(IapRepository $repo, array $request): array
     }
 
     $entitlement = (new EntitlementService($repo))->redeem($app, $record, $user, $adapter);
+    $entitlement['store'] = $store; // which store billed it — clients key "manage subscription" off this
 
     // 202 while the entitlement is not deliverable yet (store still settling, or
     // the account's email awaits verification); the client polls or retries.
@@ -322,6 +323,7 @@ function vpnhoodiap_listEntitlements(IapRepository $repo, array $request): array
             'state'      => 'provisioned',
             'accessCode' => $row['service_id'] !== null ? $reader->readAccessCode((int) $row['service_id']) : null,
             'expiresAt'  => $expiry !== null ? gmdate('c', $expiry) : null,
+            'store'      => (string) $row['store'],
         ];
     }
     return [200, ['items' => $items]];
