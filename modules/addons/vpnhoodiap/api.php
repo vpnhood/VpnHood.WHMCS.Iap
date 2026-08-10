@@ -262,7 +262,8 @@ function vpnhoodiap_getAccount(IapRepository $repo, array $request): array
  * provision, return the access code. One synchronous call, no client polling.
  *
  * { store: "googleplay", packageName: "com...", proof: {...} }
- * → 201 { state: "provisioned", accessCode, expiresAt, planId }
+ * → 201 { state: "provisioned", accessCode, expiresAt, planId, purchasedAt,
+ *         autoRenewing, priceAmount, priceCurrency, billingPeriod }
  * → 202 { state: "pending", accessCode: null, ... }
  *
  * Redeeming the same purchase again returns the same entitlement (201): the
@@ -320,10 +321,19 @@ function vpnhoodiap_listEntitlements(IapRepository $repo, array $request): array
             continue;
         }
         $items[] = [
-            'state'      => 'provisioned',
-            'accessCode' => $row['service_id'] !== null ? $reader->readAccessCode((int) $row['service_id']) : null,
-            'expiresAt'  => $expiry !== null ? gmdate('c', $expiry) : null,
-            'store'      => (string) $row['store'],
+            'state'         => 'provisioned',
+            'accessCode'    => $row['service_id'] !== null ? $reader->readAccessCode((int) $row['service_id']) : null,
+            'expiresAt'     => $expiry !== null ? gmdate('c', $expiry) : null,
+            'store'         => (string) $row['store'],
+            // what the buyer is actually on: the app shows this as the subscription
+            // summary, so it must not need a second call to the store to render
+            'purchasedAt'   => $row['created_at'] !== null ? gmdate('c', strtotime((string) $row['created_at'])) : null,
+            'autoRenewing'  => (bool) $row['auto_renewing'],
+            'priceAmount'   => $row['store_amount'],
+            'priceCurrency' => $row['store_currency'],
+            'billingPeriod' => $row['service_id'] !== null
+                ? IapRepository::billingPeriodForService((int) $row['service_id'])
+                : null,
         ];
     }
     return [200, ['items' => $items]];

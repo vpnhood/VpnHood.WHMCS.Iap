@@ -81,13 +81,22 @@ outright.
 1. POST /auth/sessions       → { accessToken, userId, … }
 2. buy in the store, passing userId as
    obfuscatedAccountId (Google) / appAccountToken (Apple)
-3. POST /billing/purchases   → { state: "provisioned", accessCode, expiresAt, planId, store }
+3. POST /billing/purchases   → { state: "provisioned", accessCode, expiresAt, planId, store, … }
 4. redeem accessCode in the client — premium is on
 ```
 
 One synchronous call, no polling. Everything after that — renewals, cancellations,
 refunds — arrives as a store webhook, so `GET /account/entitlements` is always the
 current truth; the app does not have to track subscription state itself.
+
+An entitlement also describes the subscription it came from — `purchasedAt`,
+`autoRenewing`, `priceAmount` + `priceCurrency`, and `billingPeriod` as an ISO-8601
+duration (`P1M`, `P1Y`, …). Both endpoints return them, so an app can render a
+subscription summary from the entitlement alone and never has to ask the store a
+second time for what it already paid. The price is the **store's** figure for the
+current period, not a portal catalogue price: the two differ whenever the store
+rounds to its own local price points, and what the buyer was actually charged is
+the one worth showing.
 
 Three properties worth knowing before integrating:
 

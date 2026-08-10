@@ -514,6 +514,27 @@
           "store": {
             "$ref": "#/components/schemas/StoreId",
             "description": "The store that billed this entitlement. A client offers its native manage-subscription page only when this matches its own store."
+          },
+          "purchasedAt": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "When the subscription began — the portal's first sight of the purchase. Null while `state` is `pending`."
+          },
+          "autoRenewing": {
+            "type": ["boolean", "null"],
+            "description": "Whether the store will bill the next period. False after the buyer cancels, while the entitlement runs to `expiresAt`."
+          },
+          "priceAmount": {
+            "type": ["string", "null"],
+            "description": "What the store charged for the current period, as a decimal string. This is the store's own figure, not a portal catalogue price."
+          },
+          "priceCurrency": {
+            "type": ["string", "null"],
+            "description": "ISO 4217 currency of `priceAmount`, as reported by the store."
+          },
+          "billingPeriod": {
+            "type": ["string", "null"],
+            "description": "The recurrence as an ISO-8601 duration (`P1M`, `P6M`, `P1Y`, …). Null for a one-off entitlement. Clients pair it with `priceAmount` to render \"price per period\"."
           }
         }
       },
