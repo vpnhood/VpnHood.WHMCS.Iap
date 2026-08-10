@@ -38,7 +38,7 @@ FAIL=0
 
 # All integration tests, in dependency order (activation first: it activates
 # the addon the others rely on).
-INTEGRATION_TESTS=(activation identity secrets sessions suppress-emails webhook redeem)
+INTEGRATION_TESTS=(activation identity secrets sessions suppress-emails webhook redeem delete-account)
 
 upload() {
   echo "== Uploading tests + module lib to the dev box"
@@ -105,6 +105,7 @@ run_endpoints() {
   probe GET "$api/openapi.json" - 200 '"openapi"' 'the contract is served from the module'
   probe GET "$api/nope" - 404 '"code":"not_found"' 'unknown resource is a clean 404'
   probe GET "$api/account" - 401 '"code":"unauthorized"' 'a protected resource needs a session'
+  probe DELETE "$api/account" - 401 '"code":"unauthorized"' 'account deletion needs a session'
   probe POST "$api/account" '{}' 405 '"code":"method_not_allowed"' 'wrong verb on a real resource is 405'
   probe GET "$api/account/entitlements" - 401 '"code":"unauthorized"' 'entitlements need a session'
   probe POST "$api/billing/purchases" '{}' 401 '"code":"unauthorized"' 'purchases need a session'
