@@ -35,7 +35,7 @@ function vpnhoodiap_config(): array
     return [
         'name'        => 'VpnHood! In-App Purchase',
         'description' => 'Processes app-store purchases (Google Play / Apple / Microsoft) into WHMCS clients, orders and paid invoices, delivering VpnHood access codes through the install\'s provisioning module.',
-        'version'     => '1.0.4',
+        'version'     => '1.0.5',
         'author'      => 'VpnHood',
         'fields'      => [
             'AdminAlertEmail' => [
@@ -227,6 +227,19 @@ function vpnhoodiap_activate(): array
             });
         }
 
+        // deletion journal: numeric ids only (never PII — the journal must not be a
+        // tombstone), so the anonymization can be re-run mechanically after a
+        // backup restore.
+        if (!$schema->hasTable('mod_vpnhood_iap_deletions')) {
+            $schema->create('mod_vpnhood_iap_deletions', function ($table) {
+                $table->increments('id');
+                $table->integer('user_id')->unsigned()->nullable();
+                $table->integer('client_id')->unsigned()->nullable()->index();
+                $table->string('outcome', 32);
+                $table->timestamp('created_at')->nullable();
+            });
+        }
+
         vpnhoodiap_ensureAdminAccess();
 
         return [
@@ -256,6 +269,25 @@ function vpnhoodiap_upgrade(array $vars): void
     vpnhoodiap_migrateToDisplayName();
     vpnhoodiap_migrateOffEmailVerificationParking();
     vpnhoodiap_migrateToClientAreaVerificationGate();
+    vpnhoodiap_migrateToDeletionJournal();
+}
+
+/**
+ * Installs that predate account deletion lack the journal table. Idempotent;
+ * same definition as in vpnhoodiap_activate().
+ */
+function vpnhoodiap_migrateToDeletionJournal(): void
+{
+    $schema = Capsule::schema();
+    if (!$schema->hasTable('mod_vpnhood_iap_deletions')) {
+        $schema->create('mod_vpnhood_iap_deletions', function ($table) {
+            $table->increments('id');
+            $table->integer('user_id')->unsigned()->nullable();
+            $table->integer('client_id')->unsigned()->nullable()->index();
+            $table->string('outcome', 32);
+            $table->timestamp('created_at')->nullable();
+        });
+    }
 }
 
 /**
@@ -525,16 +557,28 @@ function vpnhoodiap_assertCsrf(): void
 }
 
 /**
- * Client area output — one page, and only ever the email-confirmation gate.
- *
- * A purchase that attached itself to a WHMCS client which already existed leaves that
- * account's portal shut until WHMCS confirms the address (see the verify-gate hook);
- * this is the page it is sent to, and the only page it can reach. It exists to be
- * escapable: WHMCS's verification link lives 60 minutes, so the one action here is to
- * send a fresh one. Nothing about the purchase is gated — the subscription is already
- * live in the app while this page is showing.
+ * Client area output — two pages: the email-confirmation gate (default) and the
+ * account-deletion page (`action=delete-account`, the web deletion path Google
+ * Play requires). Both pass the verify-gate hook, which allows every
+ * `m=vpnhoodiap` page.
  */
 function vpnhoodiap_clientarea(array $vars): array
+{
+    $action = (string) ($_REQUEST['action'] ?? '');
+    return $action === 'delete-account'
+        ? vpnhoodiap_clientareaDeleteAccount()
+        : vpnhoodiap_clientareaVerifyEmail();
+}
+
+/**
+ * The email-confirmation gate. A purchase that attached itself to a WHMCS client
+ * which already existed leaves that account's portal shut until WHMCS confirms the
+ * address (see the verify-gate hook); this is the page it is sent to. It exists to
+ * be escapable: WHMCS's verification link lives 60 minutes, so the one action here
+ * is to send a fresh one. Nothing about the purchase is gated — the subscription is
+ * already live in the app while this page is showing.
+ */
+function vpnhoodiap_clientareaVerifyEmail(): array
 {
     require_once __DIR__ . '/lib/Provisioning/AccountService.php';
 
@@ -558,6 +602,62 @@ function vpnhoodiap_clientarea(array $vars): array
             'email'    => $email,
             'resent'   => $sent,
             'attempted' => $_SERVER['REQUEST_METHOD'] === 'POST',
+        ],
+    ];
+}
+
+/**
+ * "Delete my account" — the same engine as the app's DELETE /account, reachable
+ * on the web so deletion works without the app installed (Play policy). CSRF'd,
+ * double-confirmed, and refused with the same actionable message while active
+ * web services exist. On success the WHMCS session is logged out — the account
+ * behind it no longer exists.
+ */
+function vpnhoodiap_clientareaDeleteAccount(): array
+{
+    require_once __DIR__ . '/lib/ApiException.php';
+    require_once __DIR__ . '/lib/IapRepository.php';
+    require_once __DIR__ . '/lib/Provisioning/AccountDeletionService.php';
+
+    $clientId = (int) ($_SESSION['uid'] ?? 0);
+    $email = $clientId > 0
+        ? (string) Capsule::table('tblclients')->where('id', $clientId)->value('email')
+        : '';
+
+    if (empty($_SESSION['vpnhoodiap_ca_csrf'])) {
+        $_SESSION['vpnhoodiap_ca_csrf'] = bin2hex(random_bytes(16));
+    }
+    $error = '';
+
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['do'] ?? '') === 'delete' && $clientId > 0) {
+        try {
+            $token = (string) ($_POST['token'] ?? '');
+            if ($token === '' || !hash_equals((string) $_SESSION['vpnhoodiap_ca_csrf'], $token)) {
+                throw new \RuntimeException('Invalid or expired security token. Please reload the page and try again.');
+            }
+            if (($_POST['confirm'] ?? '') !== 'yes') {
+                throw new \RuntimeException('Please tick the confirmation box first.');
+            }
+            $repo = new IapRepository();
+            $moduleUser = $email !== '' ? $repo->findUserByEmail($email) : null;
+            (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService())
+                ->deleteClient($clientId, $moduleUser);
+            header('Location: logout.php');
+            exit;
+        } catch (\Throwable $e) {
+            $error = $e->getMessage();
+        }
+    }
+
+    return [
+        'pagetitle'    => 'Delete my account',
+        'breadcrumb'   => ['index.php?m=vpnhoodiap&action=delete-account' => 'Delete my account'],
+        'templatefile' => 'delete-account',
+        'requirelogin' => true,
+        'vars'         => [
+            'email' => $email,
+            'error' => $error,
+            'csrf'  => $_SESSION['vpnhoodiap_ca_csrf'],
         ],
     ];
 }

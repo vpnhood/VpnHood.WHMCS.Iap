@@ -30,6 +30,7 @@ this same document and the apps will not know the difference.
 | `POST` | `/auth/sessions` | — | Sign in with a Google/Apple id token → session token |
 | `DELETE` | `/auth/sessions/current` | ✔ | Sign out (revokes the token server-side) |
 | `GET` | `/account` | ✔ | The signed-in account |
+| `DELETE` | `/account` | ✔ | Delete the account everywhere ("forget me") |
 | `GET` | `/account/entitlements` | ✔ | What that account currently holds |
 | `GET` | `/billing/plans?store=&packageName=` | ✔ | Plans this app may sell in that store |
 | `POST` | `/billing/purchases` | ✔ | Redeem a store purchase → access code |
@@ -169,9 +170,11 @@ failure.
 | `purchase_unattributed` | 409 | No attribution the portal can resolve to an account; recorded for an admin |
 | `purchase_inactive` | 410 | Expired, cancelled or refunded at the store |
 | `plan_not_available` | 422 | The store product is not mapped to a plan here; parked, admin alerted |
+| `deletion_blocked` | 409 | The account still has active web services; cancel them in the web client area first |
 | `rate_limited` | 429 | Too many requests from this address |
 | `store_not_supported` | 501 | Known store, not implemented on this portal yet |
 | `provisioning_failed` | 502 | Downstream provisioning failed; nothing half-created, safe to retry |
+| `deletion_failed` | 502 | Anonymization or invoice cleanup failed; nothing partial, safe to retry |
 | `purchase_in_progress` | 503 | Another request is redeeming this same purchase; retry shortly |
 | `internal_error` | 500 | Unexpected; recorded in the module log |
 
@@ -179,7 +182,29 @@ Unrecognised codes should be treated as a generic failure of their status class 
 ones may be added.
 
 **Rate limits** (sliding window, per IP): `POST /auth/sessions` 20 per 5 min,
-`POST /billing/purchases` 30 per 5 min, `GET /system/status` 30 per min.
+`POST /billing/purchases` 30 per 5 min, `GET /system/status` 30 per min,
+`DELETE /account` 5 per 5 min.
+
+## Account deletion
+
+`DELETE /account` is the "forget me" the app stores and GDPR require: sessions on
+every device, sign-in identities and the account row are erased in one call, and the
+customer record behind the retained invoices is anonymized and closed. Signing in
+again later creates a brand-new empty account — there is no restore, and no
+identifier of the deleted person is kept.
+
+What deletion deliberately does **not** do: it never cancels a store subscription
+(the customer cancels in the store where they purchased — before or after deleting),
+and it never terminates a running service — an access code is an open gate with no
+personal data, and the paid period keeps working until the store's own lifecycle ends
+it. Paid invoices are retained under legal duty with the personal details replaced by
+placeholders; unpaid ones are cancelled so nothing can ever bill the deleted person.
+
+A person who also has active WEB services (sold on the portal's own site) is refused
+with `deletion_blocked` until those are cancelled in the web client area — this API
+never touches a payment gateway's recurring agreement. The same deletion is available
+on the web at `index.php?m=vpnhoodiap&action=delete-account`, so it works without the
+app installed (Play policy).
 
 **Fail closed.** While the addon is deactivated, *every* endpoint answers 404. A client
 that gets 404 from `/system/status` is talking to a WHMCS with no portal configured —

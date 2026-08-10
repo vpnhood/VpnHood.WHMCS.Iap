@@ -163,6 +163,25 @@
           },
           "401": { "$ref": "#/components/responses/Unauthorized" }
         }
+      },
+      "delete": {
+        "tags": ["account"],
+        "operationId": "deleteAccount",
+        "summary": "Delete the signed-in account (forget me)",
+        "description": "Erases the person everywhere at once: every session on every device is revoked, all sign-in identities and the account itself are deleted, and the customer record behind the retained invoices is anonymized and closed. Signing in again later creates a brand-new empty account — there is no restore.\n\nRunning services are deliberately left untouched: an access code is an open gate with no personal data in it, and the store's own subscription lifecycle is what ends it. Deletion cancels no store subscription — the customer cancels in the store where they purchased, before or after deleting — and paid invoices are retained under legal duty with the personal details replaced by placeholders.\n\nWhile the person still has active WEB services (sold on the portal's own site, possibly on a recurring gateway agreement this API never touches), the call is refused with `deletion_blocked`: cancel those in the web client area first, then delete. Accounts created in an app never have web services, so an app flow cannot hit this.",
+        "responses": {
+          "204": { "description": "The account is deleted. The presented session token is dead." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": {
+            "description": "The account still has active web services (`deletion_blocked`). Cancel them in the web client area first.",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": {
+            "description": "The customer record could not be anonymized or an open invoice could not be cancelled (`deletion_failed`). Nothing partial was left behind; retry or contact support.",
+            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          }
+        }
       }
     },
     "/billing/plans": {
