@@ -45,6 +45,30 @@ if (!$gatewayActive) {
     ok('vpnhoodiappay gateway already active');
 }
 
+// -- checkout visibility ------------------------------------------------------
+// The gateway is bookkeeping-only: it collects nothing, so offering it at
+// checkout sells a dead end. Gateway activation defaults "Show on Order Form"
+// to ON, so the addon must clamp it — exercise the deployed clamp, then assert
+// the flag. Guards the exact regression found live on dev (visible=on, one of
+// two gateways offered at checkout).
+require_once ROOTDIR . '/modules/addons/vpnhoodiap/vpnhoodiap.php';
+if (!function_exists('vpnhoodiap_hideGatewayFromCheckout')) {
+    bad('deployed module has no vpnhoodiap_hideGatewayFromCheckout — the checkout guard is missing');
+} else {
+    vpnhoodiap_hideGatewayFromCheckout();
+    $visible = one($db, "SELECT value FROM tblpaymentgateways WHERE gateway='vpnhoodiappay' AND setting='visible'");
+    if ($visible !== null && trim((string) $visible['value']) !== '') {
+        bad("gateway is offered at checkout (visible='{$visible['value']}') — customers would pick a dead end");
+    } else {
+        ok('gateway is hidden from the order form (visible clamped off)');
+    }
+}
+if (!file_exists(ROOTDIR . '/includes/hooks/vpnhoodiap-hide-gateway.php')) {
+    bad('checkout hook not deployed: includes/hooks/vpnhoodiap-hide-gateway.php');
+} else {
+    ok('checkout hook deployed (strips the gateway from the cart template vars)');
+}
+
 // -- admin visibility -------------------------------------------------------
 // WHMCS only lists the addon under Addons for roles named in its `access` row,
 // and only the admin-UI activation flow writes that row — so a module activated

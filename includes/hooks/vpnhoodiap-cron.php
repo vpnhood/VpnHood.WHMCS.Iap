@@ -7,7 +7,9 @@
  *      self-healing net under dropped/failed webhooks.
  *   2. Voided-purchases sweep: store-side refunds terminate the service even
  *      when the webhook never arrived.
- *   3. Hygiene: purge stale sessions, clear raw payloads past retention.
+ *   3. Hygiene: purge stale sessions, clear raw payloads past retention, and
+ *      re-clamp the bookkeeping gateway's order-form visibility (an admin can
+ *      re-tick the checkbox; the gateway must never be offered at checkout).
  *   4. Ops digest: parked/failed purchases and failed events mailed to the
  *      configured admin address.
  *
@@ -133,6 +135,16 @@ add_hook('DailyCronJob', 1, function () {
     }
 
     // -- 3: hygiene ----------------------------------------------------------
+    // self-heal the checkout guard: gateway activation defaults "Show on Order
+    // Form" on and admins can re-tick it — same clamp as the addon's
+    // vpnhoodiap_hideGatewayFromCheckout(), fenced on its own
+    try {
+        Capsule::table('tblpaymentgateways')
+            ->where('gateway', 'vpnhoodiappay')->where('setting', 'visible')
+            ->update(['value' => '']);
+    } catch (\Throwable $e) {
+        logModuleCall('vpnhoodiap', 'cron.gateway-visibility', '', $e->getMessage(), '');
+    }
     try {
         (new \WHMCS\Module\Addon\VpnHoodIap\Auth\SessionService())->purgeStale();
         $retentionDays = max(1, (int) ($repo->setting('RawPayloadRetentionDays') ?: 90));

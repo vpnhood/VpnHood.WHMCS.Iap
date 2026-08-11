@@ -35,7 +35,7 @@ function vpnhoodiap_config(): array
     return [
         'name'        => 'VpnHood! In-App Purchase',
         'description' => 'Processes app-store purchases (Google Play / Apple / Microsoft) into WHMCS clients, orders and paid invoices, delivering VpnHood access codes through the install\'s provisioning module.',
-        'version'     => '1.0.8',
+        'version'     => '1.0.9',
         'author'      => 'VpnHood',
         'fields'      => [
             'AdminAlertEmail' => [
@@ -241,6 +241,7 @@ function vpnhoodiap_activate(): array
         }
 
         vpnhoodiap_ensureAdminAccess();
+        vpnhoodiap_hideGatewayFromCheckout();
 
         return [
             'status'      => 'success',
@@ -263,6 +264,7 @@ function vpnhoodiap_upgrade(array $vars): void
     // installs activated before this ran (API/automation) have no access row and
     // are invisible in the Addons menu until someone notices
     vpnhoodiap_ensureAdminAccess();
+    vpnhoodiap_hideGatewayFromCheckout();
 
     vpnhoodiap_migrateToEmailIdentity();
     vpnhoodiap_migrateToLinkedIdentities();
@@ -270,6 +272,27 @@ function vpnhoodiap_upgrade(array $vars): void
     vpnhoodiap_migrateOffEmailVerificationParking();
     vpnhoodiap_migrateToClientAreaVerificationGate();
     vpnhoodiap_migrateToDeletionJournal();
+}
+
+/**
+ * The bookkeeping gateway must never be offered at checkout: it collects nothing
+ * — the app store is the merchant of record — so a customer who picked it would
+ * land on an invoice no one can ever pay. WHMCS keys order-form visibility on the
+ * gateway's `visible` setting, which gateway activation defaults ON and any admin
+ * can re-tick, so it is clamped here rather than trusted to a checkbox: on
+ * activate, on every upgrade, and daily by the cron hook. Second layer: the
+ * checkout hook (includes/hooks/vpnhoodiap-hide-gateway.php) strips the gateway
+ * from the cart's list regardless of the flag. Floor: the gateway has no capture
+ * flow, so whatever slips through can never become a paid invoice or a service.
+ * No-op until the gateway itself is activated (no `visible` row yet) — the cron
+ * clamp closes that window.
+ */
+function vpnhoodiap_hideGatewayFromCheckout(): void
+{
+    Capsule::table('tblpaymentgateways')
+        ->where('gateway', 'vpnhoodiappay')
+        ->where('setting', 'visible')
+        ->update(['value' => '']);
 }
 
 /**
