@@ -275,7 +275,8 @@ jobs:
             modules/addons/vpnhoodiap/lib/Provisioning/EntitlementService.php \
             modules/gateways/vpnhoodiappay.php \
             includes/hooks/vpnhoodiap-suppress-emails.php \
-            includes/hooks/vpnhoodiap-cron.php
+            includes/hooks/vpnhoodiap-cron.php \
+            includes/hooks/vpnhoodiap-hide-gateway.php
           do
             unzip -Z1 "$ASSET" | grep -Fxq "$f" || { echo "::error::$f missing from $ASSET"; exit 1; }
           done
