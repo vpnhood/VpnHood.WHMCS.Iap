@@ -189,7 +189,8 @@
         "tags": ["billing"],
         "operationId": "listPlans",
         "summary": "Sellable plans for one app and store",
-        "description": "The portal is the source of truth for **what** may be sold; the store owns the price and the localisation. A store product that is not mapped in the portal catalog does not appear here and cannot be redeemed — an unmapped purchase parks instead of guessing at an entitlement.",
+        "description": "The portal is the source of truth for **what** may be sold; the store owns the price and the localisation. A store product that is not mapped in the portal catalog does not appear here and cannot be redeemed — an unmapped purchase parks instead of guessing at an entitlement.\n\nNo authentication: an app must render its plans page before anyone signs in, and this catalog is public by construction — the same product ids are visible in the store listing. Nothing here is account-scoped.",
+        "security": [],
         "parameters": [
           {
             "name": "store",
@@ -222,8 +223,8 @@
             }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
-          "403": { "$ref": "#/components/responses/UnknownApp" }
+          "403": { "$ref": "#/components/responses/UnknownApp" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
         }
       }
     },

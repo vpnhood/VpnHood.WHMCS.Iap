@@ -16,7 +16,7 @@
  *   DELETE /auth/sessions/current     sign out
  *   GET    /account                   the signed-in account
  *   GET    /account/entitlements      what that account currently holds
- *   GET    /billing/plans             the sellable plans of one app+store
+ *   GET    /billing/plans             the sellable plans of one app+store (no auth)
  *   POST   /billing/purchases         redeem a store purchase → access code
  *
  * Every resource hangs off a controller; the OpenAPI document is the deliberate
@@ -363,10 +363,15 @@ function vpnhoodiap_listEntitlements(IapRepository $repo, array $request): array
  * GET /billing/plans?store=&packageName= — the sellable plans for one app+store.
  * WHMCS is the source of truth for WHAT is sellable; the store prices it.
  * Unmapped plans simply don't appear.
+ *
+ * No session: an app renders its plans page before anyone signs in, so gating this
+ * would force every app to ship a hardcoded product list and drift from the catalog
+ * it is mapped against. Nothing here is account-scoped, and the ids are public in
+ * the store listing anyway — only WHAT this app sells, never WHO buys it.
  */
 function vpnhoodiap_listPlans(IapRepository $repo, array $request): array
 {
-    (new SessionService())->resolve(vpnhoodiap_bearerToken());
+    vpnhoodiap_rateLimit($repo, $request, 30, 60);
 
     $store = (string) ($request['query']['store'] ?? '');
     $packageName = (string) ($request['query']['packageName'] ?? '');

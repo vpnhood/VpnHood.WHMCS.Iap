@@ -108,6 +108,9 @@ run_endpoints() {
   probe DELETE "$api/account" - 401 '"code":"unauthorized"' 'account deletion needs a session'
   probe POST "$api/account" '{}' 405 '"code":"method_not_allowed"' 'wrong verb on a real resource is 405'
   probe GET "$api/account/entitlements" - 401 '"code":"unauthorized"' 'entitlements need a session'
+  probe GET "$api/billing/plans?store=googleplay&packageName=no.such.app" - 403 '"code":"unknown_app"' \
+    'the plan catalog is public — an unknown app is 403, never 401'
+  probe GET "$api/billing/plans" - 400 '"code":"bad_request"' 'plans without store/packageName is a clean 400'
   probe POST "$api/billing/purchases" '{}' 401 '"code":"unauthorized"' 'purchases need a session'
   probe POST "$api/auth/sessions" '{}' 400 '"code":"bad_request"' 'sign-in without an id token is a clean 400'
   probe POST "$api/auth/sessions" 'not json' 400 '"code":"bad_request"' 'non-JSON body is a clean 400'

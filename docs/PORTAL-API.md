@@ -32,7 +32,7 @@ this same document and the apps will not know the difference.
 | `GET` | `/account` | ✔ | The signed-in account |
 | `DELETE` | `/account` | ✔ | Delete the account everywhere ("forget me") |
 | `GET` | `/account/entitlements` | ✔ | What that account currently holds |
-| `GET` | `/billing/plans?store=&packageName=` | ✔ | Plans this app may sell in that store |
+| `GET` | `/billing/plans?store=&packageName=` | — | Plans this app may sell in that store |
 | `POST` | `/billing/purchases` | ✔ | Redeem a store purchase → access code |
 
 A path that exists but is called with the wrong method answers **405** with an `Allow`
@@ -66,6 +66,12 @@ Send it on every other call:
 ```http
 Authorization: Bearer 0f1e2d3c4b5a…
 ```
+
+`GET /billing/plans` is the one resource outside `/auth` and `/system` that takes no
+session. An app has to render its plans page before anyone signs in, and gating it would
+force every app to ship a hardcoded product list — the exact drift this catalog exists to
+prevent. It answers only **what** an app sells, never who buys it, and those product ids
+are already public in the store listing.
 
 Some proxies strip `Authorization`; the same token is also accepted as
 `X-Portal-Token: <token>`. The official client sends both.
@@ -243,7 +249,10 @@ The reference implementation is **`VpnHood.AppLib.Portal`** in the [VpnHood] rep
 `PortalApiClient` (the typed stub; problem+json surfaces as the toolkit's
 standard `ApiException`, machine code in `Data["Code"]`),
 `PortalAuthenticationProvider` (sessions), `PortalAccountProvider` (account and
-entitlements) and `PortalOrderProcessor` (purchases). Changing an endpoint's contract
+entitlements, and the owner of both the catalog and the order processor) and
+`PortalOrderProcessor` (purchases). The catalog side is why `/billing/plans` matters to
+the client: neither StoreKit nor Play Billing can list an app's own products, so the app
+asks the portal which ids to price. Changing an endpoint's contract
 means changing that client, this page and `openapi.json` in the same change set.
 
 ## Hosting notes
