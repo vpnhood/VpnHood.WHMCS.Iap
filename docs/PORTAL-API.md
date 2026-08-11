@@ -196,8 +196,17 @@ ones may be added.
 `DELETE /account` is the "forget me" the app stores and GDPR require: sessions on
 every device, sign-in identities and the account row are erased in one call, and the
 customer record behind the retained invoices is anonymized and closed. Signing in
-again later creates a brand-new empty account — there is no restore, and no
-identifier of the deleted person is kept.
+again later creates a brand-new empty account — there is no account restore, and no
+identifier of the deleted person is kept (the purchase ledger and the deletion
+journal retain only numeric row ids).
+
+One thing IS restorable, deliberately: a still-active **store purchase**. Deletion
+never cancels the store subscription, so its owner keeps paying — and Restore
+Purchases from a new account presents the store's own proof, which re-attaches the
+purchase to that account and re-delivers the **same** entitlement and access code
+(see `POST /billing/purchases`). Never a new order or code, only when the previous
+owner is journalled as deleted, and only onto an account with no other live
+subscription — "forget me" cannot be used to mint anything.
 
 What deletion deliberately does **not** do: it never cancels a store subscription
 (the customer cancels in the store where they purchased — before or after deleting),

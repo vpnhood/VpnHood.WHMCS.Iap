@@ -206,7 +206,12 @@ class AccountDeletionService
     {
         Capsule::table('mod_vpnhood_iap_sessions')->where('user_id', $userId)->delete();
         Capsule::table('mod_vpnhood_iap_identities')->where('user_id', $userId)->delete();
-        Capsule::table('mod_vpnhood_iap_purchases')->where('user_id', $userId)->update(['user_id' => null]);
+        // The purchase ledger keeps user_id as a DEAD pointer on purpose: the person it
+        // named no longer exists anywhere (identities, emails and uids die above), and the
+        // journal below retains the same numeric id anyway — so this discloses nothing new.
+        // What it buys: Restore Purchases after "forget me" can prove a purchase's owner
+        // was journalled-deleted (EntitlementService::relinkErasedOwner) and hand the row
+        // to the person's new account, instead of dead-ending on the binding guard.
         Capsule::table('mod_vpnhood_iap_users')->where('id', $userId)->delete();
     }
 

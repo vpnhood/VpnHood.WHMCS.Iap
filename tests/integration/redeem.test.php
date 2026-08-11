@@ -22,6 +22,7 @@ requireIapLib(
     'Stores/Dto/StoreNotification.php',
     'Stores/StoreAdapterInterface.php',
     'Provisioning/AccountService.php',
+    'Provisioning/AccountDeletionService.php',
     'Provisioning/ClientProvisioner.php',
     'Provisioning/OrderProvisioner.php',
     'Provisioning/DeliveryReader.php',
@@ -162,6 +163,7 @@ ok("fixtures created (app #$appId, mapping vh_itest/monthly → pid $pid, user #
 $app = $repo->getApp($appId);
 $service = new EntitlementService($repo);
 $createdOrderIds = [];
+$erasedUserIds = [];
 
 try {
     // ---- 1. binding guard: someone else's purchase token → 403, nothing placed
@@ -384,6 +386,95 @@ try {
     $creditAfter === $creditBefore
         ? ok('client credit balance untouched by the rewrites')
         : bad("client credit changed: $creditBefore -> $creditAfter");
+
+    // ---- 9. forget me, then Restore Purchases -------------------------------
+    // The record's uid names an ERASED account, so the binding guard would 403 —
+    // unless the erased-owner carve-out re-links the ledger row to the new
+    // account and the idempotent replay re-delivers the SAME service and code.
+    // Never a new order: forget-me must be useless as a code mint.
+    $erasedUid = IapRepository::uuidV4();
+    $erasedUserId = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
+        'provider' => 'google', 'provider_subject' => "$marker-erased",
+        'email' => "erased-$marker@vpnhood.itest", 'email_verified_claim' => 1,
+        'client_id' => null, 'external_uid' => $erasedUid,
+        'created_at' => $now, 'updated_at' => $now,
+    ]);
+    $erasedUserIds[] = $erasedUserId;
+    // the live renewal purchase from section 8 becomes the erased user's
+    Capsule::table('mod_vpnhood_iap_purchases')
+        ->where('purchase_key', $renewal->purchaseKey)->update(['user_id' => $erasedUserId]);
+    // the REAL deletion path (module rows + journal), not a hand-crafted state
+    (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService())
+        ->deleteUser($repo->getUser($erasedUserId));
+    Capsule::table('mod_vpnhood_iap_users')->where('id', $erasedUserId)->exists()
+        ? bad('erased fixture user still exists')
+        : ok('owner erased through the real forget-me path (journalled)');
+
+    $restoredUserId = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
+        'provider' => 'google', 'provider_subject' => "$marker-restored",
+        'email' => "restored-$marker@vpnhood.itest", 'email_verified_claim' => 1,
+        'client_id' => null, 'external_uid' => IapRepository::uuidV4(),
+        'created_at' => $now, 'updated_at' => $now,
+    ]);
+    $restoreRecord = makeRecord([
+        'obfuscatedUid' => $erasedUid, // the store still reports the OLD uid
+        'purchaseKey'   => $renewal->purchaseKey,
+        'storeOrderId'  => $renewal->storeOrderId,
+        'acknowledged'  => true,
+    ]);
+    $restoreAdapter = new FakeStoreAdapter($restoreRecord);
+    $restored = $service->redeem($app, $restoreRecord, $repo->getUser($restoredUserId), $restoreAdapter);
+    ($restored['state'] === 'provisioned' && is_string($restored['accessCode']) && $restored['accessCode'] !== '')
+        ? ok('restore after deletion re-delivers the entitlement')
+        : bad('restore after deletion failed: ' . json_encode($restored));
+    $relinkedRow = one($db, 'SELECT user_id, whmcs_order_id, service_id FROM mod_vpnhood_iap_purchases WHERE purchase_key=?',
+        [$renewal->purchaseKey]);
+    ((int) $relinkedRow['user_id'] === $restoredUserId)
+        ? ok('ledger row handed to the new account')
+        : bad('row not re-linked: ' . json_encode($relinkedRow));
+    ((int) $relinkedRow['whmcs_order_id'] === (int) $rowAfter['whmcs_order_id']
+        && (int) $relinkedRow['service_id'] === $newServiceId)
+        ? ok('SAME order and service re-delivered — no new code was minted')
+        : bad('restore minted new provisioning: ' . json_encode([$relinkedRow, $rowAfter['whmcs_order_id'], $newServiceId]));
+    $restoreAdapter->finalizeCalls === 0
+        ? ok('replay path: no re-acknowledge on restore')
+        : bad("restore called finalize {$restoreAdapter->finalizeCalls} times");
+
+    // repeat restore (new device again) rides the row-already-mine branch
+    $again = $service->redeem($app, $restoreRecord, $repo->getUser($restoredUserId), $restoreAdapter);
+    ($again['state'] === 'provisioned' && $again['accessCode'] === $restored['accessCode'])
+        ? ok('repeat restore returns the same entitlement again')
+        : bad('repeat restore diverged: ' . json_encode($again));
+
+    // abuse fence: an account that already holds a live subscription may NOT
+    // take over an erased owner's purchase (re-deliver only, never stack)
+    $abuserUserId = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
+        'provider' => 'google', 'provider_subject' => "$marker-abuser",
+        'email' => "abuser-$marker@vpnhood.itest", 'email_verified_claim' => 1,
+        'client_id' => null, 'external_uid' => IapRepository::uuidV4(),
+        'created_at' => $now, 'updated_at' => $now,
+    ]);
+    Capsule::table('mod_vpnhood_iap_purchases')->insert([
+        'app_id' => $appId, 'store' => 'googleplay', 'purchase_key' => "itest-abuserlive-$marker",
+        'user_id' => $abuserUserId, 'status' => 'provisioned',
+        'expiry_time' => date('Y-m-d H:i:s', time() + 86400),
+        'created_at' => $now, 'updated_at' => $now,
+    ]);
+    // make the row takeable again: pretend its owner was erased once more
+    Capsule::table('mod_vpnhood_iap_purchases')
+        ->where('purchase_key', $renewal->purchaseKey)->update(['user_id' => $erasedUserId]);
+    try {
+        $service->redeem($app, $restoreRecord, $repo->getUser($abuserUserId), $restoreAdapter);
+        bad('an account with a live subscription took over an erased purchase');
+    } catch (ApiException $e) {
+        $e->getHttpStatus() === 403
+            ? ok('take-over refused (403) for an account that already holds a live subscription')
+            : bad('take-over refused with wrong status ' . $e->getHttpStatus());
+    }
+    ((int) one($db, 'SELECT user_id FROM mod_vpnhood_iap_purchases WHERE purchase_key=?',
+        [$renewal->purchaseKey])['user_id'] === $erasedUserId)
+        ? ok('refused take-over left the ledger row untouched')
+        : bad('refused take-over still moved the row');
 } finally {
     // -- cleanup -------------------------------------------------------------
     foreach ($createdOrderIds as $orderId) {
@@ -397,6 +488,9 @@ try {
     Capsule::table('mod_vpnhood_iap_purchases')->where('purchase_key', 'like', "itest-%$marker%")->delete();
     Capsule::table('mod_vpnhood_iap_purchases')->where('app_id', $appId)->delete();
     Capsule::table('mod_vpnhood_iap_users')->where('provider_subject', 'like', "$marker%")->delete();
+    if ($erasedUserIds !== []) {
+        Capsule::table('mod_vpnhood_iap_deletions')->whereIn('user_id', $erasedUserIds)->delete();
+    }
     Capsule::table('mod_vpnhood_iap_products')->where('app_id', $appId)->delete();
     Capsule::table('mod_vpnhood_iap_apps')->where('id', $appId)->delete();
     // the hand-made renewal-invoice fixture (deleting an order does not touch it)
