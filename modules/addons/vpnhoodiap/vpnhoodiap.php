@@ -35,7 +35,7 @@ function vpnhoodiap_config(): array
     return [
         'name'        => 'VpnHood! In-App Purchase',
         'description' => 'Processes app-store purchases (Google Play / Apple / Microsoft) into WHMCS clients, orders and paid invoices, delivering VpnHood access codes through the install\'s provisioning module.',
-        'version'     => '1.0.7',
+        'version'     => '1.0.8',
         'author'      => 'VpnHood',
         'fields'      => [
             'AdminAlertEmail' => [
@@ -851,13 +851,16 @@ function vpnhoodiap_renderCatalog(IapRepository $repo, string $modulelink): void
 {
     $mappings = $repo->allProductMappings();
     echo '<table class="table table-striped"><thead><tr>'
-        . '<th>App</th><th>Store Product</th><th>Base Plan</th><th>WHMCS Product</th><th>Cycle (months)</th><th>Enabled</th><th></th></tr></thead><tbody>';
+        . '<th>App</th><th>Store</th><th>Store Product</th><th>Base Plan</th><th>WHMCS Product</th><th>Cycle (months)</th><th>Enabled</th><th></th></tr></thead><tbody>';
     if (empty($mappings)) {
-        echo '<tr><td colspan="7" class="text-center text-muted">No catalog mappings. Purchases for unmapped SKUs are parked, never delivered.</td></tr>';
+        echo '<tr><td colspan="8" class="text-center text-muted">No catalog mappings. Purchases for unmapped SKUs are parked, never delivered.</td></tr>';
     }
     foreach ($mappings as $m) {
+        // the app implies the store, but a package name alone does not show it — and per-store
+        // catalogs are the whole point of mapping by app, so say it outright
         echo '<tr>'
             . '<td>#' . (int) $m['app_id'] . ' ' . htmlspecialchars($m['package_name'] ?? '') . '</td>'
+            . '<td><code>' . htmlspecialchars($m['store'] ?? '') . '</code></td>'
             . '<td><code>' . htmlspecialchars($m['store_product_id']) . '</code></td>'
             . '<td><code>' . htmlspecialchars($m['store_base_plan_id']) . '</code></td>'
             . '<td>#' . (int) $m['whmcs_product_id'] . ' ' . htmlspecialchars($m['product_name'] ?? '') . '</td>'
