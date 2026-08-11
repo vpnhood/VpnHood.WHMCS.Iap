@@ -130,8 +130,10 @@ try {
         : bad("$liveSessions session(s) still resolve after deletion");
 
     $purchase = (array) Capsule::table('mod_vpnhood_iap_purchases')->where('id', $purchaseId)->first();
-    ($purchase['user_id'] === null && $purchase['status'] === 'provisioned')
-        ? ok('the purchase survives with no owner — the paid gate stays open')
+    // the dead pointer is deliberate: the journal keeps the same numeric id, and it is
+    // what lets Restore Purchases re-attach the purchase to the person's next account
+    ((int) $purchase['user_id'] === $userIds['main'] && $purchase['status'] === 'provisioned')
+        ? ok('the purchase survives with a dead owner pointer — the paid gate stays open, restore can re-attach')
         : bad('the purchase was altered: ' . json_encode($purchase));
 
     $client = (array) Capsule::table('tblclients')->where('id', $clientIds['main'])->first();

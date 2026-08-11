@@ -43,8 +43,13 @@ class EntitlementService
     public function redeem(array $app, PurchaseRecord $record, ?array $sessionUser, StoreAdapterInterface $adapter): array
     {
         // ---- binding guard (client path): the purchase must carry the session
-        // user's own external uid, or someone is replaying a stolen token.
-        if ($sessionUser !== null && $record->obfuscatedUid !== $sessionUser['external_uid']) {
+        // user's own external uid, or someone is replaying a stolen token. One
+        // carve-out: a uid whose owner went through "forget me" — restore after
+        // account deletion is the same person holding the same store account,
+        // and must not dead-end on a 403 (see relinkErasedOwner for the rules).
+        if ($sessionUser !== null && $record->obfuscatedUid !== $sessionUser['external_uid']
+            && !$this->relinkErasedOwner($record, $sessionUser)
+        ) {
             throw new ApiException('This purchase belongs to a different account.', 403, 'purchase_account_mismatch');
         }
 
@@ -275,6 +280,83 @@ class EntitlementService
     }
 
     /** Insert the ledger row if it does not exist yet (unique (store, purchase_key)). */
+    /**
+     * Restore after "forget me": may THIS session take over a purchase whose uid
+     * does not match? Only when every one of these holds:
+     *
+     *   1. the record's uid resolves to NO live account — a live owner is the
+     *      stolen-token case, and it keeps its 403;
+     *   2. the purchase is already on the ledger, its remembered owner is gone,
+     *      AND that owner is journalled as deleted — erasure is the only way a
+     *      user row disappears legitimately; anything else stays fail-closed;
+     *   3. the session account holds no other live subscription — the take-over
+     *      may only re-deliver, never stack a second entitlement.
+     *
+     * Passing hands the ledger row to the session user and lets the normal flow
+     * continue: the idempotent replay then returns the purchase's EXISTING
+     * service and access code — never a new order, never a new code. That is
+     * what makes forget-me useless as a code mint: the store proof always leads
+     * back to the one service the purchase already paid for, and a person who
+     * shared their old code before deleting gains nothing they could not have
+     * gained by sharing it without deleting.
+     *
+     * GDPR: nothing erased is resurrected. The person proves the purchase with
+     * the store's own receipt (possession of the store account that paid); the
+     * old identity, client and invoices stay anonymized.
+     */
+    private function relinkErasedOwner(PurchaseRecord $record, array $sessionUser): bool
+    {
+        // rule 1 — the uid must be orphaned
+        if ($record->obfuscatedUid === null
+            || $this->repo->getUserByExternalUid($record->obfuscatedUid) !== null) {
+            return false;
+        }
+
+        $row = Capsule::table('mod_vpnhood_iap_purchases')
+            ->where('store', $record->store)
+            ->where('purchase_key', $record->purchaseKey)
+            ->first(['id', 'user_id']);
+        if ($row === null || $row->user_id === null) {
+            return false;
+        }
+        if ((int) $row->user_id === (int) $sessionUser['id']) {
+            return true; // this account already took it over — repeat restore
+        }
+
+        // rule 2 — the remembered owner must be gone AND journalled as deleted
+        if ($this->repo->getUser((int) $row->user_id) !== null) {
+            return false;
+        }
+        $ownerWasErased = Capsule::table('mod_vpnhood_iap_deletions')
+            ->where('user_id', (int) $row->user_id)
+            ->exists();
+        if (!$ownerWasErased) {
+            return false;
+        }
+
+        // rule 3 — the session account must not already hold a live subscription
+        $hasLiveSubscription = Capsule::table('mod_vpnhood_iap_purchases')
+            ->where('user_id', (int) $sessionUser['id'])
+            ->where('status', 'provisioned')
+            ->where('purchase_key', '!=', $record->purchaseKey)
+            ->where(function ($query) {
+                $query->whereNull('expiry_time')->orWhere('expiry_time', '>', date('Y-m-d H:i:s'));
+            })
+            ->exists();
+        if ($hasLiveSubscription) {
+            return false;
+        }
+
+        Capsule::table('mod_vpnhood_iap_purchases')
+            ->where('id', (int) $row->id)
+            ->update(['user_id' => (int) $sessionUser['id'], 'updated_at' => date('Y-m-d H:i:s')]);
+        $this->repo->log(null, 'purchase.relinked', '', 0,
+            ['store' => $record->store, 'purchase' => (int) $row->id,
+                'erased_user' => (int) $row->user_id, 'new_user' => (int) $sessionUser['id']],
+            'restore after account deletion: the ledger row was handed to the new account');
+        return true;
+    }
+
     private function ensurePurchaseRow(array $app, PurchaseRecord $record, ?array $user): void
     {
         $exists = Capsule::table('mod_vpnhood_iap_purchases')
