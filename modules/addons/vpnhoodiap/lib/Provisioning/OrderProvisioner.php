@@ -13,7 +13,7 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
 /**
  * Places one WHMCS order for a store purchase, WHMCS-native end to end:
  * AddOrder → AddInvoicePayment (transid = store order id, gateway =
- * vpnhoodiap) → assert Paid → AcceptOrder(autosetup) → WHMCS runs the
+ * vpnhoodiappay) → assert Paid → AcceptOrder(autosetup) → WHMCS runs the
  * product's own provisioning module. Failure rolls the order back
  * (CancelOrder + DeleteOrder) so nothing half-provisioned survives.
  *

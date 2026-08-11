@@ -1,11 +1,11 @@
 <?php
 /**
  * suppress-emails.test.php — the EmailPreSend hook aborts WHMCS mail for records
- * that belong to the vpnhoodiap gateway (invoice lifecycle AND the product welcome
+ * that belong to the vpnhoodiappay gateway (invoice lifecycle AND the product welcome
  * email) and leaves every other invoice's and service's mail alone.
  *
  * Runs ON the dev server. Creates two draft invoices for the test buyer via
- * localAPI (one on the vpnhoodiap bookkeeping gateway, one on banktransfer),
+ * localAPI (one on the vpnhoodiappay bookkeeping gateway, one on banktransfer),
  * fires the EmailPreSend hook point exactly as WHMCS's mailer does, asserts
  * abortsend, then cancels both invoices. No mail is actually sent at any
  * point (the hook is exercised directly; sendinvoice is off).
