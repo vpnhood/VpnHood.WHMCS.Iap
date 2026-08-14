@@ -296,7 +296,56 @@ class IapRepository
         return $row === null ? null : (array) $row;
     }
 
-    /** The account key. Case and surrounding space never distinguish two people. */
+    /**
+     * Accounts whose SIGN-IN METHODS currently report this address, oldest first.
+     * Resolution matches against these, never against the account row's own email:
+     * that one is a contact snapshot, and a snapshot goes stale — an address the
+     * owner abandoned (and an employer may since have handed to someone else) must
+     * stop opening the account the moment no sign-in method carries it any more.
+     */
+    public function findUsersByIdentityEmail(string $email): array
+    {
+        $userIds = Capsule::table('mod_vpnhood_iap_identities')
+            ->where('email', self::normalizeEmail($email))
+            ->pluck('user_id')->unique()->values()->all();
+        if ($userIds === []) {
+            return [];
+        }
+        return Capsule::table('mod_vpnhood_iap_users')
+            ->whereIn('id', $userIds)
+            ->orderBy('id')
+            ->get()->map(fn ($row) => (array) $row)->all();
+    }
+
+    /**
+     * Read a WHMCS service property (the hidden per-product custom-field
+     * mechanism serviceProperties uses) for ANY service — module code can only
+     * reach its own service's properties through the model, and the account/key
+     * features need to read other services'. Read-only, ever.
+     */
+    public static function serviceProperty(int $serviceId, string $name): ?string
+    {
+        $row = Capsule::table('tblcustomfieldsvalues as v')
+            ->join('tblcustomfields as f', 'f.id', '=', 'v.fieldid')
+            ->where('v.relid', $serviceId)
+            ->where('f.type', 'product')
+            ->whereRaw("LOWER(SUBSTRING_INDEX(f.fieldname, '|', 1)) = ?", [strtolower($name)])
+            ->first(['v.value']);
+        $value = $row?->value;
+        return $value === null || $value === '' ? null : (string) $value;
+    }
+
+    /**
+     * The one canonical hash of an access code (claim-by-code lookups). The hub
+     * stores only this — never the code — so its "codes are not persisted"
+     * stance survives the feature; a hash opens nothing.
+     */
+    public static function codeHash(string $accessCode): string
+    {
+        return hash('sha256', trim($accessCode));
+    }
+
+    /** Case and surrounding space never distinguish two people. */
     public static function normalizeEmail(string $email): string
     {
         return strtolower(trim($email));
@@ -307,19 +356,27 @@ class IapRepository
      *
      *   1. A known identity (provider, subject) always wins. This is what keeps an
      *      account stable when the provider changes its email address.
-     *   2. A NEW identity whose verified email matches an existing account joins that
-     *      account: Google today, Apple or a password login tomorrow, same address,
+     *   2. A NEW identity joins an existing account only when its verified email
+     *      matches an address one of that account's sign-in methods CURRENTLY
+     *      reports: Google today, Apple or a password login tomorrow, same address,
      *      same account, same external_uid — so a purchase made under one provider
      *      is still bound (the stores echo external_uid back) after signing in with
-     *      another. Only safe because the caller has already rejected sign-ins the
-     *      provider did not mark email_verified — an unverified address would let
-     *      anyone claim someone else's account by naming it.
-     *   3. Otherwise this is a new person: account + first linked identity.
+     *      another. Matching is against the identities, never the account row's
+     *      email: that is a contact snapshot, and a stale snapshot is how a
+     *      recycled work address would open its previous owner's account. Only
+     *      safe because the caller has already rejected sign-ins the provider did
+     *      not mark email_verified — an unverified address would let anyone claim
+     *      someone else's account by naming it. The owner is told whenever a
+     *      sign-in method is added: a silent join is what turns a mistaken or
+     *      hostile link into a quiet takeover.
+     *   3. An address that several accounts currently answer to joins NONE of
+     *      them (split accounts from the pre-email era): guessing would hand one
+     *      person's purchases to another. A fresh account is created and the
+     *      collision reported loudly; merging is a human decision.
+     *   4. Otherwise this is a new person: account + first linked identity.
      *
-     * The account keeps the email it was created with; a provider-side address
-     * change updates the identity row only (rule 1 found it, nothing to re-key).
-     * provider/provider_subject on the account mirror the most recent sign-in for
-     * the admin's benefit — resolution never reads them.
+     * The account row's email mirrors the most recent sign-in, like
+     * provider/provider_subject — contact and display only, never resolution.
      */
     public function findOrCreateUser(string $provider, string $subject, string $email, bool $emailVerifiedClaim, ?string $displayName): array
     {
@@ -342,19 +399,28 @@ class IapRepository
                     ->where('id', $identity->id)
                     ->update(['email' => $email, 'updated_at' => $now]);
             }
-            return $this->recordSignIn($user, $provider, $subject, $emailVerifiedClaim, $displayName, $now);
+            return $this->recordSignIn($user, $provider, $subject, $email, $emailVerifiedClaim, $displayName, $now);
         }
 
-        // -- 2. new identity, known address
-        $user = $this->findUserByEmail($email);
-        if ($user !== null) {
+        // -- 2. new identity, address currently reported by exactly one account
+        $candidates = $this->findUsersByIdentityEmail($email);
+        if (count($candidates) === 1) {
+            $user = $candidates[0];
             $this->linkIdentity((int) $user['id'], $provider, $subject, $email, $now);
-            return $this->recordSignIn($user, $provider, $subject, $emailVerifiedClaim, $displayName, $now);
+            $this->notifyNewSignInMethod($user, $provider);
+            return $this->recordSignIn($user, $provider, $subject, $email, $emailVerifiedClaim, $displayName, $now);
         }
 
-        // -- 3. new person
+        // -- 3. several accounts answer to this address: join none, say so loudly
+        if (count($candidates) > 1) {
+            $ids = implode(', #', array_map(fn ($candidate) => $candidate['id'], $candidates));
+            $this->alertAdmins("vpnhoodiap: sign-in address {$email} is currently reported by the sign-in methods of "
+                . count($candidates) . " accounts (#{$ids}); linked none — a new account was created. Merge by hand.");
+        }
+
+        // -- 4. new person
         try {
-            $id = Capsule::table('mod_vpnhood_iap_users')->insertGetId([
+            $id = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
                 'provider'             => $provider,
                 'provider_subject'     => $subject,
                 'email'                => $email,
@@ -365,28 +431,44 @@ class IapRepository
                 'updated_at'           => $now,
             ]);
         } catch (\Throwable $e) {
-            // lost a concurrent-insert race on unique (email) — reread and link
-            $row = $this->findUserByEmail($email);
-            if ($row === null) {
-                throw $e;
-            }
-            $this->linkIdentity((int) $row['id'], $provider, $subject, $email, $now);
-            return $row;
+            // only the pre-identity unique(email) index can reject this insert; it
+            // must be gone before resolution is safe, so fail loudly with the cure
+            throw new \RuntimeException(
+                'vpnhoodiap: users.email still carries the pre-identity unique index — open the addon page so _upgrade() runs.',
+                0, $e);
         }
-        $this->linkIdentity((int) $id, $provider, $subject, $email, $now);
-        $user = $this->getUser((int) $id);
+        if (!$this->linkIdentity($id, $provider, $subject, $email, $now)) {
+            // lost a concurrent race for this same identity: the winner's account is
+            // the account. Drop the row just created for nothing and use theirs.
+            Capsule::table('mod_vpnhood_iap_users')->where('id', $id)->delete();
+            $identity = Capsule::table('mod_vpnhood_iap_identities')
+                ->where('provider', $provider)
+                ->where('provider_subject', $subject)
+                ->first();
+            $user = $identity === null ? null : $this->getUser((int) $identity->user_id);
+            if ($user === null) {
+                throw new \RuntimeException('Lost the identity race but the winning identity is gone.');
+            }
+            return $this->recordSignIn($user, $provider, $subject, $email, $emailVerifiedClaim, $displayName, $now);
+        }
+        $user = $this->getUser($id);
         if ($user === null) {
             throw new \RuntimeException('User row disappeared right after insert.');
         }
         return $user;
     }
 
-    /** Mirror the sign-in onto the account row (admin display only — never resolution). */
-    private function recordSignIn(array $user, string $provider, string $subject, bool $emailVerifiedClaim, ?string $displayName, string $now): array
+    /** Mirror the sign-in onto the account row (contact and display only — never resolution). */
+    private function recordSignIn(array $user, string $provider, string $subject, string $email, bool $emailVerifiedClaim, ?string $displayName, string $now): array
     {
         $update = [];
         if ($user['provider'] !== $provider || $user['provider_subject'] !== $subject) {
             $update = ['provider' => $provider, 'provider_subject' => $subject];
+        }
+        // keep the contact address at the one the person actually signs in with, so
+        // notices reach a live mailbox instead of a years-old snapshot
+        if ((string) $user['email'] !== $email) {
+            $update['email'] = $email;
         }
         if ((bool) $user['email_verified_claim'] !== $emailVerifiedClaim) {
             $update['email_verified_claim'] = $emailVerifiedClaim ? 1 : 0;
@@ -404,8 +486,8 @@ class IapRepository
         return $user;
     }
 
-    /** Attach a sign-in proof to an account. Losing the unique-insert race is fine — the identity exists. */
-    private function linkIdentity(int $userId, string $provider, string $subject, string $email, string $now): void
+    /** Attach a sign-in proof to an account. False = lost the unique-insert race (the identity already exists). */
+    private function linkIdentity(int $userId, string $provider, string $subject, string $email, string $now): bool
     {
         try {
             Capsule::table('mod_vpnhood_iap_identities')->insert([
@@ -416,9 +498,51 @@ class IapRepository
                 'created_at'       => $now,
                 'updated_at'       => $now,
             ]);
+            return true;
         } catch (\Throwable) {
             // unique (provider, subject) already present — a concurrent request linked it
+            return false;
         }
+    }
+
+    /**
+     * Tell the owner a sign-in method was added: a silent join is what turns a
+     * mistaken or hostile link into a quiet takeover, and this mail is the one
+     * trace the rightful owner would ever see. Best-effort — mail must never break
+     * sign-in — and an account that never bought has no client to write to (and
+     * nothing worth taking). The log row is the durable trace either way.
+     */
+    private function notifyNewSignInMethod(array $user, string $provider): void
+    {
+        $this->log((int) $user['id'], 'identity_linked', '', 0, null, $provider);
+        if (empty($user['client_id']) || !function_exists('localAPI')) {
+            return;
+        }
+        try {
+            localAPI('SendEmail', [
+                'id'            => (int) $user['client_id'],
+                'customtype'    => 'general',
+                'customsubject' => 'A new sign-in method was added to your account',
+                'custommessage' => '<p>A new way of signing in (' . htmlspecialchars($provider, ENT_QUOTES)
+                    . ') was just added to your VpnHood account.</p>'
+                    . '<p>If this was you, there is nothing to do. If it was not, contact support immediately.</p>',
+            ]);
+        } catch (\Throwable) {
+            // tolerated — see above
+        }
+    }
+
+    /** Loud ops: system activity log + module log (same channels as the redeem pipeline's alerts). */
+    private function alertAdmins(string $message): void
+    {
+        try {
+            if (function_exists('localAPI')) {
+                localAPI('LogActivity', ['description' => $message]);
+            }
+        } catch (\Throwable) {
+            // the alert must never take sign-in down
+        }
+        $this->log(null, 'alert', '', 0, null, $message);
     }
 
     /** All sign-in proofs attached to an account, oldest first. */
@@ -481,6 +605,30 @@ class IapRepository
     {
         return Capsule::table('mod_vpnhood_iap_log')->orderByDesc('id')->limit($limit)
             ->get()->map(fn ($row) => (array) $row)->all();
+    }
+
+    // -- refund marks ---------------------------------------------------------
+
+    /**
+     * The 24-month one-way fingerprint of a refunded account (lifecycle §8):
+     * a salted-nothing sha256 of the normalized address — it cannot be turned
+     * back into a person, it survives deletion, and its only use is judging
+     * future refund requests. Disclosed at refund time.
+     */
+    public function addRefundMark(string $email): void
+    {
+        Capsule::table('mod_vpnhood_iap_refund_marks')->insert([
+            'email_hash' => hash('sha256', self::normalizeEmail($email)),
+            'created_at' => date('Y-m-d H:i:s'),
+        ]);
+    }
+
+    /** Was this address refunded before (within the retained 24 months)? */
+    public function hasRefundMark(string $email): bool
+    {
+        return Capsule::table('mod_vpnhood_iap_refund_marks')
+            ->where('email_hash', hash('sha256', self::normalizeEmail($email)))
+            ->exists();
     }
 
     // -- audit log + rate limiting ------------------------------------------

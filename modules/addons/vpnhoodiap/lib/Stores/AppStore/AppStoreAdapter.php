@@ -132,6 +132,13 @@ class AppStoreAdapter implements StoreAdapterInterface
         return [];
     }
 
+    public function stopRenewals(array $app, string $purchaseKey): bool
+    {
+        // Apple gives developers no cancellation lever — only the subscriber can
+        // cancel, in their store settings. The deletion flow says so instead.
+        return false;
+    }
+
     // ----------------------------------------------------------- internal --
 
     private static function mapEvent(string $type, string $subtype): string

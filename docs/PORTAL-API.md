@@ -30,8 +30,11 @@ this same document and the apps will not know the difference.
 | `POST` | `/auth/sessions` | — | Sign in with a Google/Apple id token → session token |
 | `DELETE` | `/auth/sessions/current` | ✔ | Sign out (revokes the token server-side) |
 | `GET` | `/account` | ✔ | The signed-in account |
-| `DELETE` | `/account` | ✔ | Delete the account everywhere ("forget me") |
-| `GET` | `/account/entitlements` | ✔ | What that account currently holds |
+| `DELETE` | `/account` | ✔ | Delete the account everywhere ("forget me"); `stopRenewals=true` also asks the stores that allow it to stop future charges |
+| `GET` | `/account/entitlements` | ✔ | What that account currently holds — store entitlements and website keys, default marked |
+| `POST` | `/account/claims` | ✔ | Claim a key by pasting its code (possession is the proof) |
+| `PATCH` | `/account/default-key` | ✔ | Deliberately choose (or clear with null) the key that serves this account (`POST` is accepted as an alias — some hosts block PATCH at the web server) |
+| `GET` | `/account/deletion-preview` | ✔ | Everything to show before deleting: every key one last time, subscription states, what billing gets cancelled |
 | `GET` | `/billing/plans?store=&packageName=` | — | Plans this app may sell in that store |
 | `POST` | `/billing/purchases` | ✔ | Redeem a store purchase → access code |
 
@@ -172,11 +175,12 @@ failure.
 | `unknown_store` | 400 | Store is not one this API knows |
 | `purchase_invalid` | 400 | The store would not confirm the proof |
 | `not_found` | 404 | No such resource — **or the addon is not active on this install** |
+| `code_not_found` | 404 | No key answers to this code (claims / default-key) |
 | `method_not_allowed` | 405 | Wrong verb for an existing resource (see `Allow`) |
 | `purchase_unattributed` | 409 | No attribution the portal can resolve to an account; recorded for an admin |
 | `purchase_inactive` | 410 | Expired, cancelled or refunded at the store |
 | `plan_not_available` | 422 | The store product is not mapped to a plan here; parked, admin alerted |
-| `deletion_blocked` | 409 | The account still has active web services; cancel them in the web client area first |
+| `deletion_blocked` | 409 | RETIRED (kept for old clients' error maps): deletion no longer blocks — web billing is cancelled at period end instead |
 | `rate_limited` | 429 | Too many requests from this address |
 | `store_not_supported` | 501 | Known store, not implemented on this portal yet |
 | `provisioning_failed` | 502 | Downstream provisioning failed; nothing half-created, safe to retry |
@@ -189,7 +193,37 @@ ones may be added.
 
 **Rate limits** (sliding window, per IP): `POST /auth/sessions` 20 per 5 min,
 `POST /billing/purchases` 30 per 5 min, `GET /system/status` 30 per min,
-`DELETE /account` 5 per 5 min.
+`DELETE /account` 5 per 5 min, `POST /account/claims` 10 per 5 min (possession of a
+code is the proof, so guessing must be expensive), `PATCH /account/default-key` and
+`GET /account/deletion-preview` 10 per 5 min.
+
+## Keys and claims
+
+An account never *owns* a key — it **points** at keys (the code is a bearer
+credential with its own device limit, enforced by the access manager wherever it is
+used). Three endpoints manage that relationship:
+
+- `GET /account/entitlements` now returns, beside the store `items`, a `webKeys`
+  array: every website key the account can see — the ones its linked customer bought,
+  and the ones it claimed — as `{accessCode, expiresAt, isDefault}`.
+  **Reseller stock never appears here.** A bulk (CSV) order is merchant inventory:
+  it has no single code, it is never a personal key, and it is a portal concept the
+  app is deliberately not told about. The one place it still matters — the delivered
+  file dies with the client-area login — is warned about on the web deletion page and
+  in the final email, both server-side.
+- `POST /account/claims {accessCode}` records that this account holds this key.
+  Pasting the code once is the whole proof — this is the designed route back for a
+  buyer whose sign-in address is not their buying address, and for anyone returning
+  after deletion with a saved code. Nothing about billing moves: no invoices, no
+  customer record, no cancel rights. `404 code_not_found` when nothing holds the
+  code. The first key an account ever points at becomes its **default**.
+- `PATCH /account/default-key {accessCode | null}` deliberately chooses (or clears)
+  THE key that serves this account. The default is what the app applies for the
+  person at sign-in, and what the purchase gate refuses on: a store purchase is
+  refused with `subscription_already_active` while the account holds an active store
+  subscription **or** an active default key — other keys they own or claimed never
+  refuse. Clearing the default (or removing the applied code in the app, which does
+  the same) is the deliberate escape that re-opens buying.
 
 ## Account deletion
 
@@ -208,18 +242,37 @@ purchase to that account and re-delivers the **same** entitlement and access cod
 owner is journalled as deleted, and only onto an account with no other live
 subscription — "forget me" cannot be used to mint anything.
 
-What deletion deliberately does **not** do: it never cancels a store subscription
-(the customer cancels in the store where they purchased — before or after deleting),
-and it never terminates a running service — an access code is an open gate with no
-personal data, and the paid period keeps working until the store's own lifecycle ends
-it. Paid invoices are retained under legal duty with the personal details replaced by
+What deletion deliberately does **not** do: it never terminates a running key — an
+access code is an open gate with no personal data, and the paid period keeps working
+until its own clock ends it. It does not cancel a store subscription *by itself*:
+pass `stopRenewals=true` (body or query) and the stores that give developers a
+cancellation lever are asked to stop future charges (Google — the subscription stays
+valid to its paid expiry); where no lever exists (Apple) the preview's warning text
+carries the whole weight and the customer cancels in the store themselves. Paid
+invoices are retained under legal duty with the personal details replaced by
 placeholders; unpaid ones are cancelled so nothing can ever bill the deleted person.
 
-A person who also has active WEB services (sold on the portal's own site) is refused
-with `deletion_blocked` until those are cancelled in the web client area — this API
-never touches a payment gateway's recurring agreement. The same deletion is available
-on the web at `index.php?m=vpnhoodiap&action=delete-account`, so it works without the
-app installed (Play policy).
+**Nothing blocks deletion.** Active WEB services (sold on the portal's own site) no
+longer refuse it: every recurring one is set to cancel at the END of its paid period
+(no renewal invoice is ever generated; the key runs out the time already bought),
+stored payment methods are dropped, and the deletion journal keeps the gateway
+agreement references so a stray charge can always be traced to an agreement an
+administrator can cancel. Before anything is erased, one final message goes to the
+address carrying every key one last time (`GET /account/deletion-preview` shows the
+same list in-app). The same deletion is available on the web at
+`index.php?m=vpnhoodiap&action=delete-account`, so it works without the app
+installed (Play policy) — and that page carries the reseller warning the app is not
+given: a bulk order's CSV is served by the client area, so it can never be downloaded
+again once the account is gone.
+
+**The preview names no store.** Each `subscriptions` entry carries `autoRenewing`,
+`expiresAt`, `state` (`active` | `between-payments` | `expired`), `canStopRenewals`
+and a ready-made `warning` — but not which store bills it. One app ships on every
+platform and naming a competing store is itself a store violation (App Review
+2.3.10), and `canStopRenewals` already carries the only fact the UI can act on.
+Where a *management link* is needed, the app compares the entitlement's store with
+its own build (`GET /account/entitlements`) and offers the link only on a match —
+comparing, never displaying, is the rule.
 
 **Fail closed.** While the addon is deactivated, *every* endpoint answers 404. A client
 that gets 404 from `/system/status` is talking to a WHMCS with no portal configured —

@@ -48,6 +48,7 @@ use WHMCS\Module\Addon\VpnHoodIap\Auth\GoogleIdentityProvider;
 use WHMCS\Module\Addon\VpnHoodIap\Auth\SessionService;
 use WHMCS\Module\Addon\VpnHoodIap\IapRepository;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountKeyService;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountService;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\ClientProvisioner;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\DeliveryReader;
@@ -76,6 +77,7 @@ require_once __DIR__ . '/lib/Stores/AppStore/AppleJws.php';
 require_once __DIR__ . '/lib/Stores/AppStore/AppStoreApiClient.php';
 require_once __DIR__ . '/lib/Stores/AppStore/AppStoreAdapter.php';
 require_once __DIR__ . '/lib/Provisioning/AccountDeletionService.php';
+require_once __DIR__ . '/lib/Provisioning/AccountKeyService.php';
 require_once __DIR__ . '/lib/Provisioning/AccountService.php';
 require_once __DIR__ . '/lib/Provisioning/ClientProvisioner.php';
 require_once __DIR__ . '/lib/Provisioning/OrderProvisioner.php';
@@ -94,6 +96,11 @@ const VPNHOODIAP_ROUTES = [
     '/auth/sessions/current' => ['DELETE' => 'vpnhoodiap_deleteCurrentSession'],
     '/account'               => ['GET' => 'vpnhoodiap_getAccount', 'DELETE' => 'vpnhoodiap_deleteAccount'],
     '/account/entitlements'  => ['GET' => 'vpnhoodiap_listEntitlements'],
+    '/account/claims'        => ['POST' => 'vpnhoodiap_claimCode'],
+    // POST tolerated beside PATCH: some hosts (LiteSpeed defaults among them)
+    // refuse PATCH at the web-server layer before PHP ever runs
+    '/account/default-key'   => ['PATCH' => 'vpnhoodiap_setDefaultKey', 'POST' => 'vpnhoodiap_setDefaultKey'],
+    '/account/deletion-preview' => ['GET' => 'vpnhoodiap_deletionPreview'],
     '/billing/plans'         => ['GET' => 'vpnhoodiap_listPlans'],
     '/billing/purchases'     => ['POST' => 'vpnhoodiap_createPurchase'],
 ];
@@ -263,17 +270,172 @@ function vpnhoodiap_getAccount(IapRepository $repo, array $request): array
  * DELETE /account — "forget me" (Apple 5.1.1(v), Play account deletion, GDPR
  * Art. 17). The person is erased everywhere at once — sessions on every device,
  * sign-in identities, the account row — and the WHMCS client behind the retained
- * invoices is anonymized and closed. Running services are deliberately left
- * alone: they are open gates with no personal data, and the store's own
- * subscription lifecycle ends them. Refused with 409 `deletion_blocked` while
- * the person still has active web services (cancel those in the web client area
- * first — this API never touches a payment gateway's recurring agreement).
+ * invoices is anonymized and closed. Nothing blocks it (lifecycle §8): web
+ * billing is cancelled at the end of its paid period instead, stored payment
+ * methods are dropped, and one final message carries the keys and warnings to
+ * the address before it is erased. Body/query `stopRenewals=true` additionally
+ * asks the stores that allow it to stop future renewals (Google yes, Apple no —
+ * the preview says which). Running keys are deliberately left alone: they are
+ * open gates with no personal data, already paid for.
  */
 function vpnhoodiap_deleteAccount(IapRepository $repo, array $request): array
 {
     vpnhoodiap_rateLimit($repo, $request, 5, 300);
     $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
-    (new AccountDeletionService())->deleteUser($user);
+
+    $stopRenewals = filter_var(
+        $request['body']['stopRenewals'] ?? $request['query']['stopRenewals'] ?? false,
+        FILTER_VALIDATE_BOOL);
+
+    // collect everything the farewell message must carry BEFORE anything dies
+    $preview = vpnhoodiap_buildDeletionPreview($repo, $user);
+    (new AccountDeletionService())->deleteUser($user, [
+        'stopRenewals'         => $stopRenewals,
+        'keys'                 => $preview['keys'],
+        // bulk never reaches the wire (a merchant concept, not a key), but the
+        // farewell message still says the delivered file cannot be served again
+        'bulkOrders'           => (new AccountKeyService($repo))->bulkOrderCount($user),
+        'subscriptionWarnings' => array_values(array_filter(array_map(
+            fn (array $subscription) => $subscription['warning'] ?? null, $preview['subscriptions']))),
+    ]);
+    return [204, null];
+}
+
+/**
+ * GET /account/deletion-preview — everything the person must see before they
+ * confirm (lifecycle §5/§10): every key they paid for shown one last time, the
+ * state of every store subscription and whether we can stop its renewals for
+ * them, and how many web-billed services will be cancelled at period end.
+ */
+function vpnhoodiap_deletionPreview(IapRepository $repo, array $request): array
+{
+    vpnhoodiap_rateLimit($repo, $request, 10, 300);
+    $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
+    return [200, vpnhoodiap_buildDeletionPreview($repo, $user)];
+}
+
+/** The shared preview builder: also feeds the final message at actual deletion. */
+function vpnhoodiap_buildDeletionPreview(IapRepository $repo, array $user): array
+{
+    $keyService = new AccountKeyService($repo);
+    $keys = $keyService->webKeysForUser($user);
+
+    $subscriptions = [];
+    $rows = \WHMCS\Database\Capsule::table('mod_vpnhood_iap_purchases')
+        ->where('user_id', (int) $user['id'])
+        ->where('status', 'provisioned')
+        ->get()->map(fn ($row) => (array) $row)->all();
+    $reader = new DeliveryReader();
+    foreach ($rows as $row) {
+        $expiry = $row['expiry_time'] !== null ? strtotime((string) $row['expiry_time']) : null;
+        $expired = $expiry !== null && $expiry < time();
+        $autoRenewing = (bool) $row['auto_renewing'];
+        if ($expired && !$autoRenewing) {
+            continue; // fully over — nothing to show, nothing to warn about
+        }
+        if (!$expired && $row['service_id'] !== null) {
+            $code = $reader->readAccessCode((int) $row['service_id']);
+            if ($code !== null) {
+                $keys[] = [
+                    'accessCode' => $code,
+                    'expiresAt'  => $expiry !== null ? gmdate('c', $expiry) : null,
+                    'isDefault'  => false,
+                ];
+            }
+        }
+        $canStopRenewals = $autoRenewing && (string) $row['store'] === 'googleplay';
+        // grace/hold: the store still holds the subscription open although access
+        // stopped — the case most likely to charge again unexpectedly (§8)
+        $betweenPayments = $expired && $autoRenewing;
+        $warning = null;
+        if ($autoRenewing) {
+            $warning = $betweenPayments
+                ? 'A subscription with a failed payment is still open at the store and may start charging again. '
+                    . 'Cancel it in the store it was bought from.'
+                : 'Deleting the account does not cancel the subscription — it may keep renewing until '
+                    . 'cancelled in the store it was bought from.';
+        }
+        // NO store name on the wire, deliberately: an app shipping on every
+        // platform may not name a competing store (App Review 2.3.10), and the
+        // only actionable fact — can WE stop the renewals — is its own flag.
+        $subscriptions[] = [
+            'autoRenewing'    => $autoRenewing,
+            'expiresAt'       => $expiry !== null ? gmdate('c', $expiry) : null,
+            'state'           => $betweenPayments ? 'between-payments' : ($expired ? 'expired' : 'active'),
+            'canStopRenewals' => $canStopRenewals,
+            'warning'         => $warning,
+        ];
+    }
+
+    $webBilling = 0;
+    if ($user['client_id'] !== null) {
+        $moduleServiceIds = \WHMCS\Database\Capsule::table('mod_vpnhood_iap_purchases')
+            ->where('client_id', (int) $user['client_id'])->whereNotNull('service_id')->pluck('service_id')->all();
+        $webBilling = (int) \WHMCS\Database\Capsule::table('tblhosting as h')
+            ->join('tblproducts as p', 'p.id', '=', 'h.packageid')
+            ->where('h.userid', (int) $user['client_id'])
+            ->whereIn('h.domainstatus', ['Active', 'Suspended'])
+            ->where('p.paytype', 'recurring')
+            ->whereNotIn('h.id', $moduleServiceIds ?: [0])
+            ->count();
+    }
+
+    return [
+        'keys'          => $keys,
+        'subscriptions' => $subscriptions,
+        'webBilling'    => ['servicesToCancelAtPeriodEnd' => $webBilling],
+    ];
+}
+
+/**
+ * POST /account/claims — claim by code (lifecycle §8): pasting a code once
+ * proves possession and records a pointer. Nothing about billing moves. The
+ * first key an account ever points at becomes its default. Tightly rate
+ * limited: possession is the proof, so guessing must be expensive.
+ *
+ * { accessCode: "..." } → 201 (created) / 200 (already claimed)
+ */
+function vpnhoodiap_claimCode(IapRepository $repo, array $request): array
+{
+    vpnhoodiap_rateLimit($repo, $request, 10, 300);
+    $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
+
+    $accessCode = trim((string) ($request['body']['accessCode'] ?? ''));
+    if ($accessCode === '') {
+        throw new ApiException('accessCode is required.', 400, 'bad_request');
+    }
+    $keyService = new AccountKeyService($repo);
+    $serviceId = $keyService->findServiceIdByCode($accessCode);
+    if ($serviceId === null) {
+        throw new ApiException('No key with this code.', 404, 'code_not_found');
+    }
+    $claim = $keyService->claim((int) $user['id'], $serviceId);
+    $state = (new DeliveryReader())->readCodeState($serviceId);
+    return [$claim['created'] ? 201 : 200, [
+        'accessCode' => $accessCode,
+        'expiresAt'  => $state['expiresAt'],
+        'isDefault'  => $claim['isDefault'],
+    ]];
+}
+
+/**
+ * PATCH /account/default-key — deliberately choose (or clear, with null) THE
+ * key that serves this account. Last-one-wins applies to exactly this kind of
+ * deliberate act; nothing automatic ever calls it.
+ *
+ * { accessCode: "..." | null } → 204
+ */
+function vpnhoodiap_setDefaultKey(IapRepository $repo, array $request): array
+{
+    vpnhoodiap_rateLimit($repo, $request, 10, 300);
+    $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
+
+    $body = $request['body'];
+    if (!array_key_exists('accessCode', $body)) {
+        throw new ApiException('accessCode is required (null clears the default).', 400, 'bad_request');
+    }
+    $accessCode = $body['accessCode'] !== null ? trim((string) $body['accessCode']) : null;
+    (new AccountKeyService($repo))->setDefault($user, $accessCode === '' ? null : $accessCode);
     return [204, null];
 }
 
@@ -356,7 +518,13 @@ function vpnhoodiap_listEntitlements(IapRepository $repo, array $request): array
                 : null,
         ];
     }
-    return [200, ['items' => $items]];
+
+    // website keys this account can see: its linked client's own services plus
+    // anything it claimed by code (lifecycle §7/§8) — with the default marked,
+    // which is what the app auto-applies at sign-in
+    $webKeys = (new AccountKeyService($repo))->webKeysForUser($user);
+
+    return [200, ['items' => $items, 'webKeys' => $webKeys]];
 }
 
 /**

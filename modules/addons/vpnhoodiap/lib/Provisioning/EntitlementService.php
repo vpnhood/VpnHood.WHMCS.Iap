@@ -8,6 +8,10 @@ use WHMCS\Module\Addon\VpnHoodIap\IapRepository;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\PurchaseRecord;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\StoreAdapterInterface;
 
+// self-loaded (not in the entrypoints' require lists): the gate is the only
+// consumer here, and missing one entrypoint list would fail at runtime
+require_once __DIR__ . '/AccountKeyService.php';
+
 if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
     die('This file cannot be accessed directly');
 }
@@ -164,6 +168,25 @@ class EntitlementService
                 ], $record);
                 $this->alertAdmins("vpnhoodiap: purchase {$record->purchaseKey} refused — user #{$user['id']}"
                     . ' already holds an active store subscription; left unacknowledged for store refund.');
+                throw new ApiException('This account already has an active subscription.', 409,
+                    'subscription_already_active');
+            }
+
+            // ---- the OTHER certainty (lifecycle §8): the key this account applies
+            // for itself — its default key, either channel, one-time included. Gifts,
+            // spares and claimed codes never refuse; warnings carry those. Skipped
+            // for a purchase this install has provisioned before (a late renewal
+            // re-provision is not a new sale) and for a superseding upgrade.
+            $isFirstProvisioning = ($row['status'] ?? null) === null
+                || in_array((string) $row['status'], ['pending', 'failed'], true);
+            if ($isFirstProvisioning && !$supersedes
+                && (new AccountKeyService($this->repo))->defaultKeyIsActive($user)) {
+                $this->updateRow($row, [
+                    'status'     => 'failed',
+                    'last_error' => 'account already served by its active default key',
+                ], $record);
+                $this->alertAdmins("vpnhoodiap: purchase {$record->purchaseKey} refused — user #{$user['id']}"
+                    . ' is already served by an active default key; left unacknowledged for store refund.');
                 throw new ApiException('This account already has an active subscription.', 409,
                     'subscription_already_active');
             }

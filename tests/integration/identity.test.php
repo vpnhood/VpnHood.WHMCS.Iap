@@ -1,12 +1,17 @@
 <?php
 /**
- * identity.test.php — the account is the PERSON, resolved in two steps:
+ * identity.test.php — the account is the PERSON, resolved in this order:
  *
  *   1. a known (provider, subject) identity always wins — accounts survive
  *      provider-side email changes;
- *   2. a new identity whose verified email matches an existing account joins it —
- *      Google today, Apple tomorrow, same address, same account, same external_uid
- *      (so the store's obfuscated account id still matches the binding guard).
+ *   2. a new identity joins an account only via an address one of that account's
+ *      sign-in methods CURRENTLY reports — Google today, Apple tomorrow, same
+ *      address, same account, same external_uid (so the store's obfuscated
+ *      account id still matches the binding guard). The account row's own email
+ *      is a contact snapshot and must never resolve: a stale snapshot is how a
+ *      recycled work address would open its previous owner's account.
+ *   3. an address several accounts answer to joins NONE (loudly);
+ *   4. otherwise a new person.
  *
  * Runs against the real module tables inside the deployed dev WHMCS; every write
  * stays in mod_vpnhood_iap_* (the capsule rule).
@@ -76,10 +81,10 @@ try {
     } else {
         bad("email change at the provider split the account (#{$renamed['id']})");
     }
-    if ($renamed['email'] === $email) {
-        ok('the account keeps its original address');
+    if ($renamed['email'] === "renamed-$email") {
+        ok('the account contact address follows the latest sign-in');
     } else {
-        bad("account address was re-keyed to {$renamed['email']}");
+        bad("contact address not refreshed: {$renamed['email']}");
     }
 
     // -- rule 2 matches case/space-insensitively ------------------------------
@@ -112,6 +117,47 @@ try {
     } else {
         bad('client link lost when the provider changed: ' . json_encode($afterLink['client_id'] ?? null));
     }
+
+    // -- joining a sign-in method leaves a durable notice ---------------------
+    $linkNotices = (int) Capsule::table('mod_vpnhood_iap_log')
+        ->where('action', 'identity_linked')->where('user_id', $google['id'])->count();
+    $linkNotices >= 1
+        ? ok('joining a sign-in method leaves a durable notice (identity_linked)')
+        : bad('no identity_linked log row for the join');
+
+    // -- a stale contact snapshot must NOT resolve ----------------------------
+    // Simulate a pre-identity-era row: the snapshot names an address no sign-in
+    // method reports any more (the owner moved on years ago; an employer may have
+    // handed the address to someone new). The person who verifiably holds that
+    // address TODAY gets their own account — matching the snapshot would hand
+    // them the previous owner's purchases.
+    $stale = "stale-$marker@vpnhood.test";
+    $victim = $repo->findOrCreateUser('google', "google-stale-$marker", $stale, true, 'First Owner');
+    $repo->findOrCreateUser('google', "google-stale-$marker", "moved-$stale", true, null); // the owner's address moved on
+    Capsule::table('mod_vpnhood_iap_users')->where('id', $victim['id'])->update(['email' => $stale]); // old install: snapshot never refreshed
+    $claimant = $repo->findOrCreateUser('apple', "apple-stale-$marker", $stale, true, null);
+    if ((int) $claimant['id'] !== (int) $victim['id']) {
+        ok('an address no sign-in method reports opens NOBODY else\'s account');
+    } else {
+        bad('recycled address resolved to the previous owner\'s account');
+    }
+
+    // -- an address several accounts answer to joins none ---------------------
+    $shared = "shared-$marker@vpnhood.test";
+    $a = $repo->findOrCreateUser('google', "google-shared-a-$marker", $shared, true, null);
+    $b = $repo->findOrCreateUser('google', "google-shared-b-$marker", "b-$shared", true, null);
+    Capsule::table('mod_vpnhood_iap_identities')->where('user_id', $b['id'])->update(['email' => $shared]); // historic split
+    $third = $repo->findOrCreateUser('apple', "apple-shared-$marker", $shared, true, null);
+    if ((int) $third['id'] !== (int) $a['id'] && (int) $third['id'] !== (int) $b['id']) {
+        ok('an address matching several accounts joins none of them');
+    } else {
+        bad('ambiguous address was silently joined to an existing account');
+    }
+    $alerts = (int) Capsule::table('mod_vpnhood_iap_log')
+        ->where('action', 'alert')->where('response', 'like', "%$shared%")->count();
+    $alerts >= 1
+        ? ok('the collision is reported loudly')
+        : bad('no alert row for the ambiguous address');
 } finally {
     $userIds = Capsule::table('mod_vpnhood_iap_users')
         ->where('email', 'like', "%$marker%")->pluck('id')->all();

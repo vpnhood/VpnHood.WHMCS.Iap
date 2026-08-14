@@ -78,6 +78,14 @@ class FakeStoreAdapter implements StoreAdapterInterface
     {
         return [];
     }
+
+    public function stopRenewals(array $app, string $purchaseKey): bool
+    {
+        $this->renewalsStopped++;
+        return true;
+    }
+
+    public int $renewalsStopped = 0;
 }
 
 function makeRecord(array $overrides = []): PurchaseRecord
@@ -112,6 +120,20 @@ $buyer = clientByEmail($db, BUYER_EMAIL);
 if (!$buyer) {
     bad('fixture missing: ' . BUYER_EMAIL);
     finish();
+}
+
+// The buyer must start with NO active default key: the hub repo's lifecycle
+// suite shares this client and deliberately leaves its last purchase Active
+// (renew acts on what purchase-order leaves behind), and that service carries
+// the isDefaultKey mark — so the F2 gate would refuse this test's redeems.
+// Wipe the buyer's services first, exactly like default-key.test.php does;
+// the hub chain re-creates its own state (purchase-order runs first there).
+$staleServices = Capsule::table('tblhosting')->where('userid', (int) $buyer['id'])
+    ->whereIn('domainstatus', ['Active', 'Suspended'])->pluck('id')->all();
+foreach ($staleServices as $staleServiceId) {
+    localAPI('ModuleTerminate', ['serviceid' => (int) $staleServiceId]);
+    Capsule::table('tblhosting')->where('id', (int) $staleServiceId)
+        ->update(['domainstatus' => 'Terminated']);
 }
 
 // -- pick a provisionable product -------------------------------------------
@@ -254,10 +276,19 @@ try {
         $createdOrderIds[] = $upgradeOrderId;
     }
 
-    // retire both live keys so the happy path below is this account's only subscription
+    // retire both live keys so the happy path below is this account's only
+    // subscription — INCLUDING their services: an ended subscription means a
+    // terminated service in the real lifecycle, and the default-key gate (F2)
+    // correctly counts a still-Active default service as "already served"
+    $retiredServiceIds = Capsule::table('mod_vpnhood_iap_purchases')
+        ->whereIn('purchase_key', ["itest-gate-$marker", "itest-upgrade-$marker"])
+        ->whereNotNull('service_id')->pluck('service_id')->all();
     Capsule::table('mod_vpnhood_iap_purchases')
         ->whereIn('purchase_key', ["itest-gate-$marker", "itest-upgrade-$marker"])
         ->update(['status' => 'canceled']);
+    foreach ($retiredServiceIds as $retiredServiceId) {
+        localAPI('ModuleTerminate', ['serviceid' => (int) $retiredServiceId]);
+    }
     // re-link and restore the fixture's verified state for the happy path below
     Capsule::table('tblusers')->where('email', BUYER_EMAIL)->update(['email_verified_at' => $buyerVerifiedAt]);
     Capsule::table('mod_vpnhood_iap_users')->where('id', $linkedUserId)

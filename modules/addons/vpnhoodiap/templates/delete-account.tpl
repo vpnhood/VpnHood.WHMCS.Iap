@@ -20,10 +20,22 @@
           or restored — signing in again later creates a new, empty account.</li>
       <li>Deleting your account does <strong>not</strong> cancel a subscription. If you have
           one, cancel it in the store where you purchased it — before or after deleting.</li>
-      <li>Access you have already paid for keeps working until that period ends.</li>
-      <li>Invoices are kept for legal and accounting reasons, with your personal details
-          replaced by anonymous placeholders.</li>
+      <li>Access you have already paid for keeps working until that period ends. Services
+          billed by us stop billing at the end of the period you have already paid for.</li>
+      <li>We email you your premium codes one last time before your address is erased.
+          Save them: after this we cannot look them up for you again.</li>
+      <li>Invoices are kept because tax law requires it, for as long as that law requires,
+          and are used for nothing else. They keep the name they were issued with.</li>
     </ul>
+
+    {if $bulkOrders > 0}
+      <div class="alert alert-warning" role="alert">
+        <strong>Download your bulk keys first.</strong> Your {$bulkOrders} bulk
+        order{if $bulkOrders > 1}s were{else} was{/if} delivered as a CSV file, and that file is
+        served from this client area. Once the account is deleted it cannot be downloaded again.
+        The keys inside it keep working until they expire.
+      </div>
+    {/if}
 
     <form method="post" action="index.php?m=vpnhoodiap&action=delete-account">
       <input type="hidden" name="do" value="delete">

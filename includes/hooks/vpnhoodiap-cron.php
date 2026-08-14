@@ -155,6 +155,10 @@ add_hook('DailyCronJob', 1, function () {
         Capsule::table('mod_vpnhood_iap_events')
             ->where('created_at', '<', $cutoff)->whereNotNull('raw')
             ->update(['raw' => null]);
+        // refund fingerprints live exactly as long as disclosed: 24 months
+        Capsule::table('mod_vpnhood_iap_refund_marks')
+            ->where('created_at', '<', date('Y-m-d H:i:s', time() - 24 * 30 * 86400))
+            ->delete();
     } catch (\Throwable $e) {
         logModuleCall('vpnhoodiap', 'cron.hygiene', '', $e->getMessage(), '');
     }

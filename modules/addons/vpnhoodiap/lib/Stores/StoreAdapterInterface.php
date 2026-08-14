@@ -59,4 +59,13 @@ interface StoreAdapterInterface
      * @return array<int,string>
      */
     public function listVoidedPurchaseKeys(array $app, int $sinceUnix): array;
+
+    /**
+     * Ask the store to stop future renewals of this subscription (lifecycle §8:
+     * offered at account deletion where the store allows it). The subscription
+     * stays valid to its paid expiry — nothing the person paid for is lost.
+     * Returns false where the store gives developers no such lever (Apple);
+     * MUST never throw for that reason — only for transport/auth failures.
+     */
+    public function stopRenewals(array $app, string $purchaseKey): bool;
 }
