@@ -69,6 +69,11 @@ class FakeNotifyAdapter implements StoreAdapterInterface
     {
         return [];
     }
+
+    public function stopRenewals(array $app, string $purchaseKey): bool
+    {
+        return false;
+    }
 }
 
 function notif(string $marker, string $type, string $messageId, ?string $purchaseKey, ?string $packageName): StoreNotification

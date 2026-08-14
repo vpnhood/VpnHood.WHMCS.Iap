@@ -21,20 +21,28 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
  *    gate with a random token behind it; the store's own lifecycle (or the
  *    customer cancelling there) is what ends it. Deletion must not take away time
  *    the person already paid for.
- *  - Paid invoices are retained (tax law; GDPR Art. 17(3)(b)) — but they belong to
- *    an anonymized client: placeholder name, an unroutable placeholder address on
- *    a reserved TLD. Amounts, dates and tax figures stay untouched (owner decision
- *    2026-08-10: no PDF archiving; the stores/payment gateway retain the payer
- *    identity under their own legal duty if an audit ever needs it).
- *  - Live WEB billing blocks deletion instead of being "handled": this module
- *    never calls a payment gateway's cancel function (support is uneven per
- *    gateway, and one miss would keep charging a card behind an erased account).
- *    The customer cancels in the client area first, then deletes. App-created
- *    accounts have no web billing, so a store reviewer can never hit this.
+ *  - Paid invoices are retained (tax law; GDPR Art. 17(3)(b)) and FROZEN AS
+ *    ISSUED, buyer's name included (lifecycle §5, decided 2026-08-13 — reversing
+ *    the earlier anonymise-the-invoices choice): WHMCS renders invoices from the
+ *    live client row, so each invoice is archived into
+ *    mod_vpnhood_iap_frozen_invoices BEFORE the client row is anonymized. The
+ *    frozen artifacts are restricted by design — nothing in the module reads
+ *    them back; they exist for an auditor, not for support or search. The live
+ *    client row still becomes placeholders (name, unroutable RFC 2606 address),
+ *    so the person disappears from the operating system while the financial
+ *    documents keep the identity the law requires them to carry.
+ *  - Live WEB billing never blocks deletion (lifecycle §8, decided 2026-08-13 —
+ *    the old refusal sent people to the website to finish deleting, the exact
+ *    pattern the store rules exist to prevent). It is CANCELLED AT THE END OF
+ *    ITS PAID PERIOD instead: no renewal invoice is ever generated, the key
+ *    still runs out the time that was bought, and the journal keeps the gateway
+ *    agreement reference so a stray charge can always be traced to an agreement
+ *    someone can cancel.
  *
- * Ordering is the safety argument: refuse → stop future charges → anonymize the
- * WHMCS side → erase the module side → journal. A failure aborts loudly and the
- * whole action can be re-run; every step is idempotent.
+ * Ordering is the safety argument: stop future charges → say goodbye while the
+ * address still exists → anonymize the WHMCS side → erase the module side →
+ * journal. A failure before erasure aborts loudly and the whole action can be
+ * re-run; every step is idempotent.
  */
 class AccountDeletionService
 {
@@ -42,54 +50,154 @@ class AccountDeletionService
      * Delete the account behind a signed-in module user.
      *
      * @param array $user the mod_vpnhood_iap_users row (as SessionService::resolve returns it)
-     * @throws ApiException 409 deletion_blocked while active web services exist
+     * @param array $options stopRenewals?: bool (ask the stores that allow it to stop
+     *                       future charges), keys?: array (the farewell message's key
+     *                       list, collected by the caller before anything is erased),
+     *                       bulkOrders?: int (reseller batches — no key to show, but the
+     *                       delivered file dies with the client-area login),
+     *                       subscriptionWarnings?: string[] (lines for still-running
+     *                       store subscriptions)
      */
-    public function deleteUser(array $user): void
+    public function deleteUser(array $user, array $options = []): void
     {
         $userId = (int) $user['id'];
         $clientId = $user['client_id'] !== null ? (int) $user['client_id'] : null;
+        $details = [];
 
+        if (!empty($options['stopRenewals'])) {
+            $details['renewalsStopped'] = $this->stopStoreRenewals($userId);
+        }
         if ($clientId !== null) {
-            $this->deleteClientSide($clientId);
+            $details += $this->deleteClientSide($clientId, $options);
         }
         $this->eraseModuleRows($userId);
-        $this->journal($userId, $clientId, 'deleted');
+        $this->journal($userId, $clientId, 'deleted', $details);
     }
 
     /**
      * Delete a WHMCS-client account from the client area (the web deletion path
      * Play requires). Works for app buyers and pure web customers alike; when a
      * module account hangs on the client's email it dies with it.
-     *
-     * @throws ApiException 409 deletion_blocked while active web services exist
      */
-    public function deleteClient(int $clientId, ?array $moduleUser): void
+    public function deleteClient(int $clientId, ?array $moduleUser, array $options = []): void
     {
-        $this->deleteClientSide($clientId);
+        $details = $this->deleteClientSide($clientId, $options);
         if ($moduleUser !== null) {
             $this->eraseModuleRows((int) $moduleUser['id']);
         }
-        $this->journal($moduleUser !== null ? (int) $moduleUser['id'] : null, $clientId, 'deleted');
+        $this->journal($moduleUser !== null ? (int) $moduleUser['id'] : null, $clientId, 'deleted', $details);
     }
 
     // ------------------------------------------------------------------ steps --
 
-    /** @throws ApiException */
-    private function deleteClientSide(int $clientId): void
+    /**
+     * @return array journal details (agreement references etc.)
+     * @throws ApiException
+     */
+    private function deleteClientSide(int $clientId, array $options = []): array
     {
-        $this->assertNoActiveWebServices($clientId);
+        $details = $this->cancelWebBillingAtPeriodEnd($clientId);
         $this->cancelUnpaidInvoices($clientId);
+        $details['payMethodsDropped'] = $this->dropStoredPayMethods($clientId);
+        $this->sendFinalMessage($clientId, $options['keys'] ?? [], $options['subscriptionWarnings'] ?? [],
+            (int) ($options['bulkOrders'] ?? 0));
+        $details += $this->freezeInvoices($clientId);
         $this->anonymizeClient($clientId);
+        return $details;
     }
 
     /**
-     * Active services the module did NOT provision mean a live web relationship —
-     * possibly a recurring gateway agreement this module refuses to touch. Refuse
-     * with an actionable message; nothing has been changed yet.
+     * Archive every invoice exactly as issued — buyer identity included — before
+     * anonymizeClient() rewrites the client row those invoices render from
+     * (lifecycle §5 step 6). One artifact per invoice, written once and never
+     * updated: on a re-run after a partial failure the client row may already be
+     * placeholders, and overwriting would destroy the only true snapshot. A
+     * failure here ABORTS the deletion (fail-loud): anonymizing without the
+     * snapshot would strip names off tax records irrecoverably.
      *
-     * @throws ApiException 409 deletion_blocked
+     * @return array{frozenInvoices: array<int,array{id:int, sha256:string}>}
+     * @throws ApiException 502 deletion_failed when an artifact cannot be written
      */
-    private function assertNoActiveWebServices(int $clientId): void
+    private function freezeInvoices(int $clientId): array
+    {
+        $client = Capsule::table('tblclients')->where('id', $clientId)->first();
+        if ($client === null) {
+            return ['frozenInvoices' => []];
+        }
+        $clientBlock = [
+            'firstName'   => (string) $client->firstname,
+            'lastName'    => (string) $client->lastname,
+            'companyName' => (string) $client->companyname,
+            'address1'    => (string) $client->address1,
+            'address2'    => (string) $client->address2,
+            'city'        => (string) $client->city,
+            'state'       => (string) $client->state,
+            'postcode'    => (string) $client->postcode,
+            'country'     => (string) $client->country,
+            'taxId'       => (string) ($client->tax_id ?? ''),
+            'email'       => (string) $client->email,
+        ];
+
+        $refs = [];
+        $invoices = Capsule::table('tblinvoices')->where('userid', $clientId)->orderBy('id')->get();
+        foreach ($invoices as $invoice) {
+            $invoiceId = (int) $invoice->id;
+            $existing = Capsule::table('mod_vpnhood_iap_frozen_invoices')
+                ->where('invoice_id', $invoiceId)->first(['id', 'sha256']);
+            if ($existing !== null) {
+                $refs[] = ['id' => $invoiceId, 'sha256' => (string) $existing->sha256];
+                continue; // written once — never overwrite a true snapshot with placeholder data
+            }
+
+            $items = Capsule::table('tblinvoiceitems')->where('invoiceid', $invoiceId)->orderBy('id')
+                ->get(['id', 'type', 'relid', 'description', 'amount', 'taxed'])
+                ->map(fn ($row) => (array) $row)->all();
+            $transactions = Capsule::table('tblaccounts')->where('invoiceid', $invoiceId)->orderBy('id')
+                ->get(['id', 'gateway', 'transid', 'date', 'amountin', 'amountout', 'fees'])
+                ->map(fn ($row) => (array) $row)->all();
+
+            $artifact = json_encode([
+                'schema'       => 'vpnhoodiap.frozen-invoice.v1',
+                'frozenAt'     => date('c'),
+                'client'       => $clientBlock,
+                'invoice'      => (array) $invoice,
+                'items'        => $items,
+                'transactions' => $transactions,
+            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            if ($artifact === false) {
+                throw new ApiException("Could not render the frozen artifact for invoice {$invoiceId}",
+                    502, 'deletion_failed');
+            }
+
+            try {
+                Capsule::table('mod_vpnhood_iap_frozen_invoices')->insert([
+                    'invoice_id' => $invoiceId,
+                    'client_id'  => $clientId,
+                    'artifact'   => $artifact,
+                    'sha256'     => hash('sha256', $artifact),
+                    'created_at' => date('Y-m-d H:i:s'),
+                ]);
+            } catch (\Throwable $e) {
+                throw new ApiException("Could not freeze invoice {$invoiceId}: " . $e->getMessage(),
+                    502, 'deletion_failed');
+            }
+            $refs[] = ['id' => $invoiceId, 'sha256' => hash('sha256', $artifact)];
+        }
+        return ['frozenInvoices' => $refs];
+    }
+
+    /**
+     * Every active web-billed service is set to cancel at the END of its paid
+     * period (lifecycle §5 step 1): no renewal invoice is ever generated, and
+     * the key keeps working for the time already bought. Store-billed services
+     * (the module's own) are left to the store lifecycle. The gateway agreement
+     * handle is collected for the journal — deletion must never destroy the one
+     * thing that can stop a billing agreement.
+     *
+     * @return array{cancelledAtPeriodEnd: array<int,array{service:int, subscriptionId:string}>}
+     * @throws ApiException 502 deletion_failed when a cancellation cannot be recorded
+     */
+    private function cancelWebBillingAtPeriodEnd(int $clientId): array
     {
         $moduleServiceIds = Capsule::table('mod_vpnhood_iap_purchases')
             ->where('client_id', $clientId)
@@ -97,17 +205,154 @@ class AccountDeletionService
             ->pluck('service_id')
             ->all();
 
-        $blocking = Capsule::table('tblhosting')
-            ->where('userid', $clientId)
-            ->whereIn('domainstatus', ['Active', 'Suspended'])
-            ->whereNotIn('id', $moduleServiceIds ?: [0])
-            ->exists();
+        $services = Capsule::table('tblhosting as h')
+            ->join('tblproducts as p', 'p.id', '=', 'h.packageid')
+            ->where('h.userid', $clientId)
+            ->whereIn('h.domainstatus', ['Active', 'Suspended'])
+            ->whereNotIn('h.id', $moduleServiceIds ?: [0])
+            ->get(['h.id', 'h.subscriptionid', 'p.paytype']);
 
-        if ($blocking) {
-            throw new ApiException(
-                'This account has active web services. Cancel them in the web client area first, then delete the account.',
-                409, 'deletion_blocked');
+        $cancelled = [];
+        foreach ($services as $service) {
+            if ((string) $service->paytype !== 'recurring') {
+                continue; // a one-time key has no future billing; it runs out on its own
+            }
+            $alreadyRequested = Capsule::table('tblcancelrequests')
+                ->where('relid', (int) $service->id)->exists();
+            if (!$alreadyRequested) {
+                $result = localAPI('AddCancelRequest', [
+                    'serviceid' => (int) $service->id,
+                    'type'      => 'End of Billing Period',
+                    'reason'    => 'Account deletion',
+                ]);
+                if (($result['result'] ?? '') !== 'success') {
+                    throw new ApiException(
+                        'Could not stop the billing on a web service: ' . ($result['message'] ?? 'unknown error'),
+                        502, 'deletion_failed');
+                }
+            }
+            $cancelled[] = [
+                'service'        => (int) $service->id,
+                'subscriptionId' => (string) $service->subscriptionid,
+            ];
         }
+        return ['cancelledAtPeriodEnd' => $cancelled];
+    }
+
+    /**
+     * Even with nothing left to schedule a charge, a stored card token attached
+     * to an erased customer must not survive (lifecycle §8 rule 3).
+     */
+    private function dropStoredPayMethods(int $clientId): int
+    {
+        $list = localAPI('GetPayMethods', ['clientid' => $clientId]);
+        $methods = (array) ($list['paymethods'] ?? []);
+        $dropped = 0;
+        foreach ($methods as $method) {
+            $id = (int) ($method['id'] ?? 0);
+            if ($id <= 0) {
+                continue;
+            }
+            $result = localAPI('DeletePayMethod', ['paymethodid' => $id, 'clientid' => $clientId]);
+            if (($result['result'] ?? '') !== 'success') {
+                throw new ApiException(
+                    'Could not remove a stored payment method: ' . ($result['message'] ?? 'unknown error'),
+                    502, 'deletion_failed');
+            }
+            $dropped++;
+        }
+        return $dropped;
+    }
+
+    /**
+     * The one message the address gets before it stops existing (lifecycle §5
+     * step 3): the keys they paid for, and the warning about any subscription
+     * that keeps charging. An inbox is searchable a year later; the confirmation
+     * screen is not. Best-effort by design — a mail outage must not trap a
+     * person in an account they asked to erase; the app showed the same keys in
+     * the deletion preview.
+     */
+    private function sendFinalMessage(int $clientId, array $keys, array $subscriptionWarnings,
+        int $bulkOrders = 0): void
+    {
+        if ($keys === [] && $subscriptionWarnings === [] && $bulkOrders === 0) {
+            return; // nothing worth carrying — no purchases, nothing still billing
+        }
+        $lines = ['<p>Your account has been deleted. This message is the last one we can send you.</p>'];
+        if ($keys !== []) {
+            $lines[] = '<p><strong>Your premium keys — save them now.</strong> They keep working for the time '
+                . 'already paid; after this we can never show them to you again:</p><ul>';
+            foreach ($keys as $key) {
+                $code = htmlspecialchars((string) ($key['accessCode'] ?? ''), ENT_QUOTES);
+                $expires = isset($key['expiresAt']) && $key['expiresAt'] !== null
+                    ? ' — valid until ' . htmlspecialchars(substr((string) $key['expiresAt'], 0, 10), ENT_QUOTES)
+                    : '';
+                $lines[] = "<li><code>{$code}</code>{$expires}</li>";
+            }
+            $lines[] = '</ul>';
+        }
+        if ($bulkOrders > 0) {
+            // stock has no single code to list; what matters is that the CSV was
+            // served by the client area, and that door has just closed
+            $lines[] = '<p><strong>Your bulk orders (' . $bulkOrders . ') were delivered as a CSV file at '
+                . 'purchase.</strong> That file cannot be downloaded again now the account is gone. The keys '
+                . 'inside it are unaffected and keep working until they expire.</p>';
+        }
+        foreach ($subscriptionWarnings as $warning) {
+            $lines[] = '<p>' . htmlspecialchars($warning, ENT_QUOTES) . '</p>';
+        }
+        try {
+            localAPI('SendEmail', [
+                'id'            => $clientId,
+                'customtype'    => 'general',
+                'customsubject' => 'Your account was deleted — your keys, one last time',
+                'custommessage' => implode("\n", $lines),
+            ]);
+        } catch (\Throwable $e) {
+            logModuleCall('vpnhoodiap', 'deletion.finalMessage', (string) $clientId, $e->getMessage(), '');
+        }
+    }
+
+    /**
+     * Ask the stores that allow it to stop future renewals (lifecycle §8: offered
+     * as a choice, acted on only where a developer cancellation exists — the
+     * subscription stays valid to its paid expiry either way).
+     *
+     * @return array<int,string> the purchase keys whose renewals were stopped
+     */
+    private function stopStoreRenewals(int $userId): array
+    {
+        $rows = Capsule::table('mod_vpnhood_iap_purchases')
+            ->where('user_id', $userId)
+            ->where('status', 'provisioned')
+            ->where('auto_renewing', 1)
+            ->get()->map(fn ($row) => (array) $row)->all();
+
+        $stopped = [];
+        foreach ($rows as $row) {
+            try {
+                $app = Capsule::table('mod_vpnhood_iap_apps')->where('id', (int) $row['app_id'])->first();
+                if ($app === null) {
+                    continue;
+                }
+                $appArray = (array) $app;
+                if (!empty($appArray['credentials'])) {
+                    $appArray['credentials'] = (new \WHMCS\Module\Addon\VpnHoodIap\IapRepository())
+                        ->decryptSecret((string) $appArray['credentials']);
+                }
+                $adapter = \WHMCS\Module\Addon\VpnHoodIap\Stores\StoreAdapterRegistry::get((string) $row['store']);
+                if ($adapter->stopRenewals($appArray, (string) $row['purchase_key'])) {
+                    $stopped[] = (string) $row['purchase_key'];
+                    Capsule::table('mod_vpnhood_iap_purchases')->where('id', (int) $row['id'])
+                        ->update(['auto_renewing' => 0, 'updated_at' => date('Y-m-d H:i:s')]);
+                }
+            } catch (\Throwable $e) {
+                // best-effort: the person is deleting either way; the warning text
+                // still tells them to cancel in the store themselves
+                logModuleCall('vpnhoodiap', 'deletion.stopRenewals', (string) ($row['id'] ?? ''), $e->getMessage(), '');
+            }
+        }
+        return $stopped;
     }
 
     /** Nothing may ever bill a deleted person again: open invoices are cancelled, paid ones retained. */
@@ -189,7 +434,18 @@ class AccountDeletionService
                 502, 'deletion_failed');
         }
 
-        $result = localAPI('CloseClient', ['clientid' => $clientId]);
+        // Closing a WHMCS client TERMINATES its products — and a deleted person's
+        // paid-for keys keep running (lifecycle §8: we take back what the account
+        // lent, never what the person bought). A client with running services is
+        // marked Inactive instead: the person is equally gone either way (login
+        // anonymized above); the difference is their keys survive.
+        $hasRunningServices = Capsule::table('tblhosting')
+            ->where('userid', $clientId)
+            ->whereIn('domainstatus', ['Active', 'Suspended'])
+            ->exists();
+        $result = $hasRunningServices
+            ? localAPI('UpdateClient', ['clientid' => $clientId, 'status' => 'Inactive', 'skipvalidation' => true])
+            : localAPI('CloseClient', ['clientid' => $clientId]);
         if (($result['result'] ?? '') !== 'success') {
             throw new ApiException('Could not close the customer record: ' . ($result['message'] ?? 'unknown error'),
                 502, 'deletion_failed');
@@ -216,15 +472,18 @@ class AccountDeletionService
     }
 
     /**
-     * Numeric ids only — no PII, so the journal itself never becomes a tombstone.
-     * It exists to make the anonymization re-runnable after a backup restore.
+     * Numeric ids and contract references only — no PII, so the journal itself
+     * never becomes a tombstone. It exists to make the anonymization re-runnable
+     * after a backup restore, and (details) to keep the gateway agreement handles
+     * that let an administrator stop a stray charge after the person is gone.
      */
-    private function journal(?int $userId, ?int $clientId, string $outcome): void
+    private function journal(?int $userId, ?int $clientId, string $outcome, array $details = []): void
     {
         Capsule::table('mod_vpnhood_iap_deletions')->insert([
             'user_id'    => $userId,
             'client_id'  => $clientId,
             'outcome'    => $outcome,
+            'details'    => $details === [] ? null : json_encode($details),
             'created_at' => date('Y-m-d H:i:s'),
         ]);
     }

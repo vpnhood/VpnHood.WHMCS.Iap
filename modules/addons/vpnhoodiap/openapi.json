@@ -48,7 +48,9 @@
   "paths": {
     "/system/status": {
       "get": {
-        "tags": ["service"],
+        "tags": [
+          "service"
+        ],
         "operationId": "getStatus",
         "summary": "Service probe",
         "description": "Proves the portal is installed, active and able to reach its database. Answers 404 while the addon is deactivated, which is how a client detects a portal that is not configured.",
@@ -58,19 +60,31 @@
             "description": "The portal is serving.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Status" },
-                "example": { "status": "ok", "api": "1.0", "time": "2026-08-06T23:18:15+00:00" }
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                },
+                "example": {
+                  "status": "ok",
+                  "api": "1.0",
+                  "time": "2026-08-06T23:18:15+00:00"
+                }
               }
             }
           },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "429": { "$ref": "#/components/responses/RateLimited" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
         }
       }
     },
     "/openapi.json": {
       "get": {
-        "tags": ["service"],
+        "tags": [
+          "service"
+        ],
         "operationId": "getOpenApiDocument",
         "summary": "This document",
         "description": "The OpenAPI description of the portal as installed. Point Swagger UI or a client generator straight at it.",
@@ -78,15 +92,25 @@
         "responses": {
           "200": {
             "description": "The OpenAPI 3.1 document.",
-            "content": { "application/json": { "schema": { "type": "object" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
     "/auth/sessions": {
       "post": {
-        "tags": ["auth"],
+        "tags": [
+          "auth"
+        ],
         "operationId": "createSession",
         "summary": "Sign in",
         "description": "Exchanges an identity provider's id token for a portal session token.\n\nThe id token is verified against the provider's published keys, and its audience must be one of the OAuth client ids registered for this app. The provider must state that the email is verified — the portal matches accounts by email, so an unproven mailbox is refused outright.\n\nIf a customer account with that email already exists, the session is linked to it; a new address stays unlinked until its first purchase creates the account. Nothing here waits on a second, portal-side confirmation of the address: the provider already proved it. Where a purchase attaches to a customer account that existed beforehand, the portal's own web area stays closed for that account until it confirms the address — a purely portal-side concern that this API neither reports nor gates on.",
@@ -95,7 +119,9 @@
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/SignInRequest" },
+              "schema": {
+                "$ref": "#/components/schemas/SignInRequest"
+              },
               "example": {
                 "provider": "google",
                 "idToken": "eyJhbGciOiJSUzI1NiIsImtpZCI6…",
@@ -109,43 +135,69 @@
             "description": "Signed in; the session token is in the body.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Session" },
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                },
                 "example": {
                   "accessToken": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
                   "expiresAt": "2026-09-05T23:18:15+00:00",
                   "userId": "2a5ab102-2595-496f-9e15-67c81cd3424e",
-                  "account": { "email": "someone@example.com" }
+                  "account": {
+                    "email": "someone@example.com"
+                  }
                 }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
           "401": {
             "description": "The id token is missing, malformed, expired, or not issued to this app (`invalid_id_token`).",
-            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "403": {
             "description": "The package name is not a registered app (`unknown_app`), or the provider has not verified the email (`provider_email_unverified`).",
-            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
-          "429": { "$ref": "#/components/responses/RateLimited" }
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
         }
       }
     },
     "/auth/sessions/current": {
       "delete": {
-        "tags": ["auth"],
+        "tags": [
+          "auth"
+        ],
         "operationId": "deleteCurrentSession",
         "summary": "Sign out",
         "description": "Revokes the presented session token server-side. Idempotent: an unknown or already revoked token also answers 204, so a client can always complete a local sign-out.",
         "responses": {
-          "204": { "description": "The session is revoked." }
+          "204": {
+            "description": "The session is revoked."
+          }
         }
       }
     },
     "/account": {
       "get": {
-        "tags": ["account"],
+        "tags": [
+          "account"
+        ],
         "operationId": "getAccount",
         "summary": "The signed-in account",
         "responses": {
@@ -153,40 +205,70 @@
             "description": "The account behind the session.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/AccountInfo" },
+                "schema": {
+                  "$ref": "#/components/schemas/AccountInfo"
+                },
                 "example": {
                   "userId": "2a5ab102-2595-496f-9e15-67c81cd3424e",
-                  "account": { "email": "someone@example.com" }
+                  "account": {
+                    "email": "someone@example.com"
+                  }
                 }
               }
             }
           },
-          "401": { "$ref": "#/components/responses/Unauthorized" }
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
         }
       },
       "delete": {
-        "tags": ["account"],
+        "tags": [
+          "account"
+        ],
         "operationId": "deleteAccount",
         "summary": "Delete the signed-in account (forget me)",
-        "description": "Erases the person everywhere at once: every session on every device is revoked, all sign-in identities and the account itself are deleted, and the customer record behind the retained invoices is anonymized and closed. Signing in again later creates a brand-new empty account — there is no restore.\n\nRunning services are deliberately left untouched: an access code is an open gate with no personal data in it, and the store's own subscription lifecycle is what ends it. Deletion cancels no store subscription — the customer cancels in the store where they purchased, before or after deleting — and paid invoices are retained under legal duty with the personal details replaced by placeholders.\n\nWhile the person still has active WEB services (sold on the portal's own site, possibly on a recurring gateway agreement this API never touches), the call is refused with `deletion_blocked`: cancel those in the web client area first, then delete. Accounts created in an app never have web services, so an app flow cannot hit this.",
+        "description": "Forget me. Erases sessions on every device, sign-in identities and the account row; anonymizes and closes the customer record behind the retained invoices. Nothing blocks it: recurring web billing is cancelled at the end of its paid period, stored payment methods are dropped, and one final message carries the keys to the address before it is erased. Pass stopRenewals=true to also ask the stores that allow it (Google) to stop future renewals — the subscription stays valid to its paid expiry.",
         "responses": {
-          "204": { "description": "The account is deleted. The presented session token is dead." },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
-          "409": {
-            "description": "The account still has active web services (`deletion_blocked`). Cancel them in the web client area first.",
-            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          "204": {
+            "description": "The account is deleted. The presented session token is dead."
           },
-          "429": { "$ref": "#/components/responses/RateLimited" },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "502": {
             "description": "The customer record could not be anonymized or an open invoice could not be cancelled (`deletion_failed`). Nothing partial was left behind; retry or contact support.",
-            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "stopRenewals",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Also stop future renewals where the store allows a developer cancellation."
+          }
+        ]
       }
     },
     "/billing/plans": {
       "get": {
-        "tags": ["billing"],
+        "tags": [
+          "billing"
+        ],
         "operationId": "listPlans",
         "summary": "Sellable plans for one app and store",
         "description": "The portal is the source of truth for **what** may be sold; the store owns the price and the localisation. A store product that is not mapped in the portal catalog does not appear here and cannot be redeemed — an unmapped purchase parks instead of guessing at an entitlement.\n\nNo authentication: an app must render its plans page before anyone signs in, and this catalog is public by construction — the same product ids are visible in the store listing. Nothing here is account-scoped.",
@@ -196,14 +278,18 @@
             "name": "store",
             "in": "query",
             "required": true,
-            "schema": { "$ref": "#/components/schemas/StoreId" }
+            "schema": {
+              "$ref": "#/components/schemas/StoreId"
+            }
           },
           {
             "name": "packageName",
             "in": "query",
             "required": true,
             "description": "The app's package name (Android) or bundle id (iOS).",
-            "schema": { "type": "string" },
+            "schema": {
+              "type": "string"
+            },
             "example": "com.vpnhood.connect.android"
           }
         ],
@@ -212,25 +298,43 @@
             "description": "The mapped, enabled plans.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/PlanList" },
+                "schema": {
+                  "$ref": "#/components/schemas/PlanList"
+                },
                 "example": {
                   "items": [
-                    { "planId": "premium/monthly", "storeProductId": "premium", "basePlanId": "monthly" },
-                    { "planId": "premium/yearly", "storeProductId": "premium", "basePlanId": "yearly" }
+                    {
+                      "planId": "premium/monthly",
+                      "storeProductId": "premium",
+                      "basePlanId": "monthly"
+                    },
+                    {
+                      "planId": "premium/yearly",
+                      "storeProductId": "premium",
+                      "basePlanId": "yearly"
+                    }
                   ]
                 }
               }
             }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "403": { "$ref": "#/components/responses/UnknownApp" },
-          "429": { "$ref": "#/components/responses/RateLimited" }
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/UnknownApp"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
         }
       }
     },
     "/billing/purchases": {
       "post": {
-        "tags": ["billing"],
+        "tags": [
+          "billing"
+        ],
         "operationId": "createPurchase",
         "summary": "Redeem a store purchase",
         "description": "Turns a completed app-store purchase into a provisioned subscription and returns its access code — one synchronous call.\n\nThe portal re-fetches the purchase from the store API (the posted proof is only a pointer), checks that it was attributed to the signed-in user, maps it to a plan, provisions, and only then acknowledges the purchase with the store. If anything fails the purchase is left unacknowledged on purpose: Google auto-refunds an unacknowledged subscription within a few days, so a customer is never charged for something that was never delivered.\n\n**Idempotent.** The store purchase key is the anchor; redeeming the same purchase again returns the same entitlement and never creates a second order. Retrying after a network failure is always safe.\n\n**202 means not yet.** `pending` — the store has not settled the payment (deferred or slow payment methods); retry shortly.\n\n**One live subscription per account.** A second purchase while another is still active is refused with 409 rather than provisioned, and deliberately left unacknowledged so the store refunds it. An upgrade or resubscribe is not a second subscription — it carries the purchase it replaces and is provisioned normally.\n\n**Restore after account deletion.** A purchase attributed to an account that was erased through \\\"forget me\\\" may be redeemed by a NEW signed-in account presenting the same store proof: the purchase is handed to that account and the SAME entitlement re-delivered — never a new order or access code. Only when the previous owner is journalled as deleted and the new account holds no other live subscription; a purchase whose owner still exists is refused with 403 `purchase_account_mismatch` as always.",
@@ -238,14 +342,19 @@
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/PurchaseRequest" },
+              "schema": {
+                "$ref": "#/components/schemas/PurchaseRequest"
+              },
               "examples": {
                 "googlePlay": {
                   "summary": "Google Play",
                   "value": {
                     "store": "googleplay",
                     "packageName": "com.vpnhood.connect.android",
-                    "proof": { "purchaseToken": "kjhgfd…", "productId": "premium" }
+                    "proof": {
+                      "purchaseToken": "kjhgfd…",
+                      "productId": "premium"
+                    }
                   }
                 },
                 "appStore": {
@@ -253,7 +362,9 @@
                   "value": {
                     "store": "appstore",
                     "packageName": "com.vpnhood.connect",
-                    "proof": { "jws": "eyJhbGciOiJFUzI1NiIsIng1YyI6…" }
+                    "proof": {
+                      "jws": "eyJhbGciOiJFUzI1NiIsIng1YyI6…"
+                    }
                   }
                 }
               }
@@ -265,7 +376,9 @@
             "description": "Provisioned; the access code is in the body.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Entitlement" },
+                "schema": {
+                  "$ref": "#/components/schemas/Entitlement"
+                },
                 "example": {
                   "state": "provisioned",
                   "accessCode": "PREM-4H2K-9QX7",
@@ -280,51 +393,113 @@
             "description": "Accepted but not deliverable yet — see `state`.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Entitlement" },
-                "example": { "state": "pending", "accessCode": null, "expiresAt": null, "planId": null, "store": "googleplay" }
+                "schema": {
+                  "$ref": "#/components/schemas/Entitlement"
+                },
+                "example": {
+                  "state": "pending",
+                  "accessCode": null,
+                  "expiresAt": null,
+                  "planId": null,
+                  "store": "googleplay"
+                }
               }
             }
           },
           "400": {
             "description": "Malformed request (`bad_request`), an unknown store (`unknown_store`), or a proof the store would not confirm (`purchase_invalid`).",
-            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "403": {
             "description": "Unregistered app (`unknown_app`), or the purchase is attributed to a different account (`purchase_account_mismatch`).",
-            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "409": {
             "description": "The purchase carries no attribution the portal can resolve to an account (`purchase_unattributed`). It is recorded for an administrator; nothing was provisioned.",
-            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "410": {
             "description": "The purchase is no longer active at the store — expired, cancelled or refunded (`purchase_inactive`).",
-            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "422": {
             "description": "The store product is not mapped to a plan on this portal (`plan_not_available`). The purchase is parked and an administrator alerted; it is never guessed at.",
-            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
-          "429": { "$ref": "#/components/responses/RateLimited" },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "501": {
             "description": "The store is known but not implemented on this portal yet (`store_not_supported`).",
-            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "502": {
             "description": "Provisioning failed downstream (`provisioning_failed`). Nothing is left half-created and the purchase is not acknowledged, so it is safe to retry.",
-            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           },
           "503": {
             "description": "Another request is redeeming this same purchase (`purchase_in_progress`). Retry shortly.",
-            "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           }
         }
       }
     },
     "/account/entitlements": {
       "get": {
-        "tags": ["account"],
+        "tags": [
+          "account"
+        ],
         "operationId": "listEntitlements",
         "summary": "What the account currently holds",
         "description": "The live entitlements of the signed-in account, newest first, expired ones omitted. This — not the purchase response — is the truth after a renewal, cancellation or refund, because store webhooks keep it current. An empty list means the account has nothing active.",
@@ -333,7 +508,9 @@
             "description": "The account's live entitlements.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/EntitlementList" },
+                "schema": {
+                  "$ref": "#/components/schemas/EntitlementList"
+                },
                 "example": {
                   "items": [
                     {
@@ -347,7 +524,159 @@
               }
             }
           },
-          "401": { "$ref": "#/components/responses/Unauthorized" }
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/account/claims": {
+      "post": {
+        "operationId": "claimCode",
+        "summary": "Claim a key by its code",
+        "description": "Records that this account holds this key — pasting the code once is the whole proof. Nothing about billing moves: no invoices, no customer record, no cancel rights. The designed route back for a buyer whose sign-in address is not their buying address, and for anyone returning after deletion with a saved code. The first key an account ever points at becomes its default. Tightly rate limited: guessing must be expensive.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaimRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Claimed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Claim"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Already claimed by this account (idempotent).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Claim"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No key answers to this code (code_not_found).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/account/default-key": {
+      "patch": {
+        "operationId": "setDefaultKey",
+        "summary": "Choose or clear the account's default key",
+        "description": "Deliberately chooses THE key that serves this account (what the app applies at sign-in, and what the store-purchase gate refuses on), or clears it with null — the deliberate escape that re-opens store buying. Only deliberate acts call this; nothing automatic ever does.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DefaultKeyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Default set (or cleared)."
+          },
+          "404": {
+            "description": "This account holds no such key (code_not_found).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "setDefaultKeyPost",
+        "summary": "POST alias of the PATCH — some hosts block PATCH at the web server",
+        "description": "Deliberately chooses THE key that serves this account (what the app applies at sign-in, and what the store-purchase gate refuses on), or clears it with null — the deliberate escape that re-opens store buying. Only deliberate acts call this; nothing automatic ever does.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DefaultKeyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Default set (or cleared)."
+          },
+          "404": {
+            "description": "This account holds no such key (code_not_found).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/account/deletion-preview": {
+      "get": {
+        "operationId": "getDeletionPreview",
+        "summary": "Everything to show before deleting",
+        "description": "Every key the person paid for, shown one last time (after deletion the link between person and key is gone forever); each store subscription's state — including between-payments, the case most likely to charge again unexpectedly — and whether renewals can be stopped for them; and how many web-billed services will be cancelled at the end of their paid period.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The preview.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionPreview"
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -369,55 +698,116 @@
     "responses": {
       "BadRequest": {
         "description": "The request is malformed or missing a required field (`bad_request`).",
-        "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
       },
       "Unauthorized": {
         "description": "No session token, or it is expired or revoked (`unauthorized`). Sign in again.",
-        "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
       },
       "UnknownApp": {
         "description": "The package name is not a registered app on this portal (`unknown_app`).",
-        "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
       },
       "NotFound": {
         "description": "No such resource — or the portal is not activated on this install (`not_found`).",
-        "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
       },
       "RateLimited": {
         "description": "Too many requests from this address (`rate_limited`).",
-        "content": { "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
       }
     },
     "schemas": {
       "Status": {
         "type": "object",
-        "required": ["status", "api", "time"],
+        "required": [
+          "status",
+          "api",
+          "time"
+        ],
         "properties": {
-          "status": { "type": "string", "const": "ok" },
-          "api": { "type": "string", "description": "The contract version this portal serves. There is no version in the path: a breaking change ships as a new endpoint beside the old one, so an app that cannot be updated keeps working.", "example": "1.0" },
-          "time": { "type": "string", "format": "date-time", "description": "Server time (UTC), for clock-skew checks." }
+          "status": {
+            "type": "string",
+            "const": "ok"
+          },
+          "api": {
+            "type": "string",
+            "description": "The contract version this portal serves. There is no version in the path: a breaking change ships as a new endpoint beside the old one, so an app that cannot be updated keeps working.",
+            "example": "1.0"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server time (UTC), for clock-skew checks."
+          }
         }
       },
       "StoreId": {
         "type": "string",
         "description": "The app store a purchase or plan belongs to.",
-        "enum": ["googleplay", "appstore", "microsoft"],
+        "enum": [
+          "googleplay",
+          "appstore",
+          "microsoft"
+        ],
         "example": "googleplay"
       },
       "Account": {
         "type": "object",
-        "required": ["email"],
+        "required": [
+          "email"
+        ],
         "properties": {
-          "email": { "type": "string", "format": "email" }
+          "email": {
+            "type": "string",
+            "format": "email"
+          }
         }
       },
       "SignInRequest": {
         "type": "object",
-        "required": ["provider", "idToken", "packageName"],
+        "required": [
+          "provider",
+          "idToken",
+          "packageName"
+        ],
         "properties": {
           "provider": {
             "type": "string",
-            "enum": ["google", "apple"],
+            "enum": [
+              "google",
+              "apple"
+            ],
             "description": "The identity provider that issued the id token."
           },
           "idToken": {
@@ -432,56 +822,108 @@
       },
       "Session": {
         "type": "object",
-        "required": ["accessToken", "expiresAt", "userId", "account"],
+        "required": [
+          "accessToken",
+          "expiresAt",
+          "userId",
+          "account"
+        ],
         "properties": {
-          "accessToken": { "type": "string", "description": "The session token. Send it as a bearer token on every other call." },
-          "expiresAt": { "type": "string", "format": "date-time" },
+          "accessToken": {
+            "type": "string",
+            "description": "The session token. Send it as a bearer token on every other call."
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
           "userId": {
             "type": "string",
             "description": "The account's stable, non-enumerable id, carrying no personal data. The app passes it to the store as `obfuscatedAccountId` (Google) or `appAccountToken` (Apple) so a purchase can be tied back to its buyer."
           },
-          "account": { "$ref": "#/components/schemas/Account" }
+          "account": {
+            "$ref": "#/components/schemas/Account"
+          }
         }
       },
       "AccountInfo": {
         "type": "object",
-        "required": ["userId", "account"],
+        "required": [
+          "userId",
+          "account"
+        ],
         "properties": {
-          "userId": { "type": "string" },
-          "account": { "$ref": "#/components/schemas/Account" }
+          "userId": {
+            "type": "string"
+          },
+          "account": {
+            "$ref": "#/components/schemas/Account"
+          }
         }
       },
       "Plan": {
         "type": "object",
-        "required": ["planId", "storeProductId", "basePlanId"],
+        "required": [
+          "planId",
+          "storeProductId",
+          "basePlanId"
+        ],
         "properties": {
           "planId": {
             "type": "string",
             "description": "The portal's identifier for the plan: `storeProductId` or `storeProductId/basePlanId`.",
             "example": "premium/monthly"
           },
-          "storeProductId": { "type": "string", "description": "The product id as it exists in the store.", "example": "premium" },
-          "basePlanId": { "type": "string", "description": "The base plan / billing period within the store product; empty when the product has none.", "example": "monthly" }
+          "storeProductId": {
+            "type": "string",
+            "description": "The product id as it exists in the store.",
+            "example": "premium"
+          },
+          "basePlanId": {
+            "type": "string",
+            "description": "The base plan / billing period within the store product; empty when the product has none.",
+            "example": "monthly"
+          }
         }
       },
       "PlanList": {
         "type": "object",
-        "required": ["items"],
+        "required": [
+          "items"
+        ],
         "properties": {
-          "items": { "type": "array", "items": { "$ref": "#/components/schemas/Plan" } }
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Plan"
+            }
+          }
         }
       },
       "PurchaseRequest": {
         "type": "object",
-        "required": ["store", "packageName", "proof"],
+        "required": [
+          "store",
+          "packageName",
+          "proof"
+        ],
         "properties": {
-          "store": { "$ref": "#/components/schemas/StoreId" },
-          "packageName": { "type": "string", "description": "The app's package name (Android) or bundle id (iOS)." },
+          "store": {
+            "$ref": "#/components/schemas/StoreId"
+          },
+          "packageName": {
+            "type": "string",
+            "description": "The app's package name (Android) or bundle id (iOS)."
+          },
           "proof": {
             "description": "What the store handed the app at purchase. It is a pointer, not evidence: the portal always re-fetches the purchase from the store API before acting on it.",
             "oneOf": [
-              { "$ref": "#/components/schemas/GooglePlayProof" },
-              { "$ref": "#/components/schemas/AppStoreProof" }
+              {
+                "$ref": "#/components/schemas/GooglePlayProof"
+              },
+              {
+                "$ref": "#/components/schemas/AppStoreProof"
+              }
             ]
           }
         }
@@ -489,10 +931,18 @@
       "GooglePlayProof": {
         "type": "object",
         "title": "Google Play proof",
-        "required": ["purchaseToken"],
+        "required": [
+          "purchaseToken"
+        ],
         "properties": {
-          "purchaseToken": { "type": "string", "description": "The `purchaseToken` from Play Billing." },
-          "productId": { "type": "string", "description": "The purchased product id, when the client knows it." }
+          "purchaseToken": {
+            "type": "string",
+            "description": "The `purchaseToken` from Play Billing."
+          },
+          "productId": {
+            "type": "string",
+            "description": "The purchased product id, when the client knows it."
+          }
         }
       },
       "AppStoreProof": {
@@ -500,35 +950,67 @@
         "title": "App Store proof",
         "description": "Either the StoreKit 2 signed transaction (preferred) or a bare transaction id.",
         "properties": {
-          "jws": { "type": "string", "description": "The StoreKit 2 `jwsRepresentation` of the transaction." },
-          "transactionId": { "type": "string", "description": "The original transaction id, when no signed transaction is available." }
+          "jws": {
+            "type": "string",
+            "description": "The StoreKit 2 `jwsRepresentation` of the transaction."
+          },
+          "transactionId": {
+            "type": "string",
+            "description": "The original transaction id, when no signed transaction is available."
+          }
         },
         "anyOf": [
-          { "required": ["jws"] },
-          { "required": ["transactionId"] }
+          {
+            "required": [
+              "jws"
+            ]
+          },
+          {
+            "required": [
+              "transactionId"
+            ]
+          }
         ]
       },
       "EntitlementState": {
         "type": "string",
         "description": "`provisioned` — delivered, `accessCode` is present. `pending` — the store has not settled the payment yet.",
-        "enum": ["provisioned", "pending"]
+        "enum": [
+          "provisioned",
+          "pending"
+        ]
       },
       "Entitlement": {
         "type": "object",
-        "required": ["state", "accessCode", "expiresAt"],
+        "required": [
+          "state",
+          "accessCode",
+          "expiresAt"
+        ],
         "properties": {
-          "state": { "$ref": "#/components/schemas/EntitlementState" },
+          "state": {
+            "$ref": "#/components/schemas/EntitlementState"
+          },
           "accessCode": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "The code the client redeems for premium access. Present only while `state` is `provisioned`."
           },
           "expiresAt": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time",
             "description": "When the entitlement lapses unless the store renews it. Null when the plan does not expire."
           },
           "planId": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "The plan that was redeemed. Returned by `POST /billing/purchases`; omitted when listing entitlements."
           },
           "store": {
@@ -536,45 +1018,91 @@
             "description": "The store that billed this entitlement. A client offers its native manage-subscription page only when this matches its own store."
           },
           "purchasedAt": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time",
             "description": "When the subscription began — the portal's first sight of the purchase. Null while `state` is `pending`."
           },
           "autoRenewing": {
-            "type": ["boolean", "null"],
+            "type": [
+              "boolean",
+              "null"
+            ],
             "description": "Whether the store will bill the next period. False after the buyer cancels, while the entitlement runs to `expiresAt`."
           },
           "priceAmount": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "What the store charged for the current period, as a decimal string. This is the store's own figure, not a portal catalogue price."
           },
           "priceCurrency": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "ISO 4217 currency of `priceAmount`, as reported by the store."
           },
           "billingPeriod": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "The recurrence as an ISO-8601 duration (`P1M`, `P6M`, `P1Y`, …). Null for a one-off entitlement. Clients pair it with `priceAmount` to render \"price per period\"."
           }
         }
       },
       "EntitlementList": {
         "type": "object",
-        "required": ["items"],
+        "required": [
+          "items"
+        ],
         "properties": {
-          "items": { "type": "array", "items": { "$ref": "#/components/schemas/Entitlement" } }
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Entitlement"
+            }
+          },
+          "webKeys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebKey"
+            },
+            "description": "Website keys this account can see (owned by its linked customer, or claimed). Additive field — older clients ignore it."
+          }
         }
       },
       "Problem": {
         "type": "object",
         "description": "RFC 9457 problem detail. `code` is the contract — branch on it; `detail` is prose for logs and support and may change.",
-        "required": ["type", "title", "status", "code", "detail"],
+        "required": [
+          "type",
+          "title",
+          "status",
+          "code",
+          "detail"
+        ],
         "properties": {
-          "type": { "type": "string", "format": "uri" },
-          "title": { "type": "string" },
-          "status": { "type": "integer" },
-          "code": { "$ref": "#/components/schemas/ErrorCode" },
-          "detail": { "type": "string" }
+          "type": {
+            "type": "string",
+            "format": "uri"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "detail": {
+            "type": "string"
+          }
         },
         "example": {
           "type": "https://docs.vpnhood.com/portal-api/errors/unauthorized",
@@ -614,6 +1142,154 @@
           "plan_not_available",
           "provisioning_failed"
         ]
+      },
+      "WebKey": {
+        "type": "object",
+        "description": "A website key this account can see: bought by its linked customer, or claimed by pasting the code. The default is the one the app applies for the person, and the one the purchase gate refuses on. Reseller stock (bulk/CSV orders) is NEVER listed here — it is merchant inventory, has no single code, and is never offered as a personal key.",
+        "required": [
+          "accessCode",
+          "expiresAt",
+          "isDefault"
+        ],
+        "properties": {
+          "accessCode": {
+            "type": "string",
+            "description": "The key itself."
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The key's own clock where it can be read; null for a one-time key that has not started, or where the install cannot read it."
+          },
+          "isDefault": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ClaimRequest": {
+        "type": "object",
+        "required": [
+          "accessCode"
+        ],
+        "properties": {
+          "accessCode": {
+            "type": "string",
+            "description": "The pasted code. Possession is the whole proof."
+          }
+        }
+      },
+      "Claim": {
+        "type": "object",
+        "required": [
+          "accessCode",
+          "isDefault"
+        ],
+        "properties": {
+          "accessCode": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "isDefault": {
+            "type": "boolean",
+            "description": "True when this claim just became (or already was) the account's default key."
+          }
+        }
+      },
+      "DefaultKeyRequest": {
+        "type": "object",
+        "required": [
+          "accessCode"
+        ],
+        "properties": {
+          "accessCode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key to make the default; null clears the default (the deliberate escape that re-opens store buying)."
+          }
+        }
+      },
+      "DeletionPreview": {
+        "type": "object",
+        "description": "Everything to show before deletion is confirmed: every key one last time, each subscription's state, and how many web-billed services will be cancelled at their period end.",
+        "required": [
+          "keys",
+          "subscriptions",
+          "webBilling"
+        ],
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebKey"
+            }
+          },
+          "subscriptions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionSummary"
+            }
+          },
+          "webBilling": {
+            "type": "object",
+            "properties": {
+              "servicesToCancelAtPeriodEnd": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "SubscriptionSummary": {
+        "type": "object",
+        "required": [
+          "autoRenewing",
+          "state",
+          "canStopRenewals"
+        ],
+        "properties": {
+          "autoRenewing": {
+            "type": "boolean"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "between-payments",
+              "expired"
+            ],
+            "description": "between-payments: a failed payment left the subscription open at the store although access stopped — the case most likely to charge again unexpectedly."
+          },
+          "canStopRenewals": {
+            "type": "boolean",
+            "description": "True where the store gives developers a cancellation lever (Google). Where false (Apple), only the person can cancel, in the store."
+          },
+          "warning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Ready-made warning line for this subscription, or null when nothing needs saying."
+          }
+        },
+        "description": "A store subscription as the deletion preview reports it. The billing store is deliberately NOT on the wire: one app ships on every platform and may not name a competing store (App Review 2.3.10); canStopRenewals carries the only actionable fact."
       }
     }
   }

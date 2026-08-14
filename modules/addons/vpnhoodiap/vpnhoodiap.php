@@ -35,7 +35,7 @@ function vpnhoodiap_config(): array
     return [
         'name'        => 'VpnHood! In-App Purchase',
         'description' => 'Processes app-store purchases (Google Play / Apple / Microsoft) into WHMCS clients, orders and paid invoices, delivering VpnHood access codes through the install\'s provisioning module.',
-        'version'     => '1.0.10',
+        'version'     => '1.0.13',
         'author'      => 'VpnHood',
         'fields'      => [
             'AdminAlertEmail' => [
@@ -112,11 +112,12 @@ function vpnhoodiap_activate(): array
         if (!$schema->hasTable('mod_vpnhood_iap_users')) {
             $schema->create('mod_vpnhood_iap_users', function ($table) {
                 $table->increments('id');
-                // THE ACCOUNT IS THE PERSON, one per verified email address. Sign-in
-                // proofs live in mod_vpnhood_iap_identities (several per account):
-                // a known (provider, subject) always wins, a new provider proving a
-                // known address joins that account. provider/provider_subject here
-                // only mirror the most recent sign-in for the admin's benefit.
+                // THE ACCOUNT IS THE PERSON. Sign-in proofs live in
+                // mod_vpnhood_iap_identities (several per account): a known
+                // (provider, subject) always wins, and a new provider joins an
+                // account by proving an address one of its identities CURRENTLY
+                // reports. email/provider/provider_subject here only mirror the
+                // most recent sign-in — contact and display, never resolution.
                 $table->string('provider', 16); // google | apple | microsoft (last sign-in)
                 $table->string('provider_subject');
                 $table->string('email');
@@ -130,7 +131,7 @@ function vpnhoodiap_activate(): array
                 $table->string('external_uid', 36)->unique(); // UUID: GooglePlay obfuscatedAccountId AND Apple appAccountToken
                 $table->timestamp('created_at')->nullable();
                 $table->timestamp('updated_at')->nullable();
-                $table->unique('email');
+                $table->index('email'); // plain index: a contact snapshot may legitimately collide
                 $table->index(['provider', 'provider_subject']);
             });
         }
@@ -148,6 +149,7 @@ function vpnhoodiap_activate(): array
                 $table->timestamp('created_at')->nullable();
                 $table->timestamp('updated_at')->nullable();
                 $table->unique(['provider', 'provider_subject'], 'iap_identities_provider_subject');
+                $table->index('email'); // the resolution lookup (IapRepository::findUsersByIdentityEmail)
             });
         }
 
@@ -240,6 +242,8 @@ function vpnhoodiap_activate(): array
             });
         }
 
+        vpnhoodiap_migrateToAccountKeys(); // claims + refund marks + journal details on fresh installs too
+        vpnhoodiap_migrateToInvoiceFreeze();
         vpnhoodiap_ensureAdminAccess();
         vpnhoodiap_hideGatewayFromCheckout();
 
@@ -267,6 +271,9 @@ function vpnhoodiap_upgrade(array $vars): void
     vpnhoodiap_hideGatewayFromCheckout();
 
     vpnhoodiap_migrateToEmailIdentity();
+    vpnhoodiap_migrateToIdentityResolution();
+    vpnhoodiap_migrateToAccountKeys();
+    vpnhoodiap_migrateToInvoiceFreeze();
     vpnhoodiap_migrateToLinkedIdentities();
     vpnhoodiap_migrateToDisplayName();
     vpnhoodiap_migrateOffEmailVerificationParking();
@@ -425,14 +432,15 @@ function vpnhoodiap_migrateToLinkedIdentities(): void
 }
 
 /**
- * Re-key users on the email (see IapRepository::findOrCreateUser). Installs created
- * before this shipped are keyed on (provider, provider_subject), so the same person
- * signing in with a second provider would have received a second account.
+ * Normalize account emails for identity-era installs: lowercased/trimmed, and the
+ * old (provider, subject) unique key dropped in favour of a plain index.
  *
- * Emails are lowercased first, then the unique index moves. If two rows already share
- * an address the index cannot be applied — that is a genuine split account whose
- * purchases must be merged by hand, so it is reported loudly rather than papered over;
- * lookups stay deterministic (oldest row) until it is resolved.
+ * Historically this also keyed accounts on a UNIQUE email. That key is gone —
+ * vpnhoodiap_migrateToIdentityResolution() removes it — because resolution now
+ * matches the sign-in methods' current addresses, and a stale contact snapshot may
+ * legitimately collide with another account's live address. Duplicate addresses
+ * are still reported: each is a split person whose purchases deserve a manual
+ * merge, and rule 3 of the resolver refuses to guess between them.
  */
 function vpnhoodiap_migrateToEmailIdentity(): void
 {
@@ -450,17 +458,8 @@ function vpnhoodiap_migrateToEmailIdentity(): void
         ->pluck('email')
         ->all();
     if ($duplicates !== []) {
-        logActivity('vpnhoodiap: cannot key accounts by email — these addresses have more than one user row and must be merged manually: '
+        logActivity('vpnhoodiap: these addresses have more than one user row (split accounts — merge by hand): '
             . implode(', ', array_slice($duplicates, 0, 20)));
-        return;
-    }
-
-    try {
-        $schema->table('mod_vpnhood_iap_users', function ($table) {
-            $table->unique('email');
-        });
-    } catch (\Throwable $e) {
-        // already unique on a re-run — the index is the goal, not the attempt
     }
 
     // The old key has to go, not just stop being used: one provider account whose
@@ -475,6 +474,103 @@ function vpnhoodiap_migrateToEmailIdentity(): void
         });
     } catch (\Throwable $e) {
         // never existed (fresh install) or already dropped
+    }
+}
+
+/**
+ * Resolution moves from the account row's email to the sign-in methods' emails
+ * (IapRepository::findOrCreateUser): the account row keeps only a CONTACT snapshot,
+ * refreshed at each sign-in. The unique index on users.email has to go — a stale
+ * snapshot may legitimately coexist with another account's current address (the
+ * owner moved on; someone else now verifiably holds it) — and identities.email
+ * gains an index because it is now the lookup. Fresh installs are created in this
+ * shape already; each step tolerates re-runs and half-migrated states.
+ */
+function vpnhoodiap_migrateToIdentityResolution(): void
+{
+    $schema = Capsule::schema();
+    if (!$schema->hasTable('mod_vpnhood_iap_users')) {
+        return;
+    }
+    try {
+        $schema->table('mod_vpnhood_iap_users', function ($table) {
+            $table->dropUnique('mod_vpnhood_iap_users_email_unique');
+        });
+    } catch (\Throwable $e) {
+        // fresh install or already migrated — the index is already gone
+    }
+    try {
+        $schema->table('mod_vpnhood_iap_users', function ($table) {
+            $table->index('email');
+        });
+    } catch (\Throwable $e) {
+        // already indexed
+    }
+    try {
+        $schema->table('mod_vpnhood_iap_identities', function ($table) {
+            $table->index('email');
+        });
+    } catch (\Throwable $e) {
+        // already indexed
+    }
+}
+
+/**
+ * The account→key pointer layer (lifecycle §7/§8): claims record that an
+ * account holds a key it proved by pasting the code — nothing about billing
+ * moves — and the refund marks are the disclosed 24-month one-way fingerprint
+ * of refunded accounts. The deletions journal gains a details column for the
+ * gateway agreement references and other non-personal breadcrumbs deletion
+ * must not destroy.
+ */
+function vpnhoodiap_migrateToAccountKeys(): void
+{
+    $schema = Capsule::schema();
+    if (!$schema->hasTable('mod_vpnhood_iap_claims')) {
+        $schema->create('mod_vpnhood_iap_claims', function ($table) {
+            $table->increments('id');
+            $table->integer('user_id')->unsigned()->index();
+            $table->integer('service_id')->unsigned()->index();
+            $table->boolean('is_default')->default(false);
+            $table->timestamp('created_at')->nullable();
+            $table->unique(['user_id', 'service_id'], 'iap_claims_user_service');
+        });
+    }
+    if (!$schema->hasTable('mod_vpnhood_iap_refund_marks')) {
+        $schema->create('mod_vpnhood_iap_refund_marks', function ($table) {
+            $table->increments('id');
+            $table->string('email_hash', 64)->index();
+            $table->timestamp('created_at')->nullable()->index();
+        });
+    }
+    if ($schema->hasTable('mod_vpnhood_iap_deletions') && !$schema->hasColumn('mod_vpnhood_iap_deletions', 'details')) {
+        $schema->table('mod_vpnhood_iap_deletions', function ($table) {
+            $table->text('details')->nullable();
+        });
+    }
+}
+
+/**
+ * Frozen invoices (lifecycle §5): WHMCS renders invoices from the LIVE client
+ * row, so anonymizing the customer would strip the buyer's name off every past
+ * invoice — the exact thing tax-record rules forbid. Deletion therefore
+ * archives each invoice exactly as issued, buyer identity included, before the
+ * client row is touched. One row per invoice, written once and never updated;
+ * nothing in the module reads this table back (restriction is the legal basis:
+ * it exists for an auditor, not for support or search).
+ */
+function vpnhoodiap_migrateToInvoiceFreeze(): void
+{
+    $schema = Capsule::schema();
+    if (!$schema->hasTable('mod_vpnhood_iap_frozen_invoices')) {
+        $schema->create('mod_vpnhood_iap_frozen_invoices', function ($table) {
+            $table->increments('id');
+            $table->integer('invoice_id')->unsigned()->unique();
+            $table->integer('client_id')->unsigned()->index();
+            $table->mediumText('artifact');
+            $table->char('sha256', 64);
+            $table->timestamp('created_at')->nullable();
+        });
     }
 }
 
@@ -640,6 +736,8 @@ function vpnhoodiap_clientareaDeleteAccount(): array
 {
     require_once __DIR__ . '/lib/ApiException.php';
     require_once __DIR__ . '/lib/IapRepository.php';
+    require_once __DIR__ . '/lib/Provisioning/DeliveryReader.php';
+    require_once __DIR__ . '/lib/Provisioning/AccountKeyService.php';
     require_once __DIR__ . '/lib/Provisioning/AccountDeletionService.php';
 
     $clientId = (int) ($_SESSION['uid'] ?? 0);
@@ -663,12 +761,33 @@ function vpnhoodiap_clientareaDeleteAccount(): array
             }
             $repo = new IapRepository();
             $moduleUser = $email !== '' ? $repo->findUserByEmail($email) : null;
+            // the farewell message carries every key this person can see (§5 step 3);
+            // with no module account, a stand-in row still reaches the client's own keys
+            $keyUser = $moduleUser ?? ['id' => 0, 'client_id' => $clientId];
+            $keyService = new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountKeyService($repo);
             (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService())
-                ->deleteClient($clientId, $moduleUser);
+                ->deleteClient($clientId, $moduleUser, [
+                    'keys'       => $keyService->webKeysForUser($keyUser),
+                    'bulkOrders' => $keyService->bulkOrderCount($keyUser),
+                ]);
             header('Location: logout.php');
             exit;
         } catch (\Throwable $e) {
             $error = $e->getMessage();
+        }
+    }
+
+    // A reseller confirms HERE, not in the app — so this is the one screen that
+    // warns the delivered CSV cannot be served again once the login is gone.
+    $bulkOrders = 0;
+    if ($clientId > 0) {
+        try {
+            $repo = new IapRepository();
+            $moduleUser = $email !== '' ? $repo->findUserByEmail($email) : null;
+            $bulkOrders = (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountKeyService($repo))
+                ->bulkOrderCount($moduleUser ?? ['id' => 0, 'client_id' => $clientId]);
+        } catch (\Throwable $e) {
+            logModuleCall('vpnhoodiap', 'clientarea.deleteAccount.bulkCount', (string) $clientId, $e->getMessage(), '');
         }
     }
 
@@ -678,9 +797,10 @@ function vpnhoodiap_clientareaDeleteAccount(): array
         'templatefile' => 'delete-account',
         'requirelogin' => true,
         'vars'         => [
-            'email' => $email,
-            'error' => $error,
-            'csrf'  => $_SESSION['vpnhoodiap_ca_csrf'],
+            'email'      => $email,
+            'error'      => $error,
+            'csrf'       => $_SESSION['vpnhoodiap_ca_csrf'],
+            'bulkOrders' => $bulkOrders,
         ],
     ];
 }

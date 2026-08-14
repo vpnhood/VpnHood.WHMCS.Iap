@@ -179,6 +179,13 @@ class GooglePlayAdapter implements StoreAdapterInterface
         return $keys;
     }
 
+    public function stopRenewals(array $app, string $purchaseKey): bool
+    {
+        $client = ($this->apiClientFactory)($app);
+        $client->cancelSubscription($purchaseKey);
+        return true;
+    }
+
     // ----------------------------------------------------------- internal --
 
     /** Subscriptions first (no product id needed); one-time products as fallback. */
