@@ -11,21 +11,26 @@
  * PATH_INFO can use the equivalent ?path=/account form; both route identically.
  *
  *   GET    /openapi.json              this API's OpenAPI 3.1 document (no auth)
- *   GET    /system/status             service probe (no auth)
- *   POST   /auth/sessions             sign in with a provider id token (no auth)
- *   DELETE /auth/sessions/current     sign out
- *   GET    /account                   the signed-in account
- *   GET    /account/entitlements      what that account currently holds
- *   GET    /billing/plans             the sellable plans of one app+store (no auth)
- *   POST   /billing/purchases         redeem a store purchase → access code
+ *   GET    /v1/system/status          service probe (no auth)
+ *   POST   /v1/auth/sessions          sign in: provider id token, WHMCS password,
+ *                                     or second-factor challenge completion (no auth)
+ *   DELETE /v1/auth/sessions/current  sign out
+ *   GET    /v1/account                the signed-in account: identity, THE one
+ *                                     access code serving it, and the store
+ *                                     subscription behind it — the whole snapshot
+ *   GET    /v1/billing/products       the store product ids one app+store sells (no auth)
+ *   POST   /v1/billing/purchases      redeem a store purchase; the account
+ *                                     snapshot then carries what it delivered
  *
- * Every resource hangs off a controller; the OpenAPI document is the deliberate
- * exception, because tooling expects to find it at the root of an API.
+ * Every resource hangs off a controller, under a major-version segment. The
+ * OpenAPI document is the deliberate exception, unversioned at the root because
+ * tooling expects to find it there.
  *
- * There is no version in the path on purpose: a breaking change ships as a new
- * endpoint beside the old one, so an app that cannot be updated keeps working
- * without freezing the other seven. The contract version lives in the OpenAPI
- * document and in GET /system/status.
+ * The version segment is the escape hatch an app store makes necessary: a
+ * published app can never be force-updated, so when the shape of this API has to
+ * change incompatibly, /v2 is served beside /v1 and old installs keep working
+ * untouched. It matches the major of the contract version reported by
+ * GET /v1/system/status and by the OpenAPI document.
  *
  * Auth: the opaque session token from POST /auth/sessions, sent as
  * Authorization: Bearer <token> — or X-Portal-Token: <token> for proxies that
@@ -67,6 +72,7 @@ require_once __DIR__ . '/lib/Auth/GoogleIdentityProvider.php';
 require_once __DIR__ . '/lib/Jwk.php';
 require_once __DIR__ . '/lib/Auth/AppleIdentityProvider.php';
 require_once __DIR__ . '/lib/Auth/SessionService.php';
+require_once __DIR__ . '/lib/Auth/PasswordSignInService.php';
 require_once __DIR__ . '/lib/Stores/Dto/PurchaseRecord.php';
 require_once __DIR__ . '/lib/Stores/Dto/StoreNotification.php';
 require_once __DIR__ . '/lib/Stores/StoreAdapterInterface.php';
@@ -90,19 +96,13 @@ require_once __DIR__ . '/lib/Provisioning/EntitlementService.php';
  * client integrator whether the URL or the verb is wrong.
  */
 const VPNHOODIAP_ROUTES = [
-    '/openapi.json'          => ['GET' => 'vpnhoodiap_getOpenApi'],
-    '/system/status'         => ['GET' => 'vpnhoodiap_getStatus'],
-    '/auth/sessions'         => ['POST' => 'vpnhoodiap_createSession'],
-    '/auth/sessions/current' => ['DELETE' => 'vpnhoodiap_deleteCurrentSession'],
-    '/account'               => ['GET' => 'vpnhoodiap_getAccount', 'DELETE' => 'vpnhoodiap_deleteAccount'],
-    '/account/entitlements'  => ['GET' => 'vpnhoodiap_listEntitlements'],
-    '/account/claims'        => ['POST' => 'vpnhoodiap_claimCode'],
-    // POST tolerated beside PATCH: some hosts (LiteSpeed defaults among them)
-    // refuse PATCH at the web-server layer before PHP ever runs
-    '/account/default-key'   => ['PATCH' => 'vpnhoodiap_setDefaultKey', 'POST' => 'vpnhoodiap_setDefaultKey'],
-    '/account/deletion-preview' => ['GET' => 'vpnhoodiap_deletionPreview'],
-    '/billing/plans'         => ['GET' => 'vpnhoodiap_listPlans'],
-    '/billing/purchases'     => ['POST' => 'vpnhoodiap_createPurchase'],
+    '/openapi.json'             => ['GET' => 'vpnhoodiap_getOpenApi'],
+    '/v1/system/status'         => ['GET' => 'vpnhoodiap_getStatus'],
+    '/v1/auth/sessions'         => ['POST' => 'vpnhoodiap_createSession'],
+    '/v1/auth/sessions/current' => ['DELETE' => 'vpnhoodiap_deleteCurrentSession'],
+    '/v1/account'               => ['GET' => 'vpnhoodiap_getAccount', 'DELETE' => 'vpnhoodiap_deleteAccount'],
+    '/v1/billing/products'      => ['GET' => 'vpnhoodiap_listProducts'],
+    '/v1/billing/purchases'     => ['POST' => 'vpnhoodiap_createPurchase'],
 ];
 
 $remoteIp = $_SERVER['REMOTE_ADDR'] ?? '';
@@ -159,11 +159,11 @@ try {
 // --------------------------------------------------------------- handlers --
 // Each returns [httpStatus, body]; body null means "no content".
 
-/** GET /system/status — proves the addon is active and the DB reachable. No data exposed. */
+/** GET /v1/system/status — proves the addon is active and the DB reachable. No data exposed. */
 function vpnhoodiap_getStatus(IapRepository $repo, array $request): array
 {
     vpnhoodiap_rateLimit($repo, $request, 30, 60);
-    return [200, ['status' => 'ok', 'api' => '1.0', 'time' => gmdate('c')]];
+    return [200, ['status' => 'ok', 'api' => 'v1', 'time' => gmdate('c')]];
 }
 
 /** GET /openapi.json — the machine-readable contract, served from the module. */
@@ -180,16 +180,28 @@ function vpnhoodiap_getOpenApi(IapRepository $repo, array $request): array
 }
 
 /**
- * POST /auth/sessions — sign in with a provider id token.
+ * POST /v1/auth/sessions — sign in. Three request forms, one session concept:
  *
- * { provider: "google"|"apple", idToken: "...", packageName: "com..." }
- * → 201 { accessToken, expiresAt, userId, account: { email } }
+ *   { provider, idToken, packageName }         provider id token (Google/Apple)
+ *   { email, password, packageName }           the WHMCS client-area password
+ *   { challengeToken, code, packageName }      second-factor completion
+ *
+ * → 201 { accessToken, expiresAt, userId }
+ * The password form may instead answer 200 { challenge } when a second factor
+ * is due; the challenge completion may add newBackupCode when one was spent.
  */
 function vpnhoodiap_createSession(IapRepository $repo, array $request): array
 {
     vpnhoodiap_rateLimit($repo, $request, 20, 300);
 
     $body = $request['body'];
+    if (array_key_exists('challengeToken', $body)) {
+        return vpnhoodiap_passwordChallengeForm($repo, $request);
+    }
+    if (array_key_exists('email', $body) || array_key_exists('password', $body)) {
+        return vpnhoodiap_passwordForm($repo, $request);
+    }
+
     $provider = (string) ($body['provider'] ?? '');
     $idToken = (string) ($body['idToken'] ?? '');
     $packageName = (string) ($body['packageName'] ?? '');
@@ -240,87 +252,238 @@ function vpnhoodiap_createSession(IapRepository $repo, array $request): array
         (new ClientProvisioner())->syncClient($clientId, $identity['name'] ?? null);
     }
 
-    $session = (new SessionService())->issue((int) $user['id']);
-    return [201, [
+    return [201, vpnhoodiap_sessionBody($user, (string) $app['store'])];
+}
+
+/**
+ * The password form of POST /auth/sessions. Sign-in only: it never creates an
+ * account (unlike the provider form, where a new email deliberately does) and
+ * never touches WHMCS's own login pages. Unknown email and wrong password are
+ * ONE answer — status, body and timing identical — so nothing here can be used
+ * to scan which emails exist (`invalid_credentials`, and the per-address
+ * lockout fires for nonexistent addresses exactly as for real ones).
+ */
+function vpnhoodiap_passwordForm(IapRepository $repo, array $request): array
+{
+    $body = $request['body'];
+    $email = (string) ($body['email'] ?? '');
+    $password = (string) ($body['password'] ?? '');
+    $packageName = (string) ($body['packageName'] ?? '');
+    if ($email === '' || $password === '' || $packageName === '') {
+        throw new ApiException('email, password and packageName are required.', 400, 'bad_request');
+    }
+    $app = $repo->findAppByPackageAnyStore($packageName);
+    if ($app === null) {
+        throw new ApiException('Unknown application.', 403, 'unknown_app');
+    }
+
+    $service = new \WHMCS\Module\Addon\VpnHoodIap\Auth\PasswordSignInService($repo);
+    $outcome = $service->signInWithPassword($email, $password, $packageName);
+    if (isset($outcome['challenge'])) {
+        // the password was right but a second factor is due: no session yet, so
+        // 200 with the challenge — its token can do nothing but this completion
+        return [200, ['challenge' => $outcome['challenge']]];
+    }
+
+    $user = $service->signInToModuleAccount($outcome['whmcsUser']);
+    return [201, vpnhoodiap_sessionBody($user, (string) $app['store'])];
+}
+
+/**
+ * The second-factor form of POST /auth/sessions: completes the challenge the
+ * password form answered. Accepts the authenticator code or the WHMCS backup
+ * code; a spent backup code is rotated and the replacement returned once as
+ * `newBackupCode` — the app must show it, nothing ever shows it again.
+ */
+function vpnhoodiap_passwordChallengeForm(IapRepository $repo, array $request): array
+{
+    $body = $request['body'];
+    $challengeToken = (string) ($body['challengeToken'] ?? '');
+    $code = (string) ($body['code'] ?? '');
+    $packageName = (string) ($body['packageName'] ?? '');
+    if ($challengeToken === '' || $code === '' || $packageName === '') {
+        throw new ApiException('challengeToken, code and packageName are required.', 400, 'bad_request');
+    }
+    $app = $repo->findAppByPackageAnyStore($packageName);
+    if ($app === null) {
+        throw new ApiException('Unknown application.', 403, 'unknown_app');
+    }
+
+    $service = new \WHMCS\Module\Addon\VpnHoodIap\Auth\PasswordSignInService($repo);
+    $outcome = $service->completeChallenge($challengeToken, $code, $packageName);
+    $user = $service->signInToModuleAccount($outcome['whmcsUser']);
+
+    $result = vpnhoodiap_sessionBody($user, (string) $app['store']);
+    if ($outcome['newBackupCode'] !== null) {
+        $result['newBackupCode'] = $outcome['newBackupCode'];
+    }
+    return [201, $result];
+}
+
+/**
+ * The one session-response shape every sign-in form returns. $store is the device's
+ * home store, taken from the app it signed in with: the session remembers it so
+ * GET /v1/account can prefer the subscription that store bills (lifecycle §8).
+ */
+function vpnhoodiap_sessionBody(array $user, ?string $store): array
+{
+    $session = (new SessionService())->issue((int) $user['id'], $store);
+    // Identity and lifetime only — what this device may now do. Who the person is (email,
+    // name) belongs to GET /v1/account and is read from there: an address here would be a
+    // second copy of a MUTABLE value, frozen at sign-in and stale the day it is changed.
+    return [
         'accessToken' => $session['token'],
         'expiresAt'   => $session['expiresAt'],
         'userId'      => $user['external_uid'],
-        'account'     => ['email' => $user['email']],
-    ]];
+    ];
 }
 
-/** DELETE /auth/sessions/current — sign out. Idempotent: always 204. */
+/** DELETE /v1/auth/sessions/current — sign out. Idempotent: always 204. */
 function vpnhoodiap_deleteCurrentSession(IapRepository $repo, array $request): array
 {
     (new SessionService())->revoke(vpnhoodiap_bearerToken());
     return [204, null];
 }
 
-/** GET /account — current account snapshot for the signed-in user. */
+/**
+ * GET /v1/account — the COMPLETE account snapshot, mapping the app's account model
+ * 1:1: identity, THE one access code serving the account, and the store
+ * subscription behind it when one exists. One call, one object. The server does
+ * the ranking — an active subscription's code outranks the website choice — so
+ * no device ever sees a list or picks a code (lifecycle §8).
+ */
 function vpnhoodiap_getAccount(IapRepository $repo, array $request): array
 {
     $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
-    return [200, [
-        'userId'  => $user['external_uid'],
-        'account' => ['email' => $user['email']],
-    ]];
+    return [200, vpnhoodiap_accountSnapshot($repo, $user)];
+}
+
+/** The snapshot body: { userId, name, email, accessCodeInfo, subscription }. */
+function vpnhoodiap_accountSnapshot(IapRepository $repo, array $user): array
+{
+    // the billing owner's name, when a WHMCS client is linked and carries one
+    $name = null;
+    if (!empty($user['client_id'])) {
+        $client = \WHMCS\Database\Capsule::table('tblclients')
+            ->where('id', (int) $user['client_id'])->first(['firstname', 'lastname']);
+        if ($client !== null) {
+            $name = trim($client->firstname . ' ' . $client->lastname) ?: null;
+        }
+    }
+
+    // The store subscription serving the account: the newest provisioned, unexpired
+    // purchase whose code is deliverable. Its code IS the account's code — it is what
+    // the person is paying for right now. The price is the STORE's own charge for the
+    // current period, not a catalogue price.
+    //
+    // THIS DEVICE'S OWN STORE COMES FIRST (lifecycle §8). One account can hold a
+    // subscription in more than one store, and only the device's own store can manage,
+    // renew or cancel the one it sold: handing an Android device an Apple subscription
+    // would hide its Google one, refuse a Google purchase as "already premium", and
+    // offer no way to manage either. So the home store's serving subscription is
+    // preferred, and the account-wide newest is the fallback — for a device whose store
+    // sold nothing, and for sessions issued before the session knew its store.
+    $subscription = null;
+    $accessCode = null;
+    $reader = new DeliveryReader();
+    $homeStore = $user['session_store'] ?? null;
+    $rows = \WHMCS\Database\Capsule::table('mod_vpnhood_iap_purchases')
+        ->where('user_id', (int) $user['id'])
+        ->where('status', 'provisioned')
+        ->orderByDesc('id')
+        ->limit(10)
+        ->get()->map(fn ($row) => (array) $row)->all();
+    if ($homeStore !== null) {
+        usort($rows, fn ($a, $b) => ((string) $b['store'] === $homeStore ? 1 : 0)
+            <=> ((string) $a['store'] === $homeStore ? 1 : 0));
+    }
+    foreach ($rows as $row) {
+        $expiry = $row['expiry_time'] !== null ? strtotime((string) $row['expiry_time']) : null;
+        if (($expiry !== null && $expiry < time()) || $row['service_id'] === null) {
+            continue;
+        }
+        $code = $reader->readAccessCode((int) $row['service_id']);
+        if ($code === null) {
+            continue; // not deliverable (partner outage) — try the next purchase
+        }
+        $expirationTime = $expiry !== null ? gmdate('c', $expiry) : null;
+        $accessCode = ['accessCode' => $code, 'expirationTime' => $expirationTime];
+        $subscription = [
+            'storeId'        => (string) $row['store'],
+            'createdTime'    => $row['created_at'] !== null
+                ? gmdate('c', strtotime((string) $row['created_at']))
+                : null,
+            'expirationTime' => $expirationTime,
+            'priceAmount'    => $row['store_amount'] !== null ? (float) $row['store_amount'] : null,
+            'priceCurrency'  => $row['store_currency'],
+            'billingPeriod'  => IapRepository::billingPeriodForService((int) $row['service_id']),
+            'isAutoRenew'    => (bool) $row['auto_renewing'],
+        ];
+        break;
+    }
+
+    // No subscription: THE one website code fills in — chosen by the server and
+    // recomputed on this very read (a dead choice is replaced by the next usable
+    // code, lifecycle §8). No list ever crosses to a device.
+    if ($accessCode === null) {
+        $info = (new AccountKeyService($repo))->accessCodeInfoForUser($user);
+        if ($info !== null) {
+            $accessCode = ['accessCode' => $info['accessCode'], 'expirationTime' => $info['expiresAt']];
+        }
+    }
+
+    return [
+        'userId'       => $user['external_uid'],
+        'name'         => $name,
+        'email'        => $user['email'],
+        'accessCodeInfo' => $accessCode,
+        'subscription' => $subscription,
+    ];
 }
 
 /**
- * DELETE /account — "forget me" (Apple 5.1.1(v), Play account deletion, GDPR
+ * DELETE /v1/account (Apple 5.1.1(v), Play account deletion, GDPR
  * Art. 17). The person is erased everywhere at once — sessions on every device,
  * sign-in identities, the account row — and the WHMCS client behind the retained
  * invoices is anonymized and closed. Nothing blocks it (lifecycle §8): web
  * billing is cancelled at the end of its paid period instead, stored payment
- * methods are dropped, and one final message carries the keys and warnings to
- * the address before it is erased. Body/query `stopRenewals=true` additionally
- * asks the stores that allow it to stop future renewals (Google yes, Apple no —
- * the preview says which). Running keys are deliberately left alone: they are
- * open gates with no personal data, already paid for.
+ * methods are dropped, and one final message carries the codes and warnings to
+ * the address before it is erased. A store subscription is deliberately left
+ * exactly as it is (lifecycle §8): signing in again brings it back by itself,
+ * so cancelling it here would destroy the very thing a return depends on.
+ * Running codes are left alone too: open gates with no personal data, already
+ * paid for.
  */
 function vpnhoodiap_deleteAccount(IapRepository $repo, array $request): array
 {
     vpnhoodiap_rateLimit($repo, $request, 5, 300);
     $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
 
-    $stopRenewals = filter_var(
-        $request['body']['stopRenewals'] ?? $request['query']['stopRenewals'] ?? false,
-        FILTER_VALIDATE_BOOL);
-
-    // collect everything the farewell message must carry BEFORE anything dies
-    $preview = vpnhoodiap_buildDeletionPreview($repo, $user);
+    // collect everything the farewell message must carry BEFORE anything dies —
+    // the confirmation screen warns, the mail delivers (lifecycle §5 steps 2–3)
+    $farewell = vpnhoodiap_collectFarewell($repo, $user);
     (new AccountDeletionService())->deleteUser($user, [
-        'stopRenewals'         => $stopRenewals,
-        'keys'                 => $preview['keys'],
-        // bulk never reaches the wire (a merchant concept, not a key), but the
+        'keys'                 => $farewell['keys'],
+        // bulk never reaches the wire (a merchant concept, not a code), but the
         // farewell message still says the delivered file cannot be served again
         'bulkOrders'           => (new AccountKeyService($repo))->bulkOrderCount($user),
-        'subscriptionWarnings' => array_values(array_filter(array_map(
-            fn (array $subscription) => $subscription['warning'] ?? null, $preview['subscriptions']))),
+        'subscriptionWarnings' => $farewell['subscriptionWarnings'],
     ]);
     return [204, null];
 }
 
 /**
- * GET /account/deletion-preview — everything the person must see before they
- * confirm (lifecycle §5/§10): every key they paid for shown one last time, the
- * state of every store subscription and whether we can stop its renewals for
- * them, and how many web-billed services will be cancelled at period end.
+ * Everything the farewell mail must carry (lifecycle §5 step 3): every code the
+ * person paid for — website services AND the code behind each store purchase —
+ * plus one warning line per subscription still open at a store. Feeds only the
+ * mail: no preview endpoint exists, deliberately (§10 — the confirmation shows
+ * no codes and no counts, so there is nothing for a device to fetch).
  */
-function vpnhoodiap_deletionPreview(IapRepository $repo, array $request): array
+function vpnhoodiap_collectFarewell(IapRepository $repo, array $user): array
 {
-    vpnhoodiap_rateLimit($repo, $request, 10, 300);
-    $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
-    return [200, vpnhoodiap_buildDeletionPreview($repo, $user)];
-}
+    $keys = (new AccountKeyService($repo))->webKeysForUser($user);
 
-/** The shared preview builder: also feeds the final message at actual deletion. */
-function vpnhoodiap_buildDeletionPreview(IapRepository $repo, array $user): array
-{
-    $keyService = new AccountKeyService($repo);
-    $keys = $keyService->webKeysForUser($user);
-
-    $subscriptions = [];
+    $warnings = [];
     $rows = \WHMCS\Database\Capsule::table('mod_vpnhood_iap_purchases')
         ->where('user_id', (int) $user['id'])
         ->where('status', 'provisioned')
@@ -331,7 +494,7 @@ function vpnhoodiap_buildDeletionPreview(IapRepository $repo, array $user): arra
         $expired = $expiry !== null && $expiry < time();
         $autoRenewing = (bool) $row['auto_renewing'];
         if ($expired && !$autoRenewing) {
-            continue; // fully over — nothing to show, nothing to warn about
+            continue; // fully over — nothing to send, nothing to warn about
         }
         if (!$expired && $row['service_id'] !== null) {
             $code = $reader->readAccessCode((int) $row['service_id']);
@@ -343,113 +506,36 @@ function vpnhoodiap_buildDeletionPreview(IapRepository $repo, array $user): arra
                 ];
             }
         }
-        $canStopRenewals = $autoRenewing && (string) $row['store'] === 'googleplay';
-        // grace/hold: the store still holds the subscription open although access
-        // stopped — the case most likely to charge again unexpectedly (§8)
-        $betweenPayments = $expired && $autoRenewing;
-        $warning = null;
         if ($autoRenewing) {
-            $warning = $betweenPayments
+            // grace/hold: the store still holds the subscription open although access
+            // stopped — the case most likely to charge again unexpectedly (§8)
+            $warnings[] = $expired && $autoRenewing
                 ? 'A subscription with a failed payment is still open at the store and may start charging again. '
                     . 'Cancel it in the store it was bought from.'
                 : 'Deleting the account does not cancel the subscription — it may keep renewing until '
                     . 'cancelled in the store it was bought from.';
         }
-        // NO store name on the wire, deliberately: an app shipping on every
-        // platform may not name a competing store (App Review 2.3.10), and the
-        // only actionable fact — can WE stop the renewals — is its own flag.
-        $subscriptions[] = [
-            'autoRenewing'    => $autoRenewing,
-            'expiresAt'       => $expiry !== null ? gmdate('c', $expiry) : null,
-            'state'           => $betweenPayments ? 'between-payments' : ($expired ? 'expired' : 'active'),
-            'canStopRenewals' => $canStopRenewals,
-            'warning'         => $warning,
-        ];
     }
 
-    $webBilling = 0;
-    if ($user['client_id'] !== null) {
-        $moduleServiceIds = \WHMCS\Database\Capsule::table('mod_vpnhood_iap_purchases')
-            ->where('client_id', (int) $user['client_id'])->whereNotNull('service_id')->pluck('service_id')->all();
-        $webBilling = (int) \WHMCS\Database\Capsule::table('tblhosting as h')
-            ->join('tblproducts as p', 'p.id', '=', 'h.packageid')
-            ->where('h.userid', (int) $user['client_id'])
-            ->whereIn('h.domainstatus', ['Active', 'Suspended'])
-            ->where('p.paytype', 'recurring')
-            ->whereNotIn('h.id', $moduleServiceIds ?: [0])
-            ->count();
-    }
-
-    return [
-        'keys'          => $keys,
-        'subscriptions' => $subscriptions,
-        'webBilling'    => ['servicesToCancelAtPeriodEnd' => $webBilling],
-    ];
+    return ['keys' => $keys, 'subscriptionWarnings' => array_values(array_unique($warnings))];
 }
 
 /**
- * POST /account/claims — claim by code (lifecycle §8): pasting a code once
- * proves possession and records a pointer. Nothing about billing moves. The
- * first key an account ever points at becomes its default. Tightly rate
- * limited: possession is the proof, so guessing must be expensive.
+ * POST /v1/billing/purchases — the primary purchase flow: validate the store proof
+ * and provision. One synchronous call, no client polling.
  *
- * { accessCode: "..." } → 201 (created) / 200 (already claimed)
- */
-function vpnhoodiap_claimCode(IapRepository $repo, array $request): array
-{
-    vpnhoodiap_rateLimit($repo, $request, 10, 300);
-    $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
-
-    $accessCode = trim((string) ($request['body']['accessCode'] ?? ''));
-    if ($accessCode === '') {
-        throw new ApiException('accessCode is required.', 400, 'bad_request');
-    }
-    $keyService = new AccountKeyService($repo);
-    $serviceId = $keyService->findServiceIdByCode($accessCode);
-    if ($serviceId === null) {
-        throw new ApiException('No key with this code.', 404, 'code_not_found');
-    }
-    $claim = $keyService->claim((int) $user['id'], $serviceId);
-    $state = (new DeliveryReader())->readCodeState($serviceId);
-    return [$claim['created'] ? 201 : 200, [
-        'accessCode' => $accessCode,
-        'expiresAt'  => $state['expiresAt'],
-        'isDefault'  => $claim['isDefault'],
-    ]];
-}
-
-/**
- * PATCH /account/default-key — deliberately choose (or clear, with null) THE
- * key that serves this account. Last-one-wins applies to exactly this kind of
- * deliberate act; nothing automatic ever calls it.
+ * { storeId: "googleplay", packageName: "com...", proof: {...} }
+ * → 201 "provisioned" | "pending"
  *
- * { accessCode: "..." | null } → 204
- */
-function vpnhoodiap_setDefaultKey(IapRepository $repo, array $request): array
-{
-    vpnhoodiap_rateLimit($repo, $request, 10, 300);
-    $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
-
-    $body = $request['body'];
-    if (!array_key_exists('accessCode', $body)) {
-        throw new ApiException('accessCode is required (null clears the default).', 400, 'bad_request');
-    }
-    $accessCode = $body['accessCode'] !== null ? trim((string) $body['accessCode']) : null;
-    (new AccountKeyService($repo))->setDefault($user, $accessCode === '' ? null : $accessCode);
-    return [204, null];
-}
-
-/**
- * POST /billing/purchases — the primary purchase flow: validate the store proof,
- * provision, return the access code. One synchronous call, no client polling.
+ * The response IS the state: once provisioned, the app refreshes GET /v1/account,
+ * which is where the delivered code and the subscription already live — a copy
+ * here would be a second source of truth for the same facts. The state is not
+ * also encoded in the status line: "pending" is a fact about the STORE settling
+ * a payment, not about what this request did to a resource, and a status code
+ * saying it again is one more copy to keep true.
  *
- * { store: "googleplay", packageName: "com...", proof: {...} }
- * → 201 { state: "provisioned", accessCode, expiresAt, planId, purchasedAt,
- *         autoRenewing, priceAmount, priceCurrency, billingPeriod }
- * → 202 { state: "pending", accessCode: null, ... }
- *
- * Redeeming the same purchase again returns the same entitlement (201): the
- * store purchase key is the idempotency anchor, so a retry never double-orders.
+ * Redeeming the same purchase again answers 201 again: the store purchase key
+ * is the idempotency anchor, so a retry never double-orders.
  */
 function vpnhoodiap_createPurchase(IapRepository $repo, array $request): array
 {
@@ -457,18 +543,18 @@ function vpnhoodiap_createPurchase(IapRepository $repo, array $request): array
     vpnhoodiap_rateLimit($repo, $request, 30, 300);
 
     $body = $request['body'];
-    $store = (string) ($body['store'] ?? '');
+    $storeId = (string) ($body['storeId'] ?? '');
     $packageName = (string) ($body['packageName'] ?? '');
     $proof = $body['proof'] ?? null;
-    if ($store === '' || $packageName === '' || !is_array($proof)) {
-        throw new ApiException('store, packageName and proof are required.', 400, 'bad_request');
+    if ($storeId === '' || $packageName === '' || !is_array($proof)) {
+        throw new ApiException('storeId, packageName and proof are required.', 400, 'bad_request');
     }
-    $app = $repo->findAppByPackageName($store, $packageName);
+    $app = $repo->findAppByPackageName($storeId, $packageName);
     if ($app === null) {
         throw new ApiException('Unknown application.', 403, 'unknown_app');
     }
 
-    $adapter = StoreAdapterRegistry::get($store);
+    $adapter = StoreAdapterRegistry::get($storeId);
     try {
         $record = $adapter->verifyPurchase($app, $proof);
     } catch (\RuntimeException $e) {
@@ -477,76 +563,34 @@ function vpnhoodiap_createPurchase(IapRepository $repo, array $request): array
     }
 
     $entitlement = (new EntitlementService($repo))->redeem($app, $record, $user, $adapter);
-    $entitlement['store'] = $store; // which store billed it — clients key "manage subscription" off this
-
-    // 202 while the entitlement is not deliverable yet (store still settling, or
-    // the account's email awaits verification); the client polls or retries.
-    return [$entitlement['state'] === 'provisioned' ? 201 : 202, $entitlement];
-}
-
-/** GET /account/entitlements — what the signed-in account currently holds. */
-function vpnhoodiap_listEntitlements(IapRepository $repo, array $request): array
-{
-    $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
-    $rows = \WHMCS\Database\Capsule::table('mod_vpnhood_iap_purchases')
-        ->where('user_id', (int) $user['id'])
-        ->where('status', 'provisioned')
-        ->orderByDesc('id')
-        ->limit(10)
-        ->get()->map(fn ($row) => (array) $row)->all();
-
-    $reader = new DeliveryReader();
-    $items = [];
-    foreach ($rows as $row) {
-        $expiry = $row['expiry_time'] !== null ? strtotime((string) $row['expiry_time']) : null;
-        if ($expiry !== null && $expiry < time()) {
-            continue;
-        }
-        $items[] = [
-            'state'         => 'provisioned',
-            'accessCode'    => $row['service_id'] !== null ? $reader->readAccessCode((int) $row['service_id']) : null,
-            'expiresAt'     => $expiry !== null ? gmdate('c', $expiry) : null,
-            'store'         => (string) $row['store'],
-            // what the buyer is actually on: the app shows this as the subscription
-            // summary, so it must not need a second call to the store to render
-            'purchasedAt'   => $row['created_at'] !== null ? gmdate('c', strtotime((string) $row['created_at'])) : null,
-            'autoRenewing'  => (bool) $row['auto_renewing'],
-            'priceAmount'   => $row['store_amount'],
-            'priceCurrency' => $row['store_currency'],
-            'billingPeriod' => $row['service_id'] !== null
-                ? IapRepository::billingPeriodForService((int) $row['service_id'])
-                : null,
-        ];
-    }
-
-    // website keys this account can see: its linked client's own services plus
-    // anything it claimed by code (lifecycle §7/§8) — with the default marked,
-    // which is what the app auto-applies at sign-in
-    $webKeys = (new AccountKeyService($repo))->webKeysForUser($user);
-
-    return [200, ['items' => $items, 'webKeys' => $webKeys]];
+    return [201, $entitlement['state']];
 }
 
 /**
- * GET /billing/plans?store=&packageName= — the sellable plans for one app+store.
- * WHMCS is the source of truth for WHAT is sellable; the store prices it.
- * Unmapped plans simply don't appear.
+ * GET /v1/billing/products?store=&packageName= — the sellable store product ids for
+ * one app+store. WHMCS is the source of truth for WHAT is sellable; the store
+ * prices it. Unmapped plans simply don't appear.
+ *
+ * Products, not plans: the catalog maps one row per plan (product + base plan), but
+ * a base plan is not something an app can act on — the store enumerates those within
+ * a product by itself. So the rows are reduced to their DISTINCT product ids here
+ * rather than shipping the repeats for every client to collapse the same way.
  *
  * No session: an app renders its plans page before anyone signs in, so gating this
  * would force every app to ship a hardcoded product list and drift from the catalog
  * it is mapped against. Nothing here is account-scoped, and the ids are public in
  * the store listing anyway — only WHAT this app sells, never WHO buys it.
  */
-function vpnhoodiap_listPlans(IapRepository $repo, array $request): array
+function vpnhoodiap_listProducts(IapRepository $repo, array $request): array
 {
     vpnhoodiap_rateLimit($repo, $request, 30, 60);
 
-    $store = (string) ($request['query']['store'] ?? '');
+    $storeId = (string) ($request['query']['store'] ?? '');
     $packageName = (string) ($request['query']['packageName'] ?? '');
-    if ($store === '' || $packageName === '') {
+    if ($storeId === '' || $packageName === '') {
         throw new ApiException('store and packageName are required.', 400, 'bad_request');
     }
-    $app = $repo->findAppByPackageName($store, $packageName);
+    $app = $repo->findAppByPackageName($storeId, $packageName);
     if ($app === null) {
         throw new ApiException('Unknown application.', 403, 'unknown_app');
     }
@@ -555,22 +599,22 @@ function vpnhoodiap_listPlans(IapRepository $repo, array $request): array
         if ((int) $mapping['app_id'] !== (int) $app['id'] || !$mapping['enabled']) {
             continue;
         }
-        $items[] = [
-            'planId'         => $mapping['store_base_plan_id'] !== ''
-                ? $mapping['store_product_id'] . '/' . $mapping['store_base_plan_id']
-                : $mapping['store_product_id'],
-            'storeProductId' => $mapping['store_product_id'],
-            'basePlanId'     => $mapping['store_base_plan_id'],
-        ];
+        // the store product id alone: the app asks its store to price it, and the store
+        // itself enumerates the base plans within a product — nothing else is consumed
+        $items[] = (string) $mapping['store_product_id'];
     }
-    return [200, ['items' => $items]];
+    // array_values: array_unique keeps the original keys, and a gap would encode as a
+    // JSON object instead of the array this answers with
+    return [200, array_values(array_unique($items))];
 }
 
 // ---------------------------------------------------------------- helpers --
 
 /**
- * The resource path, e.g. "/account". PATH_INFO is the normal source; ?path= is
- * the escape hatch for hosts that strip it (some nginx/php-fpm setups).
+ * The resource path, e.g. "/v1/account". PATH_INFO is the normal source; ?path=
+ * is the escape hatch for hosts that strip it (some nginx/php-fpm setups). A bare
+ * root lands on the current version's status, so a human probing the base URL
+ * gets an answer rather than a 404.
  */
 function vpnhoodiap_requestPath(): string
 {
@@ -579,7 +623,7 @@ function vpnhoodiap_requestPath(): string
         $path = (string) ($_GET['path'] ?? '');
     }
     $path = '/' . trim(parse_url($path, PHP_URL_PATH) ?: '', '/');
-    return $path === '/' ? '/system/status' : $path;
+    return $path === '/' ? '/v1/system/status' : $path;
 }
 
 /** The parsed JSON request body; an empty body is an empty array, not an error. */
@@ -624,7 +668,7 @@ function vpnhoodiap_redact(mixed $value): mixed
     if (!is_array($value)) {
         return $value;
     }
-    static $secretKeys = ['idtoken', 'proof', 'accesstoken', 'token'];
+    static $secretKeys = ['idtoken', 'proof', 'accesstoken', 'token', 'password', 'code', 'challengetoken', 'newbackupcode'];
     $redacted = [];
     foreach ($value as $key => $item) {
         $redacted[$key] = is_string($key) && in_array(strtolower($key), $secretKeys, true)

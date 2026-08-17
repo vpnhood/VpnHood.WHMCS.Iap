@@ -160,20 +160,6 @@ class GooglePlayApiClient
         );
     }
 
-    /**
-     * purchases.subscriptionsv2.cancel — developer-initiated cancellation.
-     * DEVELOPER_REQUESTED_STOP_PAYMENTS stops future charges; the subscription
-     * stays valid until its current expiry, so the buyer loses nothing paid for.
-     */
-    public function cancelSubscription(string $purchaseToken): void
-    {
-        $this->call(
-            'POST',
-            '/purchases/subscriptionsv2/tokens/' . rawurlencode($purchaseToken) . ':cancel',
-            json_encode(['cancellationType' => 'DEVELOPER_REQUESTED_STOP_PAYMENTS'])
-        );
-    }
-
     // ----------------------------------------------------------- plumbing --
 
     private function callAcknowledge(string $path): void

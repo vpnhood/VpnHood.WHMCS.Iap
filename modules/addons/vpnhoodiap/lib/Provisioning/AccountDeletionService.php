@@ -10,7 +10,7 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
 }
 
 /**
- * "Forget me" (Apple 5.1.1(v), Play account-deletion policy, GDPR Art. 17).
+ * Permanent account deletion (Apple 5.1.1(v), Play account-deletion policy, GDPR Art. 17).
  *
  * Erases the PERSON, never the service and never the money trail:
  *
@@ -47,13 +47,15 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
 class AccountDeletionService
 {
     /**
-     * Delete the account behind a signed-in module user.
+     * Delete the account behind a signed-in module user. A store subscription
+     * is deliberately left exactly as it is (lifecycle §8): signing in again
+     * brings it back by itself, so cancelling it here would destroy the very
+     * asset a return depends on — the person cancels in their own store.
      *
      * @param array $user the mod_vpnhood_iap_users row (as SessionService::resolve returns it)
-     * @param array $options stopRenewals?: bool (ask the stores that allow it to stop
-     *                       future charges), keys?: array (the farewell message's key
-     *                       list, collected by the caller before anything is erased),
-     *                       bulkOrders?: int (reseller batches — no key to show, but the
+     * @param array $options keys?: array (the farewell message's code list,
+     *                       collected by the caller before anything is erased),
+     *                       bulkOrders?: int (reseller batches — no code to show, but the
      *                       delivered file dies with the client-area login),
      *                       subscriptionWarnings?: string[] (lines for still-running
      *                       store subscriptions)
@@ -64,9 +66,6 @@ class AccountDeletionService
         $clientId = $user['client_id'] !== null ? (int) $user['client_id'] : null;
         $details = [];
 
-        if (!empty($options['stopRenewals'])) {
-            $details['renewalsStopped'] = $this->stopStoreRenewals($userId);
-        }
         if ($clientId !== null) {
             $details += $this->deleteClientSide($clientId, $options);
         }
@@ -266,11 +265,11 @@ class AccountDeletionService
 
     /**
      * The one message the address gets before it stops existing (lifecycle §5
-     * step 3): the keys they paid for, and the warning about any subscription
-     * that keeps charging. An inbox is searchable a year later; the confirmation
-     * screen is not. Best-effort by design — a mail outage must not trap a
-     * person in an account they asked to erase; the app showed the same keys in
-     * the deletion preview.
+     * step 3): every code they paid for, and the warning about any subscription
+     * that keeps charging. THE SCREEN WARNS, THE MAIL DELIVERS — the
+     * confirmation deliberately lists nothing, so this mail is the only listing
+     * there is, and an inbox is searchable a year later. Best-effort by design:
+     * a mail outage must not trap a person in an account they asked to erase.
      */
     private function sendFinalMessage(int $clientId, array $keys, array $subscriptionWarnings,
         int $bulkOrders = 0): void
@@ -280,8 +279,8 @@ class AccountDeletionService
         }
         $lines = ['<p>Your account has been deleted. This message is the last one we can send you.</p>'];
         if ($keys !== []) {
-            $lines[] = '<p><strong>Your premium keys — save them now.</strong> They keep working for the time '
-                . 'already paid; after this we can never show them to you again:</p><ul>';
+            $lines[] = '<p><strong>Your premium codes — save them now.</strong> They keep working for the time '
+                . 'already paid; after this we can never look them up for you again:</p><ul>';
             foreach ($keys as $key) {
                 $code = htmlspecialchars((string) ($key['accessCode'] ?? ''), ENT_QUOTES);
                 $expires = isset($key['expiresAt']) && $key['expiresAt'] !== null
@@ -295,7 +294,7 @@ class AccountDeletionService
             // stock has no single code to list; what matters is that the CSV was
             // served by the client area, and that door has just closed
             $lines[] = '<p><strong>Your bulk orders (' . $bulkOrders . ') were delivered as a CSV file at '
-                . 'purchase.</strong> That file cannot be downloaded again now the account is gone. The keys '
+                . 'purchase.</strong> That file cannot be downloaded again now the account is gone. The codes '
                 . 'inside it are unaffected and keep working until they expire.</p>';
         }
         foreach ($subscriptionWarnings as $warning) {
@@ -305,54 +304,12 @@ class AccountDeletionService
             localAPI('SendEmail', [
                 'id'            => $clientId,
                 'customtype'    => 'general',
-                'customsubject' => 'Your account was deleted — your keys, one last time',
+                'customsubject' => 'Your account was deleted — your premium codes, one last time',
                 'custommessage' => implode("\n", $lines),
             ]);
         } catch (\Throwable $e) {
             logModuleCall('vpnhoodiap', 'deletion.finalMessage', (string) $clientId, $e->getMessage(), '');
         }
-    }
-
-    /**
-     * Ask the stores that allow it to stop future renewals (lifecycle §8: offered
-     * as a choice, acted on only where a developer cancellation exists — the
-     * subscription stays valid to its paid expiry either way).
-     *
-     * @return array<int,string> the purchase keys whose renewals were stopped
-     */
-    private function stopStoreRenewals(int $userId): array
-    {
-        $rows = Capsule::table('mod_vpnhood_iap_purchases')
-            ->where('user_id', $userId)
-            ->where('status', 'provisioned')
-            ->where('auto_renewing', 1)
-            ->get()->map(fn ($row) => (array) $row)->all();
-
-        $stopped = [];
-        foreach ($rows as $row) {
-            try {
-                $app = Capsule::table('mod_vpnhood_iap_apps')->where('id', (int) $row['app_id'])->first();
-                if ($app === null) {
-                    continue;
-                }
-                $appArray = (array) $app;
-                if (!empty($appArray['credentials'])) {
-                    $appArray['credentials'] = (new \WHMCS\Module\Addon\VpnHoodIap\IapRepository())
-                        ->decryptSecret((string) $appArray['credentials']);
-                }
-                $adapter = \WHMCS\Module\Addon\VpnHoodIap\Stores\StoreAdapterRegistry::get((string) $row['store']);
-                if ($adapter->stopRenewals($appArray, (string) $row['purchase_key'])) {
-                    $stopped[] = (string) $row['purchase_key'];
-                    Capsule::table('mod_vpnhood_iap_purchases')->where('id', (int) $row['id'])
-                        ->update(['auto_renewing' => 0, 'updated_at' => date('Y-m-d H:i:s')]);
-                }
-            } catch (\Throwable $e) {
-                // best-effort: the person is deleting either way; the warning text
-                // still tells them to cancel in the store themselves
-                logModuleCall('vpnhoodiap', 'deletion.stopRenewals', (string) ($row['id'] ?? ''), $e->getMessage(), '');
-            }
-        }
-        return $stopped;
     }
 
     /** Nothing may ever bill a deleted person again: open invoices are cancelled, paid ones retained. */
@@ -465,7 +422,7 @@ class AccountDeletionService
         // The purchase ledger keeps user_id as a DEAD pointer on purpose: the person it
         // named no longer exists anywhere (identities, emails and uids die above), and the
         // journal below retains the same numeric id anyway — so this discloses nothing new.
-        // What it buys: Restore Purchases after "forget me" can prove a purchase's owner
+        // What it buys: Restore Purchases after deletion can prove a purchase's owner
         // was journalled-deleted (EntitlementService::relinkErasedOwner) and hand the row
         // to the person's new account, instead of dead-ending on the binding guard.
         Capsule::table('mod_vpnhood_iap_users')->where('id', $userId)->delete();

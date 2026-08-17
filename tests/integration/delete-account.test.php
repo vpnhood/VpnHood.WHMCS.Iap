@@ -1,14 +1,15 @@
 <?php
 /**
- * delete-account.test.php — "forget me" inside the deployed dev WHMCS.
+ * delete-account.test.php — account deletion inside the deployed dev WHMCS.
  *
  * Covers the whole contract: the person is erased everywhere, the paid service
  * and the invoice history are NOT, an active web service no longer blocks —
  * its billing is cancelled at the END of the paid period and journalled with
  * the agreement reference — every invoice is FROZEN with the buyer's real
  * identity before the client row is anonymized, the action is re-runnable,
- * and the real DELETE /account endpoint (plus /account/deletion-preview)
- * does all of it over HTTP with a session token.
+ * and the real DELETE /account endpoint does all of it over HTTP with a
+ * session token. There is deliberately NO deletion-preview endpoint: the
+ * confirmation screen warns without listing, and the farewell mail delivers.
  *
  * Writes go through localAPI (clients, orders, services) or the module's own
  * mod_vpnhood_iap_* tables — never a raw INSERT/UPDATE on WHMCS core (the one
@@ -38,7 +39,7 @@ if (!tableExists($db, 'mod_vpnhood_iap_frozen_invoices')) {
     finish();
 }
 
-const API_URL = 'https://whmcs-dev.vpnhood.com/modules/addons/vpnhoodiap/api.php';
+const API_URL = 'https://whmcs-dev.vpnhood.com/modules/addons/vpnhoodiap/api.php/v1';
 
 $marker = 'deltest-' . bin2hex(random_bytes(4));
 $clientIds = [];
@@ -241,7 +242,8 @@ try {
     $userIds['http'] = makeUser("$marker-http", $clientIds['http']);
     $httpToken = (new SessionService())->issue($userIds['http'])['token'];
 
-    // the preview first: everything the person sees before confirming (§5/§10)
+    // NO preview endpoint, deliberately (lifecycle §5/§10): the confirmation shows
+    // no codes and no counts — the screen warns, the farewell mail delivers
     $curl = curl_init(API_URL . '/account/deletion-preview');
     curl_setopt_array($curl, [
         CURLOPT_HTTPHEADER     => ['Authorization: Bearer ' . $httpToken],
@@ -252,12 +254,9 @@ try {
     $previewBody = (string) curl_exec($curl);
     $previewStatus = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
     curl_close($curl);
-    $preview = json_decode($previewBody, true);
-    ($previewStatus === 200 && is_array($preview)
-        && array_key_exists('keys', $preview) && array_key_exists('subscriptions', $preview)
-        && array_key_exists('webBilling', $preview))
-        ? ok('GET /account/deletion-preview answers 200 with keys + subscriptions + webBilling')
-        : bad("deletion-preview wrong: $previewStatus " . substr($previewBody, 0, 200));
+    $previewStatus === 404
+        ? ok('GET /account/deletion-preview no longer exists (404) — the screen warns, the mail delivers')
+        : bad("deletion-preview should be gone, answered $previewStatus: " . substr($previewBody, 0, 200));
 
     $curl = curl_init(API_URL . '/account');
     curl_setopt_array($curl, [

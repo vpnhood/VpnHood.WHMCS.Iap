@@ -35,7 +35,7 @@ function vpnhoodiap_config(): array
     return [
         'name'        => 'VpnHood! In-App Purchase',
         'description' => 'Processes app-store purchases (Google Play / Apple / Microsoft) into WHMCS clients, orders and paid invoices, delivering VpnHood access codes through the install\'s provisioning module.',
-        'version'     => '1.0.13',
+        'version'     => '1.0.17',
         'author'      => 'VpnHood',
         'fields'      => [
             'AdminAlertEmail' => [
@@ -58,6 +58,13 @@ function vpnhoodiap_config(): array
                 'Size'         => '6',
                 'Description'  => 'Days to keep a service suspended after store-side expiry before terminating.',
                 'Default'      => '3',
+            ],
+            'PasswordCooldownMinutes' => [
+                'FriendlyName' => 'Password Cooldown (minutes)',
+                'Type'         => 'text',
+                'Size'         => '6',
+                'Description'  => 'After 5 failed password sign-ins, the address waits this long before it may try again. Applies to nonexistent addresses exactly as to real ones (anti-enumeration).',
+                'Default'      => '10',
             ],
         ],
     ];
@@ -163,6 +170,9 @@ function vpnhoodiap_activate(): array
                 $table->timestamp('expires_at')->nullable()->index();
                 $table->timestamp('last_used_at')->nullable();
                 $table->timestamp('revoked_at')->nullable();
+                // the store this device belongs to, from the package name it signed in with:
+                // its subscription is the one that serves this device (lifecycle §8)
+                $table->string('store', 16)->nullable();
             });
         }
 
@@ -244,6 +254,9 @@ function vpnhoodiap_activate(): array
 
         vpnhoodiap_migrateToAccountKeys(); // claims + refund marks + journal details on fresh installs too
         vpnhoodiap_migrateToInvoiceFreeze();
+        vpnhoodiap_migrateToServerChosenCode();
+        vpnhoodiap_migrateOffRemovedCodePark();
+        vpnhoodiap_migrateToPasswordSignIn();
         vpnhoodiap_ensureAdminAccess();
         vpnhoodiap_hideGatewayFromCheckout();
 
@@ -274,11 +287,32 @@ function vpnhoodiap_upgrade(array $vars): void
     vpnhoodiap_migrateToIdentityResolution();
     vpnhoodiap_migrateToAccountKeys();
     vpnhoodiap_migrateToInvoiceFreeze();
+    vpnhoodiap_migrateToServerChosenCode();
+    vpnhoodiap_migrateOffRemovedCodePark();
+    vpnhoodiap_migrateToPasswordSignIn();
     vpnhoodiap_migrateToLinkedIdentities();
     vpnhoodiap_migrateToDisplayName();
     vpnhoodiap_migrateOffEmailVerificationParking();
     vpnhoodiap_migrateToClientAreaVerificationGate();
     vpnhoodiap_migrateToDeletionJournal();
+    vpnhoodiap_migrateToSessionStore();
+}
+
+/**
+ * The session learns which store the device belongs to, so GET /account can prefer
+ * the subscription that device's own store bills (lifecycle §8). Sessions issued
+ * before this migration carry null, which reads as "no home store" and falls back
+ * to the account-wide choice — the behaviour they already had. Idempotent.
+ */
+function vpnhoodiap_migrateToSessionStore(): void
+{
+    $schema = Capsule::schema();
+    if ($schema->hasTable('mod_vpnhood_iap_sessions') &&
+        !$schema->hasColumn('mod_vpnhood_iap_sessions', 'store')) {
+        $schema->table('mod_vpnhood_iap_sessions', function ($table) {
+            $table->string('store', 16)->nullable();
+        });
+    }
 }
 
 /**
@@ -551,6 +585,85 @@ function vpnhoodiap_migrateToAccountKeys(): void
 }
 
 /**
+ * The server-chosen code (lifecycle §8: the account always has exactly one
+ * code, and the server chooses it — the app is handed one code or nothing):
+ *
+ *  - claims.client_id — the client area lets a pure web customer (no module
+ *    account) import and name codes, so a claim may be keyed by the WHMCS
+ *    client instead of a module user. user_id becomes nullable for those rows.
+ */
+function vpnhoodiap_migrateToServerChosenCode(): void
+{
+    $schema = Capsule::schema();
+    if ($schema->hasTable('mod_vpnhood_iap_claims') && !$schema->hasColumn('mod_vpnhood_iap_claims', 'client_id')) {
+        $schema->table('mod_vpnhood_iap_claims', function ($table) {
+            $table->integer('client_id')->unsigned()->nullable()->index()->after('user_id');
+            $table->unique(['client_id', 'service_id'], 'iap_claims_client_service');
+        });
+        Capsule::statement('ALTER TABLE mod_vpnhood_iap_claims MODIFY user_id INT UNSIGNED NULL');
+    }
+}
+
+/**
+ * Drop the removed-code park (lifecycle §8, reversed 2026-08-14).
+ *
+ * users.default_cleared_at recorded a deliberate remove-code act in the app, so
+ * promotion would not instantly re-elect another owned code — the escape from a
+ * purchase refusal. Both the refusal and the app-side remove act are gone: the
+ * app owns no remove for an account-applied code (it leaves with the account),
+ * and a purchase is never refused after the money moved. Nothing reads or writes
+ * the column any more, so it goes rather than lingering as a field that looks
+ * meaningful. Dropping is safe and idempotent: no code path depends on it, and a
+ * re-run finds it already absent.
+ */
+function vpnhoodiap_migrateOffRemovedCodePark(): void
+{
+    $schema = Capsule::schema();
+    if ($schema->hasTable('mod_vpnhood_iap_users') && $schema->hasColumn('mod_vpnhood_iap_users', 'default_cleared_at')) {
+        $schema->table('mod_vpnhood_iap_users', function ($table) {
+            $table->dropColumn('default_cleared_at');
+        });
+    }
+}
+
+/**
+ * The password grant (portal sign-in without a WHMCS page):
+ *
+ *  - login_challenges — the pending-second-factor tokens the password form
+ *    hands out. Not sessions: single-use, minutes-long, an attempt budget,
+ *    and they can do nothing but complete their own challenge.
+ *  - login_attempts — per-address failure rows for the cooldown (after 5
+ *    failures the address waits out PasswordCooldownMinutes, then works again
+ *    by itself). Only a sha256 of the normalized address is stored; the
+ *    address may not even exist here — nonexistent emails must cool down
+ *    exactly like real ones, or the cooldown itself would betray which
+ *    emails exist.
+ */
+function vpnhoodiap_migrateToPasswordSignIn(): void
+{
+    $schema = Capsule::schema();
+    if (!$schema->hasTable('mod_vpnhood_iap_login_challenges')) {
+        $schema->create('mod_vpnhood_iap_login_challenges', function ($table) {
+            $table->increments('id');
+            $table->char('token_hash', 64)->unique();
+            $table->integer('whmcs_user_id')->unsigned()->index();
+            $table->string('package_name', 191);
+            $table->smallInteger('attempts')->unsigned()->default(0);
+            $table->timestamp('expires_at')->nullable()->index();
+            $table->timestamp('used_at')->nullable();
+            $table->timestamp('created_at')->nullable();
+        });
+    }
+    if (!$schema->hasTable('mod_vpnhood_iap_login_attempts')) {
+        $schema->create('mod_vpnhood_iap_login_attempts', function ($table) {
+            $table->increments('id');
+            $table->char('email_hash', 64)->index();
+            $table->timestamp('created_at')->nullable()->index();
+        });
+    }
+}
+
+/**
  * Frozen invoices (lifecycle §5): WHMCS renders invoices from the LIVE client
  * row, so anonymizing the customer would strip the buyer's name off every past
  * invoice — the exact thing tax-record rules forbid. Deletion therefore
@@ -676,17 +789,119 @@ function vpnhoodiap_assertCsrf(): void
 }
 
 /**
- * Client area output — two pages: the email-confirmation gate (default) and the
+ * Client area output — three pages: the email-confirmation gate (default), the
  * account-deletion page (`action=delete-account`, the web deletion path Google
- * Play requires). Both pass the verify-gate hook, which allows every
- * `m=vpnhoodiap` page.
+ * Play requires), and the codes page (`action=codes` — the ONLY picker in the
+ * whole product, lifecycle §8/§9: a build that cannot take a typed code has no
+ * in-app way to change codes, so naming and importing live here, next to the
+ * invoices). All pass the verify-gate hook, which allows every `m=vpnhoodiap`
+ * page.
  */
 function vpnhoodiap_clientarea(array $vars): array
 {
     $action = (string) ($_REQUEST['action'] ?? '');
-    return $action === 'delete-account'
-        ? vpnhoodiap_clientareaDeleteAccount()
+    if ($action === 'delete-account') {
+        return vpnhoodiap_clientareaDeleteAccount();
+    }
+    return $action === 'codes'
+        ? vpnhoodiap_clientareaCodes()
         : vpnhoodiap_clientareaVerifyEmail();
+}
+
+/**
+ * "Your premium codes" — list, name, and import (lifecycle §8/§9).
+ *
+ *  - LISTING here is deliberate and allowed: the client area is the portal,
+ *    exactly where "someone who owns several codes is already looking". The
+ *    app never gets a list — this page is the only listing besides the
+ *    farewell mail.
+ *  - NAMING (set as my code) is the only picker there is. On a build with no
+ *    code box (§9) this page is the ONLY way to change codes at all.
+ *  - IMPORTING consumes nothing: it records a pointer, the code keeps working
+ *    for everyone already using it, and any number of accounts may import the
+ *    same code. The label may say "redeem" one day; the behaviour must never.
+ */
+function vpnhoodiap_clientareaCodes(): array
+{
+    require_once __DIR__ . '/lib/ApiException.php';
+    require_once __DIR__ . '/lib/IapRepository.php';
+    require_once __DIR__ . '/lib/Provisioning/DeliveryReader.php';
+    require_once __DIR__ . '/lib/Provisioning/AccountKeyService.php';
+
+    $clientId = (int) ($_SESSION['uid'] ?? 0);
+    $email = $clientId > 0
+        ? (string) Capsule::table('tblclients')->where('id', $clientId)->value('email')
+        : '';
+
+    if (empty($_SESSION['vpnhoodiap_ca_csrf'])) {
+        $_SESSION['vpnhoodiap_ca_csrf'] = bin2hex(random_bytes(16));
+    }
+    $error = '';
+    $notice = '';
+
+    $repo = new IapRepository();
+    $moduleUser = $email !== '' ? $repo->findUserByEmail($email) : null;
+    // a pure web customer has no module account; a stand-in row keys their
+    // claims by client_id instead (the same pattern as the deletion page)
+    $keyUser = $moduleUser ?? ['id' => 0, 'client_id' => $clientId];
+    if ($moduleUser !== null && $moduleUser['client_id'] === null) {
+        $keyUser['client_id'] = $clientId; // signed-in area proves the client link the module may not have yet
+    }
+    $keyService = new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountKeyService($repo);
+
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && $clientId > 0) {
+        try {
+            $token = (string) ($_POST['token'] ?? '');
+            if ($token === '' || !hash_equals((string) $_SESSION['vpnhoodiap_ca_csrf'], $token)) {
+                throw new \RuntimeException('Invalid or expired security token. Please reload the page and try again.');
+            }
+            $do = (string) ($_POST['do'] ?? '');
+            if ($do === 'set-default') {
+                $keyService->setDefaultService($keyUser, (int) ($_POST['serviceId'] ?? 0));
+                $notice = 'Done — that code now serves your account, and your signed-in devices pick it up '
+                    . 'the next time they check in.';
+            } elseif ($do === 'import') {
+                $import = $keyService->importCode($keyUser, (string) ($_POST['accessCode'] ?? ''));
+                $notice = $import['created']
+                    ? 'The code was added to your account and now serves it. Nothing changes for anyone '
+                        . 'else already using this code.'
+                    : 'You already had this code — it now serves your account.';
+            }
+        } catch (\WHMCS\Module\Addon\VpnHoodIap\ApiException $e) {
+            $error = $e->getErrorCode() === 'code_not_found'
+                ? 'No code matches what you entered. Check it and try again.'
+                : $e->getMessage();
+        } catch (\Throwable $e) {
+            $error = $e->getMessage();
+        }
+    }
+
+    $codes = [];
+    if ($clientId > 0) {
+        try {
+            // resolve first, so the badge shows the server's live choice (a dead
+            // choice is replaced by the next usable code right here, §8)
+            $keyService->resolveDefaultServiceId($keyUser);
+            $codes = $keyService->webKeysForUser($keyUser);
+        } catch (\Throwable $e) {
+            logModuleCall('vpnhoodiap', 'clientarea.codes', (string) $clientId, $e->getMessage(), '');
+            $error = $error !== '' ? $error : 'Your codes could not be listed right now. Please try again later.';
+        }
+    }
+
+    return [
+        'pagetitle'    => 'Your premium codes',
+        'breadcrumb'   => ['index.php?m=vpnhoodiap&action=codes' => 'Your premium codes'],
+        'templatefile' => 'account-codes',
+        'requirelogin' => true,
+        'vars'         => [
+            'email'  => $email,
+            'error'  => $error,
+            'notice' => $notice,
+            'csrf'   => $_SESSION['vpnhoodiap_ca_csrf'],
+            'codes'  => $codes,
+        ],
+    ];
 }
 
 /**
