@@ -13,19 +13,30 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
 }
 
 /**
- * The account's relationship to premium KEYS (docs: account-lifecycle.md §2, §7, §8):
+ * The account's relationship to premium CODES (docs: account-lifecycle.md §2, §7, §8):
  *
- *  - a key is a bearer credential; holding it is what matters, not owning the
- *    billing behind it. An account points at keys, it never owns them;
- *  - CLAIM BY CODE: pasting a code once proves possession and records a pointer
- *    (mod_vpnhood_iap_claims). Nothing moves — no billing control, no customer
- *    record, no invoices. This is the route back for every buyer whose sign-in
- *    address is not their buying address (relay addresses make that structural);
- *  - THE DEFAULT KEY is the one key that counts as "serving this person": it is
- *    what the app auto-applies, and what the store-purchase gate refuses on.
- *    First key bought becomes the default at purchase time (provisioning side);
- *    claims become the default only when the account has none. Changing or
- *    clearing it is always a deliberate act — last-one-wins applies to those only.
+ *  - a code is a bearer credential; holding it is what matters, not owning the
+ *    billing behind it. An account points at codes, it never owns them;
+ *  - THE ACCOUNT ALWAYS HAS EXACTLY ONE CODE, AND THE SERVER CHOOSES IT. The
+ *    app is handed one code or nothing (never a list), so the choice is
+ *    recomputed here on every read: a stored choice that is still usable is
+ *    kept; a dead one is replaced by the next usable code the account can see
+ *    (running first, soonest expiry, unstarted prepaid codes last — §8 "prefer
+ *    the code that harms nobody"). No cron, no scheduled job;
+ *  - IMPORT (claim) BY CODE: entering a code once proves possession and records
+ *    a pointer (mod_vpnhood_iap_claims). It consumes nothing and the same code
+ *    may be imported into any number of accounts. Importing is a deliberate act,
+ *    so last-one-wins: the imported code becomes the account's chosen one;
+ *  - THE APP OWNS NO REMOVE ACT. A code the account applied leaves the device
+ *    only with the account (sign-out, deletion); a code the person typed is
+ *    their own and removing it is purely local. Nothing is reported here, so
+ *    there is no park: an earlier design cleared and parked the choice to
+ *    re-open store buying, which existed only to escape a purchase refusal that
+ *    no longer exists (§8: prevent before the money, never refuse after).
+ *
+ * Identity: every method takes the $user array. A module user has id > 0; the
+ * client area may hand a stand-in row ['id' => 0, 'client_id' => N] for a pure
+ * web customer — claims are then keyed by client_id instead.
  *
  * Lookup strategies (decided after probing MANAGER — it cannot search by code):
  *    hub      services store accessCodeHash (sha256) at provisioning; the code
@@ -41,7 +52,7 @@ class AccountKeyService
     // ------------------------------------------------------------- lookup --
 
     /**
-     * Find the service behind a pasted code, whichever install shape delivered
+     * Find the service behind an entered code, whichever install shape delivered
      * it. Exact possession only — no prefixes, no fuzz. Null when nothing holds
      * this code (the caller answers 404, and rate limiting brakes guessing).
      */
@@ -71,95 +82,263 @@ class AccountKeyService
         return $row === null ? null : (int) $row->relid;
     }
 
-    // ------------------------------------------------------------- claims --
+    // --------------------------------------------------- deliberate acts --
 
     /**
-     * Record that this account holds this key. Idempotent; the first key an
-     * account ever points at becomes its default (a later claim never steals
-     * that — last-one-wins is for deliberate acts, and this one is implicit).
+     * Import a code: record the pointer and make it the account's chosen code.
+     * Importing is a deliberate act, so last-one-wins (§8 rule 7). NOTHING is
+     * consumed: the code keeps working for everyone already using it, and any
+     * number of accounts may import it.
      *
-     * @return array{isDefault: bool, created: bool}
+     * @return array{accessCode: string, expiresAt: ?string, created: bool}
      */
-    public function claim(int $userId, int $serviceId): array
+    public function importCode(array $user, string $accessCode): array
     {
-        $existing = Capsule::table('mod_vpnhood_iap_claims')
-            ->where('user_id', $userId)->where('service_id', $serviceId)->first();
-        if ($existing !== null) {
-            return ['isDefault' => (bool) $existing->is_default, 'created' => false];
+        $serviceId = $this->findServiceIdByCode($accessCode);
+        if ($serviceId === null) {
+            throw new ApiException('No code matches.', 404, 'code_not_found');
         }
-        $makeDefault = !$this->userHasDefault($userId);
-        try {
-            Capsule::table('mod_vpnhood_iap_claims')->insert([
-                'user_id'    => $userId,
-                'service_id' => $serviceId,
-                'is_default' => $makeDefault ? 1 : 0,
-                'created_at' => date('Y-m-d H:i:s'),
-            ]);
-        } catch (\Throwable) {
-            // lost a concurrent race on unique (user_id, service_id) — it exists now
-            $row = Capsule::table('mod_vpnhood_iap_claims')
-                ->where('user_id', $userId)->where('service_id', $serviceId)->first();
-            return ['isDefault' => (bool) ($row->is_default ?? false), 'created' => false];
-        }
-        return ['isDefault' => $makeDefault, 'created' => true];
+        $created = $this->pointAt($user, $serviceId);
+        $this->makeDefault($user, $serviceId);
+        $state = (new DeliveryReader())->readCodeState($serviceId);
+        return ['accessCode' => trim($accessCode), 'expiresAt' => $state['expiresAt'], 'created' => $created];
     }
 
     /**
-     * Deliberately choose (or clear, with null) the default among the keys the
-     * account already points at or owns. Choosing a client-owned key records a
-     * claim for it — the default is an account-level fact either way.
+     * Deliberately choose the account's code among the codes it can already see
+     * (the client-area picker — the only picker there is, lifecycle §8/§9).
      */
-    public function setDefault(array $user, ?string $accessCode): void
+    public function setDefaultService(array $user, int $serviceId): void
     {
-        $userId = (int) $user['id'];
-        if ($accessCode === null) {
-            Capsule::table('mod_vpnhood_iap_claims')->where('user_id', $userId)->update(['is_default' => 0]);
+        if (!$this->userCanPoint($user, $serviceId)) {
+            throw new ApiException('This account holds no such code.', 404, 'code_not_found');
+        }
+        $this->pointAt($user, $serviceId);
+        $this->makeDefault($user, $serviceId);
+    }
+
+    // ------------------------------------------- the server-chosen code --
+
+    /**
+     * THE code that serves this account, recomputed now (lifecycle §8 "which
+     * code the account gets"): the stored choice while it is usable; else the
+     * next usable code takes over on the spot — running first, soonest expiry,
+     * unstarted prepaid last, so promotion never burns a code someone was
+     * saving while a running one exists. Promotion is persisted, so every
+     * device of the account lands on the same code.
+     */
+    public function resolveDefaultServiceId(array $user): ?int
+    {
+        $stored = $this->storedDefaultServiceId($user);
+        // stock is never a personal code, even when it was chosen BEFORE the service
+        // became a bulk delivery — the mark does not shield it (lifecycle §8)
+        if ($stored !== null && IapRepository::serviceProperty($stored, 'bulkDelivery') === 'yes') {
+            $stored = null;
+        }
+        if ($stored !== null && $this->serviceIsUsable($stored)) {
+            return $stored;
+        }
+
+        $candidates = [];
+        foreach ($this->visibleServices($user) as $serviceId => $meta) {
+            if ($meta['bulk'] || $serviceId === $stored) {
+                continue; // stock is never a personal code; the dead choice cannot re-elect itself
+            }
+            if (!$this->serviceIsUsable($serviceId)) {
+                continue;
+            }
+            $candidates[$serviceId] = $this->promotionSortKey($serviceId);
+        }
+        if ($candidates === []) {
+            return null;
+        }
+        asort($candidates);
+        $promoted = (int) array_key_first($candidates);
+        $this->pointAt($user, $promoted);
+        $this->makeDefault($user, $promoted);
+        return $promoted;
+    }
+
+    /**
+     * The one code the app is handed — or null (lifecycle §8 "the app is told
+     * a code, not a list"). No list ever crosses to a device.
+     *
+     * @return array{accessCode: string, expiresAt: ?string}|null
+     */
+    public function accessCodeInfoForUser(array $user): ?array
+    {
+        $serviceId = $this->resolveDefaultServiceId($user);
+        if ($serviceId === null) {
+            return null;
+        }
+        $reader = new DeliveryReader();
+        $code = $reader->readAccessCode($serviceId);
+        if ($code === null) {
+            return null; // chosen but not deliverable (partner outage) — the app just gets nothing
+        }
+        return ['accessCode' => $code, 'expiresAt' => $reader->readCodeState($serviceId)['expiresAt']];
+    }
+
+    // ----------------------------------------------------- internal state --
+
+    /** The stored choice: an explicit claim first, else the client's marked service. No usability check. */
+    private function storedDefaultServiceId(array $user): ?int
+    {
+        $claim = $this->claimsFor($user)->where('is_default', 1)->first(['service_id']);
+        if ($claim !== null) {
+            return (int) $claim->service_id;
+        }
+        $clientId = $this->clientIdOf($user);
+        if ($clientId === null) {
+            return null;
+        }
+        foreach ($this->clientKeyServices($clientId) as $serviceId => $flags) {
+            if ($flags['isDefault'] && !$flags['bulk']) {
+                return $serviceId;
+            }
+        }
+        return null;
+    }
+
+    /** Record the pointer (idempotent). @return bool true when a new claim row was created. */
+    private function pointAt(array $user, int $serviceId): bool
+    {
+        $userId = (int) ($user['id'] ?? 0);
+        $clientId = $this->clientIdOf($user);
+        $existing = $this->claimsFor($user)->where('service_id', $serviceId)->first();
+        if ($existing !== null) {
+            return false;
+        }
+        try {
+            Capsule::table('mod_vpnhood_iap_claims')->insert([
+                'user_id'    => $userId > 0 ? $userId : null,
+                'client_id'  => $userId > 0 ? null : $clientId,
+                'service_id' => $serviceId,
+                'is_default' => 0,
+                'created_at' => date('Y-m-d H:i:s'),
+            ]);
+        } catch (\Throwable) {
+            return false; // lost a concurrent race on the unique index — it exists now
+        }
+        return true;
+    }
+
+    /** Make this service the single marked choice for this identity. */
+    private function makeDefault(array $user, int $serviceId): void
+    {
+        $this->clearDefaultMarks($user);
+        $this->claimsFor($user)->where('service_id', $serviceId)->update(['is_default' => 1]);
+    }
+
+    /** Clear every default mark this identity can carry: claim flags AND the client's service-property marks. */
+    private function clearDefaultMarks(array $user): void
+    {
+        $this->claimsFor($user)->update(['is_default' => 0]);
+        $clientId = $this->clientIdOf($user);
+        if ($clientId === null) {
             return;
         }
-        $serviceId = $this->findServiceIdByCode($accessCode);
-        if ($serviceId === null || !$this->userCanPoint($user, $serviceId)) {
-            throw new ApiException('This account holds no such key.', 404, 'code_not_found');
+        foreach ($this->clientKeyServices($clientId) as $serviceId => $flags) {
+            if ($flags['isDefault']) {
+                $service = \WHMCS\Service\Service::find($serviceId);
+                $service?->serviceProperties->save(['isDefaultKey' => '']);
+            }
         }
-        Capsule::table('mod_vpnhood_iap_claims')->where('user_id', $userId)->update(['is_default' => 0]);
-        $this->claim($userId, $serviceId);
-        Capsule::table('mod_vpnhood_iap_claims')
-            ->where('user_id', $userId)->where('service_id', $serviceId)->update(['is_default' => 1]);
+    }
+
+    /**
+     * Usable = it would open premium right now. Conservative where the code's
+     * clock cannot be read (partner installs): an unreadable code counts as
+     * usable — the deliberate escape always works, and an accident stays caught.
+     */
+    private function serviceIsUsable(int $serviceId): bool
+    {
+        $service = Capsule::table('tblhosting as h')
+            ->join('tblproducts as p', 'p.id', '=', 'h.packageid')
+            ->where('h.id', $serviceId)
+            ->first(['h.domainstatus', 'h.nextduedate', 'p.paytype']);
+        if ($service === null || !in_array((string) $service->domainstatus, ['Active', 'Suspended'], true)) {
+            return false;
+        }
+        if ((string) $service->paytype === 'recurring') {
+            $due = (string) $service->nextduedate;
+            return $due === '' || $due === '0000-00-00' || strtotime($due) >= strtotime(date('Y-m-d'));
+        }
+        // one-time: the clock lives on the code itself (starts on first use)
+        return (new DeliveryReader())->readCodeState($serviceId)['state'] !== 'expired';
+    }
+
+    /**
+     * Promotion order (§8 rule 3, the fallback without MANAGER device counts):
+     * running codes first, soonest expiry first — use a code before it is
+     * wasted — then codes whose clock cannot be read, and unstarted prepaid
+     * codes strictly last, because promoting one starts a clock nobody meant
+     * to start (§4) and that is the one irreversible mistake available here.
+     */
+    private function promotionSortKey(int $serviceId): string
+    {
+        $state = (new DeliveryReader())->readCodeState($serviceId);
+        if ($state['state'] === 'active' && $state['expiresAt'] !== null) {
+            return '1-' . $state['expiresAt'];
+        }
+        if ($state['state'] === 'not-started') {
+            return '3-' . $serviceId;
+        }
+        // unknown clock: prefer the service's own billing horizon where one exists
+        $due = (string) Capsule::table('tblhosting')->where('id', $serviceId)->value('nextduedate');
+        return ($due !== '' && $due !== '0000-00-00') ? ('2-' . $due) : ('2-9999-' . $serviceId);
+    }
+
+    /** Claims visible to this identity: its module-user rows plus its client-keyed rows. */
+    private function claimsFor(array $user): \Illuminate\Database\Query\Builder
+    {
+        $userId = (int) ($user['id'] ?? 0);
+        $clientId = $this->clientIdOf($user);
+        return Capsule::table('mod_vpnhood_iap_claims')->where(function ($query) use ($userId, $clientId) {
+            $query->whereRaw('1 = 0');
+            if ($userId > 0) {
+                $query->orWhere('user_id', $userId);
+            }
+            if ($clientId !== null) {
+                $query->orWhere('client_id', $clientId);
+            }
+        });
+    }
+
+    private function clientIdOf(array $user): ?int
+    {
+        return isset($user['client_id']) && $user['client_id'] !== null ? (int) $user['client_id'] : null;
     }
 
     /** May this account point at this service? Claimed already, or owned by its linked client. */
     private function userCanPoint(array $user, int $serviceId): bool
     {
-        $claimed = Capsule::table('mod_vpnhood_iap_claims')
-            ->where('user_id', (int) $user['id'])->where('service_id', $serviceId)->exists();
-        if ($claimed) {
+        if ($this->claimsFor($user)->where('service_id', $serviceId)->exists()) {
             return true;
         }
-        $clientId = $user['client_id'] !== null ? (int) $user['client_id'] : null;
+        $clientId = $this->clientIdOf($user);
         return $clientId !== null && (int) Capsule::table('tblhosting')
             ->where('id', $serviceId)->value('userid') === $clientId;
     }
 
-    private function userHasDefault(int $userId): bool
-    {
-        return Capsule::table('mod_vpnhood_iap_claims')
-            ->where('user_id', $userId)->where('is_default', 1)->exists();
-    }
-
-    // ----------------------------------------------------------- web keys --
+    // ----------------------------------------------------------- listing --
 
     /**
-     * Every website key this account can see: services its linked client owns
-     * plus services it claimed. Codes come from DeliveryReader — live on the
+     * Every website code this account can see: services its linked client owns
+     * plus services it imported. Codes come from DeliveryReader — live on the
      * hub, stored on a partner install.
      *
-     * BULK IS NOT A KEY AND NEVER APPEARS HERE. Reseller stock is a merchant
-     * concept of the portal: it was handed over once as a file, has no single
-     * code to show, and is "never offered in the app as your key" (lifecycle
-     * §8). Keeping it out of this list is what stops that concept from ever
-     * reaching a consumer app — see bulkOrderCount() for the one place the
-     * portal side still needs to know.
+     * THIS LIST NEVER REACHES A DEVICE (lifecycle §8: the app is told a code,
+     * not a list). Its two callers are portal-side: the client-area codes page,
+     * and the farewell mail at deletion (§5 step 3 — the mail delivers, the
+     * screen only warns).
      *
-     * @return array<int, array{accessCode: string, expiresAt: ?string, isDefault: bool}>
+     * BULK IS NOT A CODE AND NEVER APPEARS HERE. Reseller stock is a merchant
+     * concept of the portal: it was handed over once as a file, has no single
+     * code to show, and is "never offered in the app as your code" (lifecycle
+     * §8) — see bulkOrderCount() for the one place the portal still needs it.
+     *
+     * @return array<int, array{accessCode: string, expiresAt: ?string, isDefault: bool, serviceId: int}>
      */
     public function webKeysForUser(array $user): array
     {
@@ -167,7 +346,7 @@ class AccountKeyService
         $items = [];
         foreach ($this->visibleServices($user) as $serviceId => $meta) {
             if ($meta['bulk']) {
-                continue; // stock, not a key
+                continue; // stock, not a code
             }
             $code = $reader->readAccessCode($serviceId);
             if ($code === null) {
@@ -178,6 +357,7 @@ class AccountKeyService
                 'accessCode' => $code,
                 'expiresAt'  => $state['expiresAt'],
                 'isDefault'  => $meta['isDefault'],
+                'serviceId'  => $serviceId,
             ];
         }
         return $items;
@@ -187,7 +367,7 @@ class AccountKeyService
      * How many bulk (CSV) orders this account holds. The portal side only:
      * the farewell message and the web deletion page warn that the delivered
      * file cannot be served again once the client-area login is gone, while
-     * the keys inside it keep working to their own expiry.
+     * the codes inside it keep working to their own expiry.
      */
     public function bulkOrderCount(array $user): int
     {
@@ -207,15 +387,13 @@ class AccountKeyService
     private function visibleServices(array $user): array
     {
         $out = [];
-        $clientId = $user['client_id'] !== null ? (int) $user['client_id'] : null;
+        $clientId = $this->clientIdOf($user);
         if ($clientId !== null) {
             foreach ($this->clientKeyServices($clientId) as $serviceId => $flags) {
                 $out[$serviceId] = ['source' => 'website'] + $flags;
             }
         }
-        $claims = Capsule::table('mod_vpnhood_iap_claims')
-            ->where('user_id', (int) $user['id'])->get();
-        foreach ($claims as $claim) {
+        foreach ($this->claimsFor($user)->get() as $claim) {
             $serviceId = (int) $claim->service_id;
             if (!isset($out[$serviceId])) {
                 $active = Capsule::table('tblhosting')->where('id', $serviceId)
@@ -234,9 +412,9 @@ class AccountKeyService
     }
 
     /**
-     * The client's own key-bearing services (any VpnHood provisioning module —
+     * The client's own code-bearing services (any VpnHood provisioning module —
      * they all store accessTokenId or accessCode), stock excluded from ever
-     * being "a key of theirs" but still listed as a delivery.
+     * being "a code of theirs" but still listed as a delivery.
      *
      * @return array<int, array{isDefault: bool, bulk: bool}>
      */
@@ -263,59 +441,5 @@ class AccountKeyService
             ];
         }
         return $out;
-    }
-
-    // ------------------------------------------------- the purchase gate --
-
-    /**
-     * Is this account certainly already served by a key of its own? (lifecycle
-     * §8: refuse a store purchase on an active store subscription — the ledger,
-     * checked by the caller — or an active DEFAULT key from either channel.)
-     * Other owned keys and claims never refuse; warnings carry those.
-     *
-     * Conservative where the key's clock cannot be read: an unreadable one-time
-     * key counts as serving (the deliberate escape — clearing the default —
-     * always works, and an accident stays caught).
-     */
-    public function defaultKeyIsActive(array $user): bool
-    {
-        $serviceId = $this->defaultServiceId($user);
-        if ($serviceId === null) {
-            return false;
-        }
-        $service = Capsule::table('tblhosting as h')
-            ->join('tblproducts as p', 'p.id', '=', 'h.packageid')
-            ->where('h.id', $serviceId)
-            ->first(['h.domainstatus', 'h.nextduedate', 'p.paytype']);
-        if ($service === null || !in_array((string) $service->domainstatus, ['Active', 'Suspended'], true)) {
-            return false;
-        }
-        if ((string) $service->paytype === 'recurring') {
-            $due = (string) $service->nextduedate;
-            return $due === '' || $due === '0000-00-00' || strtotime($due) >= strtotime(date('Y-m-d'));
-        }
-        // one-time: the clock lives on the key itself (starts on first use)
-        $state = (new DeliveryReader())->readCodeState($serviceId);
-        return $state['state'] !== 'expired';
-    }
-
-    /** The account's default: an explicit claim first, else its client's marked service. */
-    private function defaultServiceId(array $user): ?int
-    {
-        $claim = Capsule::table('mod_vpnhood_iap_claims')
-            ->where('user_id', (int) $user['id'])->where('is_default', 1)->first(['service_id']);
-        if ($claim !== null) {
-            return (int) $claim->service_id;
-        }
-        $clientId = $user['client_id'] !== null ? (int) $user['client_id'] : null;
-        if ($clientId === null) {
-            return null;
-        }
-        foreach ($this->clientKeyServices($clientId) as $serviceId => $flags) {
-            if ($flags['isDefault'] && !$flags['bulk']) {
-                return $serviceId;
-            }
-        }
-        return null;
     }
 }

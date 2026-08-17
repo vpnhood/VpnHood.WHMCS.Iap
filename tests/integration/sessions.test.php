@@ -49,6 +49,25 @@ try {
         bad('resolve returned the wrong user: ' . json_encode($resolved));
     }
 
+    // -- the device's home store rides on the session -------------------------
+    // GET /account prefers the subscription THIS device's store bills, and the
+    // session is the only thing that knows which store that is.
+    // array_key_exists, not ??: the answer under test IS null, which ?? cannot tell from absent
+    if (array_key_exists('session_store', $resolved) && $resolved['session_store'] === null) {
+        ok('a session issued without a store resolves to none — the account-wide choice serves');
+    } else {
+        bad('expected a null session_store, got: ' . var_export($resolved['session_store'] ?? 'ABSENT', true));
+    }
+
+    $appleSession = $sessions->issue($userId, 'appstore');
+    $appleResolved = $sessions->resolve($appleSession['token']);
+    if (($appleResolved['session_store'] ?? null) === 'appstore') {
+        ok('the store the device signed in with survives on its session');
+    } else {
+        bad('session_store was not carried: ' . var_export($appleResolved['session_store'] ?? null, true));
+    }
+    $sessions->revoke($appleSession['token']);
+
     // -- hashed at rest -------------------------------------------------------
     $storedRaw = one($db, 'SELECT 1 x FROM mod_vpnhood_iap_sessions WHERE token_hash = ?', [$issued['token']]);
     $storedHash = one($db, 'SELECT 1 x FROM mod_vpnhood_iap_sessions WHERE token_hash = ?', [hash('sha256', $issued['token'])]);

@@ -41,7 +41,7 @@ FAIL=0
 
 # All integration tests, in dependency order (activation first: it activates
 # the addon the others rely on).
-INTEGRATION_TESTS=(activation identity secrets sessions suppress-emails webhook redeem claims delete-account)
+INTEGRATION_TESTS=(activation identity secrets sessions password-login suppress-emails webhook redeem claims delete-account)
 
 upload() {
   echo "== Uploading tests + module lib to the dev box"
@@ -103,21 +103,20 @@ run_endpoints() {
   local api="$SITE_URL/modules/addons/vpnhoodiap/api.php"
   local hook="$SITE_URL/modules/addons/vpnhoodiap/webhook.php"
 
-  probe GET "$api/system/status" - 200 '"status":"ok"' 'status answers over PATH_INFO'
-  probe GET "$api?path=/system/status" - 200 '"status":"ok"' 'the ?path= form routes identically'
+  probe GET "$api/v1/system/status" - 200 '"status":"ok"' 'status answers over PATH_INFO'
+  probe GET "$api?path=/v1/system/status" - 200 '"status":"ok"' 'the ?path= form routes identically'
   probe GET "$api/openapi.json" - 200 '"openapi"' 'the contract is served from the module'
-  probe GET "$api/nope" - 404 '"code":"not_found"' 'unknown resource is a clean 404'
-  probe GET "$api/account" - 401 '"code":"unauthorized"' 'a protected resource needs a session'
-  probe DELETE "$api/account" - 401 '"code":"unauthorized"' 'account deletion needs a session'
-  probe POST "$api/account" '{}' 405 '"code":"method_not_allowed"' 'wrong verb on a real resource is 405'
-  probe GET "$api/account/entitlements" - 401 '"code":"unauthorized"' 'entitlements need a session'
-  probe GET "$api/billing/plans?store=googleplay&packageName=no.such.app" - 403 '"code":"unknown_app"' \
-    'the plan catalog is public — an unknown app is 403, never 401'
-  probe GET "$api/billing/plans" - 400 '"code":"bad_request"' 'plans without store/packageName is a clean 400'
-  probe POST "$api/billing/purchases" '{}' 401 '"code":"unauthorized"' 'purchases need a session'
-  probe POST "$api/auth/sessions" '{}' 400 '"code":"bad_request"' 'sign-in without an id token is a clean 400'
-  probe POST "$api/auth/sessions" 'not json' 400 '"code":"bad_request"' 'non-JSON body is a clean 400'
-  probe POST "$api/auth/sessions" '{"provider":"nope","idToken":"x","packageName":"y"}' \
+  probe GET "$api/v1/nope" - 404 '"code":"not_found"' 'unknown resource is a clean 404'
+  probe GET "$api/v1/account" - 401 '"code":"unauthorized"' 'a protected resource needs a session'
+  probe DELETE "$api/v1/account" - 401 '"code":"unauthorized"' 'account deletion needs a session'
+  probe POST "$api/v1/account" '{}' 405 '"code":"method_not_allowed"' 'wrong verb on a real resource is 405'
+  probe GET "$api/v1/billing/products?store=googleplay&packageName=no.such.app" - 403 '"code":"unknown_app"' \
+    'the product catalog is public — an unknown app is 403, never 401'
+  probe GET "$api/v1/billing/products" - 400 '"code":"bad_request"' 'products without store/packageName is a clean 400'
+  probe POST "$api/v1/billing/purchases" '{}' 401 '"code":"unauthorized"' 'purchases need a session'
+  probe POST "$api/v1/auth/sessions" '{}' 400 '"code":"bad_request"' 'sign-in without an id token is a clean 400'
+  probe POST "$api/v1/auth/sessions" 'not json' 400 '"code":"bad_request"' 'non-JSON body is a clean 400'
+  probe POST "$api/v1/auth/sessions" '{"provider":"nope","idToken":"x","packageName":"y"}' \
     400 '"code":"unsupported_provider"' 'an unknown sign-in provider names itself'
 
   probe POST "$hook?store=bogus&t=x" '{}' 404 '"success":false' 'webhook: unknown store is 404'

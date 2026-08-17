@@ -48,6 +48,10 @@ function tableExists(PDO $db, string $table): bool {
     return one($db, 'SELECT 1 x FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?', [$table]) !== null;
 }
 
+function columnExists(PDO $db, string $table, string $column): bool {
+    return one($db, 'SELECT 1 x FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?', [$table, $column]) !== null;
+}
+
 function iapModuleActive(PDO $db): bool {
     return one($db, "SELECT 1 x FROM tbladdonmodules WHERE module='vpnhoodiap' LIMIT 1") !== null;
 }

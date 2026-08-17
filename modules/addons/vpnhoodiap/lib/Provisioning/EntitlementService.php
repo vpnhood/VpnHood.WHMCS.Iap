@@ -8,10 +8,6 @@ use WHMCS\Module\Addon\VpnHoodIap\IapRepository;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\PurchaseRecord;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\StoreAdapterInterface;
 
-// self-loaded (not in the entrypoints' require lists): the gate is the only
-// consumer here, and missing one entrypoint list would fail at runtime
-require_once __DIR__ . '/AccountKeyService.php';
-
 if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
     die('This file cannot be accessed directly');
 }
@@ -48,7 +44,7 @@ class EntitlementService
     {
         // ---- binding guard (client path): the purchase must carry the session
         // user's own external uid, or someone is replaying a stolen token. One
-        // carve-out: a uid whose owner went through "forget me" — restore after
+        // carve-out: a uid whose owner deleted their account — restore after
         // account deletion is the same person holding the same store account,
         // and must not dead-end on a 403 (see relinkErasedOwner for the rules).
         if ($sessionUser !== null && $record->obfuscatedUid !== $sessionUser['external_uid']
@@ -140,17 +136,21 @@ class EntitlementService
                 $this->alertAdmins("vpnhoodiap: purchase {$record->purchaseKey} has no attributable user; parked.");
                 throw new ApiException('This purchase cannot be attributed to an account.', 409, 'purchase_unattributed');
             }
-            // ---- one active store subscription per account
+            // ---- NOTHING IS REFUSED HERE (lifecycle §8: prevent before the money,
+            // never refuse after).
             //
-            // The app never lets a premium user reach checkout, so a second live
-            // purchase key means something anomalous. Refuse it BEFORE provisioning:
-            // the adapter's finalize never runs, the purchase stays unacknowledged,
-            // and the store auto-refunds it — the buyer is made whole without us
-            // holding money for a subscription they cannot use.
-            //
-            // Renewals never arrive here (same key → the idempotent replay above
-            // returns first), and an upgrade/resubscribe carries the key it
-            // replaces, so a replacement is allowed through rather than blocked.
+            // Two 409 gates used to live at this point — "the account already holds
+            // a live store subscription" and "the account is already served by its
+            // default key" — both leaving the purchase unacknowledged so the store
+            // would auto-refund it. That is a Google Play behaviour, not a universal
+            // one: Apple has no acknowledgement deadline, no automatic refund, and no
+            // cancel we can call, so there a refusal is simply the buyer's money kept
+            // for nothing. Prevention now carries the whole weight (checkout never
+            // opens for a served account, checked against the server BEFORE the store's
+            // payment sheet), and whatever still arrives paid is provisioned like any
+            // other purchase: both subscriptions are real, each serves its own store's
+            // devices, and the client area shows both rather than one being unwound by
+            // force. An anomalous second purchase is worth SAYING, not refusing.
             $liveKeys = Capsule::table('mod_vpnhood_iap_purchases')
                 ->where('user_id', (int) $user['id'])
                 ->where('status', 'provisioned')
@@ -162,33 +162,8 @@ class EntitlementService
             $supersedes = $record->linkedPurchaseKey !== null
                 && in_array($record->linkedPurchaseKey, $liveKeys, true);
             if ($liveKeys !== [] && !$supersedes) {
-                $this->updateRow($row, [
-                    'status'     => 'failed',
-                    'last_error' => 'account already holds an active store subscription',
-                ], $record);
-                $this->alertAdmins("vpnhoodiap: purchase {$record->purchaseKey} refused — user #{$user['id']}"
-                    . ' already holds an active store subscription; left unacknowledged for store refund.');
-                throw new ApiException('This account already has an active subscription.', 409,
-                    'subscription_already_active');
-            }
-
-            // ---- the OTHER certainty (lifecycle §8): the key this account applies
-            // for itself — its default key, either channel, one-time included. Gifts,
-            // spares and claimed codes never refuse; warnings carry those. Skipped
-            // for a purchase this install has provisioned before (a late renewal
-            // re-provision is not a new sale) and for a superseding upgrade.
-            $isFirstProvisioning = ($row['status'] ?? null) === null
-                || in_array((string) $row['status'], ['pending', 'failed'], true);
-            if ($isFirstProvisioning && !$supersedes
-                && (new AccountKeyService($this->repo))->defaultKeyIsActive($user)) {
-                $this->updateRow($row, [
-                    'status'     => 'failed',
-                    'last_error' => 'account already served by its active default key',
-                ], $record);
-                $this->alertAdmins("vpnhoodiap: purchase {$record->purchaseKey} refused — user #{$user['id']}"
-                    . ' is already served by an active default key; left unacknowledged for store refund.');
-                throw new ApiException('This account already has an active subscription.', 409,
-                    'subscription_already_active');
+                $this->alertAdmins("vpnhoodiap: purchase {$record->purchaseKey} accepted for user #{$user['id']}"
+                    . ' which already holds an active store subscription — the account now holds two.');
             }
 
             $clientId = $user['client_id'] !== null ? (int) $user['client_id'] : null;
@@ -304,7 +279,7 @@ class EntitlementService
 
     /** Insert the ledger row if it does not exist yet (unique (store, purchase_key)). */
     /**
-     * Restore after "forget me": may THIS session take over a purchase whose uid
+     * Restore after account deletion: may THIS session take over a purchase whose uid
      * does not match? Only when every one of these holds:
      *
      *   1. the record's uid resolves to NO live account — a live owner is the
@@ -318,7 +293,7 @@ class EntitlementService
      * Passing hands the ledger row to the session user and lets the normal flow
      * continue: the idempotent replay then returns the purchase's EXISTING
      * service and access code — never a new order, never a new code. That is
-     * what makes forget-me useless as a code mint: the store proof always leads
+     * what makes deletion useless as a code mint: the store proof always leads
      * back to the one service the purchase already paid for, and a person who
      * shared their old code before deleting gains nothing they could not have
      * gained by sharing it without deleting.

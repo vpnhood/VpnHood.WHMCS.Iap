@@ -21,8 +21,13 @@ class SessionService
     /** last_used_at is only rewritten when older than this, to keep resolve() cheap. */
     private const TOUCH_INTERVAL_SECONDS = 60;
 
-    /** @return array{token:string, expiresAt:string} expiresAt is ISO 8601 UTC */
-    public function issue(int $userId): array
+    /**
+     * @param string|null $store the device's home store, derived from the package name it signed
+     *                           in with. Null where the app is not known to any store — the
+     *                           account-wide choice then serves, as it did before this existed.
+     * @return array{token:string, expiresAt:string} expiresAt is ISO 8601 UTC
+     */
+    public function issue(int $userId, ?string $store = null): array
     {
         $token = bin2hex(random_bytes(32));
         $now = time();
@@ -32,6 +37,7 @@ class SessionService
             'token_hash' => hash('sha256', $token),
             'created_at' => date('Y-m-d H:i:s', $now),
             'expires_at' => date('Y-m-d H:i:s', $expiresAt),
+            'store'      => $store,
         ]);
         return ['token' => $token, 'expiresAt' => gmdate('c', $expiresAt)];
     }
@@ -53,7 +59,7 @@ class SessionService
             ->where('s.token_hash', hash('sha256', $token))
             ->whereNull('s.revoked_at')
             ->where('s.expires_at', '>', $now)
-            ->first(['u.*', 's.id as session_id', 's.last_used_at']);
+            ->first(['u.*', 's.id as session_id', 's.last_used_at', 's.store as session_store']);
         if ($row === null) {
             throw new ApiException('Unauthorized.', 401);
         }

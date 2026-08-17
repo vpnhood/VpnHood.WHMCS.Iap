@@ -56,21 +56,21 @@ if (!IapRepository::isModuleActive()) {
 
 $repo = new IapRepository();
 $remoteIp = $_SERVER['REMOTE_ADDR'] ?? '';
-$store = (string) ($_GET['store'] ?? '');
+$storeId = (string) ($_GET['store'] ?? '');
 $token = (string) ($_GET['t'] ?? '');
 
 try {
-    IapRepository::assertStore($store);
+    IapRepository::assertStore($storeId);
 } catch (\Throwable $e) {
-    $repo->log(null, 'webhook', $remoteIp, 404, $store, 'unknown store');
+    $repo->log(null, 'webhook', $remoteIp, 404, $storeId, 'unknown store');
     http_response_code(404);
     echo json_encode(['success' => false, 'error' => 'Not found.']);
     exit;
 }
 
-$app = $repo->findAppByWebhookToken($store, $token);
+$app = $repo->findAppByWebhookToken($storeId, $token);
 if ($app === null) {
-    $repo->log(null, 'webhook', $remoteIp, 401, $store, 'invalid webhook token');
+    $repo->log(null, 'webhook', $remoteIp, 401, $storeId, 'invalid webhook token');
     http_response_code(401);
     echo json_encode(['success' => false, 'error' => 'Unauthorized.']);
     exit;
@@ -88,7 +88,7 @@ foreach ($_SERVER as $key => $value) {
 $controller = new NotificationController($repo);
 $result = $controller->handle(
     $app,
-    StoreAdapterRegistry::get($store),
+    StoreAdapterRegistry::get($storeId),
     $headers,
     file_get_contents('php://input') ?: '',
     $_GET

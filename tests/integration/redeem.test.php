@@ -122,12 +122,12 @@ if (!$buyer) {
     finish();
 }
 
-// The buyer must start with NO active default key: the hub repo's lifecycle
-// suite shares this client and deliberately leaves its last purchase Active
-// (renew acts on what purchase-order leaves behind), and that service carries
-// the isDefaultKey mark — so the F2 gate would refuse this test's redeems.
-// Wipe the buyer's services first, exactly like default-key.test.php does;
-// the hub chain re-creates its own state (purchase-order runs first there).
+// The buyer starts from a clean slate: the hub repo's lifecycle suite shares
+// this client and deliberately leaves its last purchase Active (renew acts on
+// what purchase-order leaves behind), which would make this test's assertions
+// about what the account holds depend on another suite's leftovers. Wipe the
+// buyer's services first, exactly like default-key.test.php does; the hub chain
+// re-creates its own state (purchase-order runs first there).
 $staleServices = Capsule::table('tblhosting')->where('userid', (int) $buyer['id'])
     ->whereIn('domainstatus', ['Active', 'Suspended'])->pluck('id')->all();
 foreach ($staleServices as $staleServiceId) {
@@ -244,21 +244,29 @@ try {
         $createdOrderIds[] = $gateOrderId;
     }
 
-    // ---- 3b. one active store subscription per account: a SECOND live key is refused
-    // before provisioning, so it is never acknowledged and the store refunds it.
+    // ---- 3b. a SECOND live key is ACCEPTED, not refused (lifecycle §8). Prevention
+    // happens in the app before the store's payment sheet; refusing after the money
+    // moved only ever worked on the one store that auto-refunds an unacknowledged
+    // purchase, so here the account simply ends up holding two — visibly.
     $secondRecord = makeRecord(['obfuscatedUid' => $unverifiedUser['external_uid'], 'purchaseKey' => "itest-second-$marker"]);
     try {
-        $service->redeem($app, $secondRecord, $repo->getUser($linkedUserId), new FakeStoreAdapter($secondRecord));
-        bad('a second concurrent subscription was provisioned');
+        $secondResult = $service->redeem($app, $secondRecord, $repo->getUser($linkedUserId), new FakeStoreAdapter($secondRecord));
+        ($secondResult['state'] === 'provisioned'
+            && is_string($secondResult['accessCode']) && $secondResult['accessCode'] !== '')
+            ? ok('a second concurrent subscription is provisioned, never refused after payment')
+            : bad('second subscription accepted but delivered nothing: ' . json_encode($secondResult));
     } catch (ApiException $e) {
-        $e->getHttpStatus() === 409
-            ? ok('second concurrent subscription refused with 409')
-            : bad('second subscription rejected with wrong status ' . $e->getHttpStatus());
+        bad('a paid second subscription was REFUSED: ' . $e->getHttpStatus() . ' / ' . $e->getErrorCode());
     }
-    $refused = one($db, "SELECT status FROM mod_vpnhood_iap_purchases WHERE purchase_key=?", ["itest-second-$marker"]);
-    ($refused && $refused['status'] === 'failed')
-        ? ok('refused purchase recorded as failed, left unacknowledged')
-        : bad('refused purchase not recorded correctly: ' . json_encode($refused));
+    $second = one($db, "SELECT status FROM mod_vpnhood_iap_purchases WHERE purchase_key=?", ["itest-second-$marker"]);
+    ($second && $second['status'] === 'provisioned')
+        ? ok('…and the ledger shows both, so a double subscription is surfaced rather than hidden')
+        : bad('second purchase not recorded as provisioned: ' . json_encode($second));
+    $secondOrderId = (int) Capsule::table('mod_vpnhood_iap_purchases')
+        ->where('purchase_key', "itest-second-$marker")->value('whmcs_order_id');
+    if ($secondOrderId > 0) {
+        $createdOrderIds[] = $secondOrderId;
+    }
 
     // an upgrade/resubscribe REPLACES the live key rather than adding to it — allowed
     $upgrade = makeRecord([
@@ -418,11 +426,11 @@ try {
         ? ok('client credit balance untouched by the rewrites')
         : bad("client credit changed: $creditBefore -> $creditAfter");
 
-    // ---- 9. forget me, then Restore Purchases -------------------------------
+    // ---- 9. delete the account, then Restore Purchases ----------------------
     // The record's uid names an ERASED account, so the binding guard would 403 —
     // unless the erased-owner carve-out re-links the ledger row to the new
     // account and the idempotent replay re-delivers the SAME service and code.
-    // Never a new order: forget-me must be useless as a code mint.
+    // Never a new order: deletion must be useless as a code mint.
     $erasedUid = IapRepository::uuidV4();
     $erasedUserId = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
         'provider' => 'google', 'provider_subject' => "$marker-erased",
@@ -439,7 +447,7 @@ try {
         ->deleteUser($repo->getUser($erasedUserId));
     Capsule::table('mod_vpnhood_iap_users')->where('id', $erasedUserId)->exists()
         ? bad('erased fixture user still exists')
-        : ok('owner erased through the real forget-me path (journalled)');
+        : ok('owner erased through the real deletion path (journalled)');
 
     $restoredUserId = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
         'provider' => 'google', 'provider_subject' => "$marker-restored",

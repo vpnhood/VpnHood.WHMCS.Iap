@@ -419,6 +419,107 @@ class IapRepository
         }
 
         // -- 4. new person
+        return $this->createUserWithIdentity($provider, $subject, $email, $emailVerifiedClaim, $displayName, null, $now);
+    }
+
+    /**
+     * Join-only resolution for the password grant (lifecycle: that grant never
+     * creates an account — this method only ever finds one that exists):
+     *
+     *   1. the account already carrying this 'whmcs' identity;
+     *   2. the ONE account bound to a client this login owns — ownership of the
+     *      client is a stronger proof than any email match;
+     *   3. the ONE account whose sign-in methods currently report this email —
+     *      only when WHMCS itself verified the address (`$emailVerified`); an
+     *      unverified address must never join, or squatting a victim's email in
+     *      a WHMCS signup would open their app account.
+     *
+     * Ambiguity on the email (rule 3 of findOrCreateUser) joins none and falls
+     * through to null; ambiguity on the CLIENT link throws, because the caller
+     * must refuse rather than guess or create a further account on that client.
+     *
+     * @param array<int,int> $ownedClientIds
+     * @return ?array the account, or null when nothing matches
+     * @throws \RuntimeException when several accounts sit on this login's own clients
+     */
+    public function findUserForWhmcsSignIn(string $subject, array $ownedClientIds, string $email, bool $emailVerified, ?string $displayName): ?array
+    {
+        $now = date('Y-m-d H:i:s');
+        $email = self::normalizeEmail($email);
+        $displayName = trim((string) $displayName) === '' ? null : trim((string) $displayName);
+        $provider = 'whmcs';
+
+        // -- 1. known identity
+        $identity = Capsule::table('mod_vpnhood_iap_identities')
+            ->where('provider', $provider)
+            ->where('provider_subject', $subject)
+            ->first();
+        if ($identity !== null) {
+            $user = $this->getUser((int) $identity->user_id);
+            if ($user === null) {
+                throw new \RuntimeException("Identity #{$identity->id} points at a missing user row.");
+            }
+            if ((string) $identity->email !== $email) {
+                Capsule::table('mod_vpnhood_iap_identities')
+                    ->where('id', $identity->id)
+                    ->update(['email' => $email, 'updated_at' => $now]);
+            }
+            return $this->recordSignIn($user, $provider, $subject, $email, $emailVerified, $displayName, $now);
+        }
+
+        // -- 2. the account bound to a client this login owns
+        if ($ownedClientIds !== []) {
+            $rows = Capsule::table('mod_vpnhood_iap_users')
+                ->whereIn('client_id', $ownedClientIds)
+                ->get();
+            if (count($rows) === 1) {
+                $user = (array) $rows->first();
+                $this->linkIdentity((int) $user['id'], $provider, $subject, $email, $now);
+                $this->notifyNewSignInMethod($user, $provider);
+                return $this->recordSignIn($user, $provider, $subject, $email, $emailVerified, $displayName, $now);
+            }
+            if (count($rows) > 1) {
+                $ids = implode(', #', $rows->pluck('id')->all());
+                $this->alertAdmins("vpnhoodiap: WHMCS user {$subject} ({$email}) signed in with a password, but "
+                    . count($rows) . " app accounts (#{$ids}) sit on clients that login owns; refused — merge by hand.");
+                throw new \RuntimeException('Several app accounts on this login\'s own clients.');
+            }
+        }
+
+        // -- 3. verified-email join, same rules as findOrCreateUser but never creating
+        if ($emailVerified) {
+            $candidates = $this->findUsersByIdentityEmail($email);
+            if (count($candidates) === 1) {
+                $user = $candidates[0];
+                $this->linkIdentity((int) $user['id'], $provider, $subject, $email, $now);
+                $this->notifyNewSignInMethod($user, $provider);
+                return $this->recordSignIn($user, $provider, $subject, $email, $emailVerified, $displayName, $now);
+            }
+            if (count($candidates) > 1) {
+                $ids = implode(', #', array_map(fn ($candidate) => $candidate['id'], $candidates));
+                $this->alertAdmins("vpnhoodiap: password sign-in address {$email} is currently reported by the "
+                    . 'sign-in methods of ' . count($candidates) . " accounts (#{$ids}); joined none. Merge by hand.");
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The app-side row for an EXISTING WHMCS client, for the password grant's
+     * pure-web-customer case: bound to the client from birth, so this is not a
+     * new account — the client is the account, this row is its handle here.
+     */
+    public function createUserForWhmcsClient(string $subject, string $email, bool $emailVerified, ?string $displayName, int $clientId): array
+    {
+        $now = date('Y-m-d H:i:s');
+        $email = self::normalizeEmail($email);
+        $displayName = trim((string) $displayName) === '' ? null : trim((string) $displayName);
+        return $this->createUserWithIdentity('whmcs', $subject, $email, $emailVerified, $displayName, $clientId, $now);
+    }
+
+    /** Account row + first linked identity, with the concurrent-race handling both creators need. */
+    private function createUserWithIdentity(string $provider, string $subject, string $email, bool $emailVerifiedClaim, ?string $displayName, ?int $clientId, string $now): array
+    {
         try {
             $id = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
                 'provider'             => $provider,
@@ -426,6 +527,7 @@ class IapRepository
                 'email'                => $email,
                 'display_name'         => $displayName,
                 'email_verified_claim' => $emailVerifiedClaim ? 1 : 0,
+                'client_id'            => $clientId,
                 'external_uid'         => self::uuidV4(),
                 'created_at'           => $now,
                 'updated_at'           => $now,

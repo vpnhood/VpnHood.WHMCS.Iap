@@ -10,14 +10,14 @@ page is the narrative version: what the endpoints are for, and why they behave a
 
 ```text
 Base URL   https://<whmcs>/modules/addons/vpnhoodiap/api.php
-Resource   /<controller>/<resource>    (the path after api.php — PHP PATH_INFO)
+Resource   /v1/<controller>/<resource> (the path after api.php — PHP PATH_INFO)
 Auth       Authorization: Bearer <session token>
 Success    the resource itself, as JSON — no envelope
 Failure    RFC 9457 application/problem+json, with a stable `code`
 ```
 
-The vocabulary is deliberately backend-neutral — sessions, accounts, plans, purchases,
-entitlements, access codes. **No WHMCS concept ever appears on the wire**: no client,
+The vocabulary is deliberately backend-neutral — sessions, accounts, products, purchases,
+subscriptions, access codes. **No WHMCS concept ever appears on the wire**: no client,
 order, invoice or service id, and no WHMCS error text. A different backend can implement
 this same document and the apps will not know the difference.
 
@@ -26,17 +26,13 @@ this same document and the apps will not know the difference.
 | | Endpoint | Auth | Purpose |
 | --- | --- | :---: | --- |
 | `GET` | `/openapi.json` | — | This API's OpenAPI 3.1 document |
-| `GET` | `/system/status` | — | Is the portal installed, active and healthy |
-| `POST` | `/auth/sessions` | — | Sign in with a Google/Apple id token → session token |
-| `DELETE` | `/auth/sessions/current` | ✔ | Sign out (revokes the token server-side) |
-| `GET` | `/account` | ✔ | The signed-in account |
-| `DELETE` | `/account` | ✔ | Delete the account everywhere ("forget me"); `stopRenewals=true` also asks the stores that allow it to stop future charges |
-| `GET` | `/account/entitlements` | ✔ | What that account currently holds — store entitlements and website keys, default marked |
-| `POST` | `/account/claims` | ✔ | Claim a key by pasting its code (possession is the proof) |
-| `PATCH` | `/account/default-key` | ✔ | Deliberately choose (or clear with null) the key that serves this account (`POST` is accepted as an alias — some hosts block PATCH at the web server) |
-| `GET` | `/account/deletion-preview` | ✔ | Everything to show before deleting: every key one last time, subscription states, what billing gets cancelled |
-| `GET` | `/billing/plans?store=&packageName=` | — | Plans this app may sell in that store |
-| `POST` | `/billing/purchases` | ✔ | Redeem a store purchase → access code |
+| `GET` | `/v1/system/status` | — | Is the portal installed, active and healthy |
+| `POST` | `/v1/auth/sessions` | — | Sign in → session token. Three request forms: Google/Apple id token, the WHMCS client-area password, or a second-factor challenge completion |
+| `DELETE` | `/v1/auth/sessions/current` | ✔ | Sign out (revokes the token server-side) |
+| `GET` | `/v1/account` | ✔ | The complete account snapshot: identity, THE one access code serving it, and the store subscription behind it |
+| `DELETE` | `/v1/account` | ✔ | Delete the account everywhere. Never touches a store subscription |
+| `GET` | `/v1/billing/products?store=&packageName=` | — | The store product ids this app may sell in that store |
+| `POST` | `/v1/billing/purchases` | ✔ | Redeem a store purchase; `GET /v1/account` then carries what it delivered |
 
 A path that exists but is called with the wrong method answers **405** with an `Allow`
 header, never 404 — so an integrator can tell a wrong URL from a wrong verb.
@@ -44,22 +40,25 @@ header, never 404 — so an integrator can tell a wrong URL from a wrong verb.
 Every resource hangs off a controller. `/openapi.json` is the deliberate exception:
 tooling expects an API's document at its root, so that is where it lives.
 
-### No version in the path
+### The version in the path
 
-There is no `/v1`, on purpose. A version segment only pays for itself when a *whole*
-API is redesigned and served in parallel; here the unit of change is the endpoint. A
-breaking change ships as a **new endpoint beside the old one**, so an app already
-published to a store — which can never be force-updated — keeps working, and the other
-seven endpoints are not dragged into the migration.
+Every resource sits under a major-version segment, `/v1`. An app already published to a
+store can never be force-updated, so the day this API has to change shape incompatibly,
+`/v2` is served **beside** `/v1` and every install in the wild keeps working untouched —
+without that segment the only escape would be a new endpoint per breaking change, and the
+API would accumulate them one resource at a time.
 
-That puts one obligation on this API: changes must stay additive. New fields may appear
-in any response at any time, and clients must ignore the ones they don't know (the
-official client does). The contract version is reported by `GET /system/status` and in
-`openapi.json`, not in the URL.
+Within a version, changes stay additive: new fields may appear in any response at any
+time, and clients must ignore the ones they don't know (the official client does). Only a
+change that would break a correct client earns a new segment.
+
+`/openapi.json` stays unversioned at the root, where tooling expects an API's document.
+The document's own `info.version` is a different axis — it dates the contract, and moves
+for additive changes too.
 
 ## Authentication
 
-`POST /auth/sessions` exchanges an identity provider's id token for a **portal session
+`POST /v1/auth/sessions` exchanges an identity provider's id token for a **portal session
 token**: 64 hex characters, valid 30 days, stored only as a SHA-256 hash, revocable at
 any time. It is deliberately *not* a JWT — there are no signing keys to manage and a
 sign-out is real, not just a client-side forget.
@@ -70,7 +69,7 @@ Send it on every other call:
 Authorization: Bearer 0f1e2d3c4b5a…
 ```
 
-`GET /billing/plans` is the one resource outside `/auth` and `/system` that takes no
+`GET /v1/billing/products` is the one resource outside `/auth` and `/system` that takes no
 session. An app has to render its plans page before anyone signs in, and gating it would
 force every app to ship a hardcoded product list — the exact drift this catalog exists to
 prevent. It answers only **what** an app sells, never who buys it, and those product ids
@@ -85,28 +84,75 @@ token minted for someone else's app is refused. The provider must also state tha
 email is verified: accounts are matched by email, so an unproven mailbox is refused
 outright.
 
+### The password form
+
+The same `POST /v1/auth/sessions` also takes `{email, password, packageName}` — the WHMCS
+client-area credentials — and returns the same session token. One session concept, not
+two. Three rules govern this form:
+
+- **It never creates an account.** The provider form deliberately creates one for a new
+  email; the password form only ever signs into something that already exists — an app
+  account (matched by its `whmcs` identity, by a client the login owns, or by a
+  WHMCS-verified email), or the WHMCS client itself for a pure web customer, whose
+  app-side record is then created already bound to that client. A login that owns no
+  client and matches nothing is refused (`no_account`).
+
+- **It cannot be used to scan emails.** An unknown email, a wrong password and an
+  account that never set one (store-created accounts never do) are ONE answer:
+  `invalid_credentials`, identical in status, body and timing — unknown emails burn the
+  same bcrypt time as real ones. After repeated failures the address cools down
+  (`too_many_attempts`): it waits out the configured minutes (10 by default, addon
+  setting *Password Cooldown*) and then works again by itself — no lock to lift, and
+  nonexistent addresses cool down exactly like real ones. Setting or recovering the
+  password on the account website is the way in.
+
+- **The second factor is honored, in the API.** When the account uses WHMCS two-factor
+  auth, the password form answers **200** `{challenge: {token, type, expiresAt}}`
+  instead of a session. Complete it with the third form,
+  `{challengeToken, code, packageName}`: the authenticator code or the account's backup
+  code, on the same step. The challenge token is not a session — single-use, minutes
+  long, a small attempt budget, and it can do nothing but complete its own challenge
+  (`invalid_code` while attempts remain, `invalid_challenge` once it is spent). A spent
+  backup code is rotated: the 201 carries `newBackupCode` once, and nothing ever shows
+  it again. Verification runs through WHMCS's own two-factor machinery, so the TOTP
+  replay guard and time-window tolerance are theirs, not a re-implementation.
+
 ## The purchase flow
 
 ```text
 1. POST /auth/sessions       → { accessToken, userId, … }
 2. buy in the store, passing userId as
    obfuscatedAccountId (Google) / appAccountToken (Apple)
-3. POST /billing/purchases   → { state: "provisioned", accessCode, expiresAt, planId, store, … }
-4. redeem accessCode in the client — premium is on
+3. POST /billing/purchases   → "provisioned"
+4. GET /account              → { …, accessCodeInfo: { accessCode, … }, subscription: { … } }
+5. redeem accessCodeInfo.accessCode in the client — premium is on
 ```
 
-One synchronous call, no polling. Everything after that — renewals, cancellations,
-refunds — arrives as a store webhook, so `GET /account/entitlements` is always the
-current truth; the app does not have to track subscription state itself.
+One synchronous call, no polling — and the purchase response carries the state
+ALONE. The delivered code and the subscription live on `GET /v1/account`, the one
+snapshot the app renders from; repeating them here would be a second source of
+truth for the same facts. Everything after that — renewals, cancellations,
+refunds — arrives as a store webhook, so the snapshot is always the current
+truth; the app does not have to track subscription state itself.
 
-An entitlement also describes the subscription it came from — `purchasedAt`,
-`autoRenewing`, `priceAmount` + `priceCurrency`, and `billingPeriod` as an ISO-8601
-duration (`P1M`, `P1Y`, …). Both endpoints return them, so an app can render a
-subscription summary from the entitlement alone and never has to ask the store a
-second time for what it already paid. The price is the **store's** figure for the
-current period, not a portal catalogue price: the two differ whenever the store
-rounds to its own local price points, and what the buyer was actually charged is
-the one worth showing.
+**Which subscription, when the account holds more than one.** One person can be
+subscribed in two stores at once, and only the store that sold a subscription can
+manage, renew or cancel it. So the snapshot answers with **this device's own
+store first**: the session remembers the store the device signed in with (from its
+package name), and a serving subscription from that store outranks any other. The
+newest across all stores is the fallback — for a device whose store sold nothing,
+and for sessions issued before the session carried a store. Without this an
+Android device could be handed an Apple subscription's code: its own Google
+subscription would vanish from the snapshot, a Google purchase would be refused as
+"already premium", and the app would offer no way to manage either.
+
+The snapshot's `subscription` describes what the buyer is on — `createdTime`,
+`isAutoRenew`, `priceAmount` + `priceCurrency`, and `billingPeriod` as an
+ISO-8601 duration (`P1M`, `P1Y`, …) — so an app renders the subscription summary
+without ever asking the store a second time for what it already paid. The price
+is the **store's** figure for the current period, not a portal catalogue price:
+the two differ whenever the store rounds to its own local price points, and what
+the buyer was actually charged is the one worth showing.
 
 Three properties worth knowing before integrating:
 
@@ -118,18 +164,23 @@ Three properties worth knowing before integrating:
   call fails with `purchase_account_mismatch`. A stolen purchase token cannot be
   redeemed into another account.
 - **Redeeming twice is safe.** The store purchase key is the idempotency anchor: a
-  retry returns the same entitlement and never creates a second order. Retry freely
-  after a network failure.
+  retry answers `provisioned` for the same order and never creates a second one.
+  Retry freely after a network failure.
 
-### 201 versus 202
+### The purchase state
 
-`POST /billing/purchases` answers **201** when the entitlement is delivered
-(`accessCode` present) and **202** when it is not deliverable *yet*:
+`POST /v1/billing/purchases` always answers **201** — the purchase is recorded either way — and
+the body *is* the state:
 
-| `state` | Meaning | What the client should do |
+| Body | Meaning | What the client should do |
 | --- | --- | --- |
-| `provisioned` | Delivered | Use `accessCode` |
-| `pending` | The store has not settled the payment (deferred/slow payment methods) | Retry shortly |
+| `"provisioned"` | Delivered | Refresh `GET /v1/account`; it carries the code |
+| `"pending"` | The store has not settled the payment (deferred/slow payment methods) | Retry shortly |
+
+The state is deliberately not encoded in the status line as well. `pending` is a fact about
+the *store* settling a payment, not about what this request did to a resource, and a second
+copy in the status is one more thing to keep true — clients would still have to read the
+body, since most HTTP stacks treat every 2xx alike.
 
 A purchase is never held up for a portal-side email confirmation. The identity provider
 has already proved the mailbox — sign-in is refused otherwise — so asking the customer
@@ -140,13 +191,19 @@ someone who pre-registered another person's address from reading their account. 
 a portal-side concern only: this API neither reports it nor gates on it, and the
 subscription works in the app throughout.
 
-**One live subscription per account.** A second purchase arriving while another is still
-active is refused with `409` instead of provisioned, and deliberately **not acknowledged
-to the store** — Google auto-refunds an unacknowledged subscription after a few days, so
-the customer is made whole rather than paying twice for one entitlement. An upgrade or
-resubscribe is not a second subscription: it carries the purchase it replaces and is
-provisioned normally. The same unacknowledged fail-safe covers every provisioning
-failure.
+**A paid purchase is never refused for being a second one.** Prevention happens in the
+app, before the store's payment sheet opens: checkout is not offered to an account the
+server says is already served. Whatever still arrives paid is provisioned — the account
+then holds both, each serving its own store's devices — and an administrator is alerted
+so it can be surfaced to the customer instead of unwound by force. An upgrade or
+resubscribe is not a second subscription either: it carries the purchase it replaces.
+
+This reverses an earlier `409` that left the purchase **unacknowledged** so the store
+would auto-refund it. That is a Google Play behaviour, not a universal one: Apple has no
+acknowledgement deadline, no automatic refund and no cancel we can call, so there a
+refusal is simply the buyer's money kept for nothing. The unacknowledged fail-safe still
+covers genuine provisioning *failures* — those deliver nothing, so there is nothing to
+keep the money for.
 
 ## Errors
 
@@ -191,43 +248,58 @@ failure.
 Unrecognised codes should be treated as a generic failure of their status class — new
 ones may be added.
 
-**Rate limits** (sliding window, per IP): `POST /auth/sessions` 20 per 5 min,
-`POST /billing/purchases` 30 per 5 min, `GET /system/status` 30 per min,
-`DELETE /account` 5 per 5 min, `POST /account/claims` 10 per 5 min (possession of a
-code is the proof, so guessing must be expensive), `PATCH /account/default-key` and
-`GET /account/deletion-preview` 10 per 5 min.
+**Rate limits** (sliding window, per IP): `POST /v1/auth/sessions` 20 per 5 min,
+`POST /v1/billing/purchases` 30 per 5 min, `GET /v1/system/status` 30 per min,
+`DELETE /v1/account` 5 per 5 min.
 
-## Keys and claims
+## The server-chosen code
 
-An account never *owns* a key — it **points** at keys (the code is a bearer
+An account never *owns* a code — it **points** at codes (a code is a bearer
 credential with its own device limit, enforced by the access manager wherever it is
-used). Three endpoints manage that relationship:
+used). And the account always has **exactly one** code, chosen here, server-side
+(lifecycle §8): **the app is told a code, not a list.** No inventory ever crosses to
+a device; the list lives in the client area (`index.php?m=vpnhoodiap&action=codes`),
+next to the invoices — the only picker there is, and the only way to change codes on
+a build that cannot take a typed one.
 
-- `GET /account/entitlements` now returns, beside the store `items`, a `webKeys`
-  array: every website key the account can see — the ones its linked customer bought,
-  and the ones it claimed — as `{accessCode, expiresAt, isDefault}`.
-  **Reseller stock never appears here.** A bulk (CSV) order is merchant inventory:
-  it has no single code, it is never a personal key, and it is a portal concept the
+- `GET /v1/account` carries a single `accessCodeInfo` — `{accessCode, expirationTime}` or null,
+  whichever channel delivered it: an active store subscription's own code first,
+  else the website choice. That choice is **recomputed on every read**:
+  the stored choice while it is usable; when it dies, the next usable code takes
+  over on the spot (running codes first, soonest expiry first, unstarted prepaid
+  codes strictly last — promoting one of those would start a clock nobody meant to
+  start). No cron is involved.
+  **Reseller stock never qualifies.** A bulk (CSV) order is merchant inventory:
+  it has no single code, it is never a personal code, and it is a portal concept the
   app is deliberately not told about. The one place it still matters — the delivered
   file dies with the client-area login — is warned about on the web deletion page and
   in the final email, both server-side.
-- `POST /account/claims {accessCode}` records that this account holds this key.
-  Pasting the code once is the whole proof — this is the designed route back for a
-  buyer whose sign-in address is not their buying address, and for anyone returning
-  after deletion with a saved code. Nothing about billing moves: no invoices, no
-  customer record, no cancel rights. `404 code_not_found` when nothing holds the
-  code. The first key an account ever points at becomes its **default**.
-- `PATCH /account/default-key {accessCode | null}` deliberately chooses (or clears)
-  THE key that serves this account. The default is what the app applies for the
-  person at sign-in, and what the purchase gate refuses on: a store purchase is
-  refused with `subscription_already_active` while the account holds an active store
-  subscription **or** an active default key — other keys they own or claimed never
-  refuse. Clearing the default (or removing the applied code in the app, which does
-  the same) is the deliberate escape that re-opens buying.
+- **Importing a code is a PORTAL act, not an API one.** The client-area codes page
+  (`index.php?m=vpnhoodiap&action=codes`) is where a person adds a code to their
+  account and where they name which one serves it; it calls `AccountKeyService::
+  importCode` directly, so no endpoint is involved. Importing consumes NOTHING: the
+  code keeps its own expiry, keeps working for everyone already using it, and any
+  number of accounts may import the same code. Nothing about billing moves — no
+  invoices, no customer record, no cancel rights.
+
+  There was an app-facing `POST /account/claims`, fired when someone pasted a code
+  in the app. It is gone. It could only ever match a code sold through **this**
+  portal — a promo, admin-issued, partner or MANAGER-issued code has no service
+  here, so the call 404'd and recorded nothing while the code itself worked fine —
+  and the app swallowed the outcome either way, so nobody could tell which had
+  happened. The client area reports success or "no code matches" to a person who is
+  looking at it. Pasting a code in the app is now purely local.
+- **There is no remove-code endpoint, deliberately.** A code the account applied
+  leaves the device only with the account (sign-out, deletion); a code the person
+  typed is their own and removing it is purely local, so nothing is reported here.
+  An earlier `POST /account/code-removed` cleared and *parked* the account's choice
+  to re-open store buying — machinery that existed only to escape a purchase refusal
+  that no longer exists (see below). Both are gone, along with the
+  `users.default_cleared_at` column (dropped in 1.0.16).
 
 ## Account deletion
 
-`DELETE /account` is the "forget me" the app stores and GDPR require: sessions on
+`DELETE /v1/account` is the account deletion the app stores and GDPR require: sessions on
 every device, sign-in identities and the account row are erased in one call, and the
 customer record behind the retained invoices is anonymized and closed. Signing in
 again later creates a brand-new empty account — there is no account restore, and no
@@ -237,42 +309,44 @@ journal retain only numeric row ids).
 One thing IS restorable, deliberately: a still-active **store purchase**. Deletion
 never cancels the store subscription, so its owner keeps paying — and Restore
 Purchases from a new account presents the store's own proof, which re-attaches the
-purchase to that account and re-delivers the **same** entitlement and access code
-(see `POST /billing/purchases`). Never a new order or code, only when the previous
+purchase to that account and re-delivers the **same** subscription and access code
+(see `POST /v1/billing/purchases`). Never a new order or code, only when the previous
 owner is journalled as deleted, and only onto an account with no other live
-subscription — "forget me" cannot be used to mint anything.
+subscription — deletion cannot be used to mint anything.
 
-What deletion deliberately does **not** do: it never terminates a running key — an
+What deletion deliberately does **not** do: it never terminates a running code — an
 access code is an open gate with no personal data, and the paid period keeps working
-until its own clock ends it. It does not cancel a store subscription *by itself*:
-pass `stopRenewals=true` (body or query) and the stores that give developers a
-cancellation lever are asked to stop future charges (Google — the subscription stays
-valid to its paid expiry); where no lever exists (Apple) the preview's warning text
-carries the whole weight and the customer cancels in the store themselves. Paid
-invoices are retained under legal duty with the personal details replaced by
-placeholders; unpaid ones are cancelled so nothing can ever bill the deleted person.
+until its own clock ends it. And it **never touches a store subscription**, not even
+where the store would let us: signing in again brings the subscription back by
+itself, so cancelling it on the way out would destroy the very asset a return
+depends on — the person cancels in their own store, and the farewell mail says so.
+Paid invoices are retained under legal duty; unpaid ones are cancelled so nothing
+can ever bill the deleted person.
 
-**Nothing blocks deletion.** Active WEB services (sold on the portal's own site) no
-longer refuse it: every recurring one is set to cancel at the END of its paid period
-(no renewal invoice is ever generated; the key runs out the time already bought),
+**Nothing blocks deletion.** Active WEB services (sold on the portal's own site) do
+not refuse it: every recurring one is set to cancel at the END of its paid period
+(no renewal invoice is ever generated; the code runs out the time already bought),
 stored payment methods are dropped, and the deletion journal keeps the gateway
 agreement references so a stray charge can always be traced to an agreement an
-administrator can cancel. Before anything is erased, one final message goes to the
-address carrying every key one last time (`GET /account/deletion-preview` shows the
-same list in-app). The same deletion is available on the web at
+administrator can cancel.
+
+**The screen warns, the mail delivers.** There is no deletion-preview endpoint,
+deliberately (lifecycle §5/§10): the confirmation a device shows lists no codes and
+no counts — a list read once under pressure saves nobody, and fetching it would drag
+the whole inventory question into the app. Instead, before anything is erased, one
+final message goes to the address carrying every code the person paid for, one last
+time — an inbox is searchable a year later, which is when the code is wanted. The
+same deletion is available on the web at
 `index.php?m=vpnhoodiap&action=delete-account`, so it works without the app
 installed (Play policy) — and that page carries the reseller warning the app is not
 given: a bulk order's CSV is served by the client area, so it can never be downloaded
 again once the account is gone.
 
-**The preview names no store.** Each `subscriptions` entry carries `autoRenewing`,
-`expiresAt`, `state` (`active` | `between-payments` | `expired`), `canStopRenewals`
-and a ready-made `warning` — but not which store bills it. One app ships on every
-platform and naming a competing store is itself a store violation (App Review
-2.3.10), and `canStopRenewals` already carries the only fact the UI can act on.
-Where a *management link* is needed, the app compares the entitlement's store with
-its own build (`GET /account/entitlements`) and offers the link only on a match —
-comparing, never displaying, is the rule.
+**No store is ever displayed.** One app ships on every platform and naming a
+competing store is itself a store violation (App Review 2.3.10). Where a
+*management link* is needed, the app compares the snapshot's `subscription.storeId`
+with its own build and offers the link only on a match — comparing, never
+displaying, is the rule.
 
 **Fail closed.** While the addon is deactivated, *every* endpoint answers 404. A client
 that gets 404 from `/system/status` is talking to a WHMCS with no portal configured —
@@ -284,21 +358,21 @@ not a portal that is merely busy.
 PORTAL=https://whmcs.example.com/modules/addons/vpnhoodiap/api.php
 
 # is it alive?
-curl -s $PORTAL/system/status
+curl -s $PORTAL/v1/system/status
 
 # sign in (id token from the app's Google/Apple sign-in)
-TOKEN=$(curl -s -X POST $PORTAL/auth/sessions \
+TOKEN=$(curl -s -X POST $PORTAL/v1/auth/sessions \
   -H 'Content-Type: application/json' \
   -d '{"provider":"google","idToken":"'"$ID_TOKEN"'","packageName":"com.vpnhood.connect.android"}' \
   | jq -r .accessToken)
 
-# what does this account hold?
-curl -s $PORTAL/account/entitlements -H "Authorization: Bearer $TOKEN"
+# the whole account: identity, its access code, its subscription
+curl -s $PORTAL/v1/account -H "Authorization: Bearer $TOKEN"
 
 # redeem a purchase
-curl -s -X POST $PORTAL/billing/purchases \
+curl -s -X POST $PORTAL/v1/billing/purchases \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"store":"googleplay","packageName":"com.vpnhood.connect.android",
+  -d '{"storeId":"googleplay","packageName":"com.vpnhood.connect.android",
        "proof":{"purchaseToken":"'"$PURCHASE_TOKEN"'"}}'
 ```
 
@@ -310,9 +384,9 @@ To browse the API instead, open any Swagger UI against
 The reference implementation is **`VpnHood.AppLib.Portal`** in the [VpnHood] repo —
 `PortalApiClient` (the typed stub; problem+json surfaces as the toolkit's
 standard `ApiException`, machine code in `Data["Code"]`),
-`PortalAuthenticationProvider` (sessions), `PortalAccountProvider` (account and
-entitlements, and the owner of both the catalog and the order processor) and
-`PortalOrderProcessor` (purchases). The catalog side is why `/billing/plans` matters to
+`PortalAuthenticationProvider` (sessions), `PortalAccountProvider` (the account
+snapshot, and the owner of both the catalog and the order processor) and
+`PortalOrderProcessor` (purchases). The catalog side is why `/billing/products` matters to
 the client: neither StoreKit nor Play Billing can list an app's own products, so the app
 asks the portal which ids to price. Changing an endpoint's contract
 means changing that client, this page and `openapi.json` in the same change set.
@@ -320,14 +394,14 @@ means changing that client, this page and `openapi.json` in the same change set.
 ## Hosting notes
 
 The resource path is taken from `PATH_INFO`, so the API needs **no rewrite rule and no
-server configuration** — `api.php/account` works out of the box on Apache, LiteSpeed and
+server configuration** — `api.php/v1/account` works out of the box on Apache, LiteSpeed and
 cPanel-style hosting, which is what WHMCS installs run on.
 
 A few nginx + php-fpm setups drop `PATH_INFO`. Two fixes, either is fine:
 
 - add `fastcgi_split_path_info ^(.+\.php)(/.+)$;` (with `fastcgi_param PATH_INFO
   $fastcgi_path_info;`) to the PHP location block — the standard recipe; or
-- call the equivalent query form, `api.php?path=/account`, which routes identically.
+- call the equivalent query form, `api.php?path=/v1/account`, which routes identically.
 
 Every install serves its own contract at `/openapi.json`, so a partner's portal
 always documents exactly the version they are running.
