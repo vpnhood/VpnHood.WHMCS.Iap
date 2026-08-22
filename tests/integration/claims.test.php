@@ -219,7 +219,7 @@ try {
         ? ok('DeliveryReader read the live code (' . strlen($code) . ' chars)')
         : bad('no code readable for the service');
     hash('sha256', trim((string) $code)) === $storedHash
-        ? ok('stored hash matches the live code (import lookups will find it)')
+        ? ok('stored hash matches the live code (a refusal will match this service)')
         : bad('accessCodeHash does not match the live code');
     $state = $reader->readCodeState($serviceId);
     in_array($state['state'], ['active', 'not-started'], true)
@@ -227,12 +227,6 @@ try {
         : bad('unexpected code state: ' . json_encode($state));
 
     $keyService = new AccountKeyService($repo);
-    $keyService->findServiceIdByCode((string) $code) === $serviceId
-        ? ok('findServiceIdByCode resolves the entered code to the service')
-        : bad('code lookup failed');
-    $keyService->findServiceIdByCode('no-such-code-' . $marker) === null
-        ? ok('an unknown code resolves to nothing')
-        : bad('an unknown code matched something');
 
     // == the buyer's own account is served by its code ========================
     $userIds['owner'] = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([

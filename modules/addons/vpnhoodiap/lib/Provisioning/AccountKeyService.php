@@ -77,12 +77,10 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
  * client_id instead. The upload slot is module-user state, so a stand-in row has none, which is
  * correct: a pure web customer uploads nothing from an app.
  *
- * Lookup strategies (decided after probing MANAGER — it cannot search by code):
- *    hub      services store accessCodeHash (sha256) at provisioning; the code
- *             itself is never persisted, same stance as before;
- *    partner  services store the relayed accessCode verbatim (existing contract).
- * The lookup is now used for CLASSIFICATION ONLY — to notice that an uploaded code is one the
- * account already owns — never to reject one.
+ * There is no code-to-service lookup any more. It existed so a save could notice an owned code and
+ * treat it specially; every typed code now fills the slot (§5), so nothing resolves a code to a
+ * service — at save time or anywhere else. (Provisioning still stamps accessCodeHash on hub
+ * services; the ranking compares by reading each service's code, never by searching for one.)
  */
 class AccountKeyService
 {
@@ -99,39 +97,6 @@ class AccountKeyService
 
     public function __construct(private readonly IapRepository $repo)
     {
-    }
-
-    // ------------------------------------------------------------- lookup --
-
-    /**
-     * Find the service behind an entered code, whichever install shape delivered
-     * it. Exact possession only — no prefixes, no fuzz. Null when nothing holds
-     * this code (the caller answers 404, and rate limiting brakes guessing).
-     */
-    public function findServiceIdByCode(string $code): ?int
-    {
-        $code = trim($code);
-        if ($code === '') {
-            return null;
-        }
-        $byHash = $this->serviceIdByProperty('accessCodeHash', IapRepository::codeHash($code));
-        if ($byHash !== null) {
-            return $byHash;
-        }
-        return $this->serviceIdByProperty('accessCode', $code);
-    }
-
-    /** Newest service whose named service-property equals the value. */
-    private function serviceIdByProperty(string $property, string $value): ?int
-    {
-        $row = Capsule::table('tblcustomfieldsvalues as v')
-            ->join('tblcustomfields as f', 'f.id', '=', 'v.fieldid')
-            ->where('f.type', 'product')
-            ->whereRaw("LOWER(SUBSTRING_INDEX(f.fieldname, '|', 1)) = ?", [strtolower($property)])
-            ->where('v.value', $value)
-            ->orderByDesc('v.relid')
-            ->first(['v.relid']);
-        return $row === null ? null : (int) $row->relid;
     }
 
     // --------------------------------------------------- deliberate acts --
