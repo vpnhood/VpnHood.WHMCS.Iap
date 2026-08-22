@@ -511,11 +511,12 @@ try {
         : bad('nothing was raised when a paying subscriber was refused');
     $keyService->clearRejection($owner, (string) $code);
 
-    // ONCE EVERYTHING HAS BEEN REFUSED, THE CODES TAKE TURNS. Both of this account's services are
-    // one-time here, so neither is being paid for and neither is exempt. A refusal steps aside for
-    // the next working code; when there is no working code left the account still hands one out —
-    // least recently refused first — so whichever code comes back to life (topped up, extended by
-    // support) is tried again on its own turn, with nobody pressing anything.
+    // ONCE EVERYTHING HAS BEEN REFUSED, THE ACCOUNT HOLDS ITS GROUND. Both of this account's
+    // services are one-time here, so neither is being paid for and neither is exempt. A refusal
+    // steps aside for the next working code; when no working code is left the account keeps
+    // answering with the MOST recently refused one — what the devices already hold — and never
+    // cycles through the rest hoping one works. Whoever tops a code up knows which one they paid,
+    // and typing it is what selects it.
     $ownerCycle = (string) Capsule::table('tblhosting')->where('id', $serviceId)->value('billingcycle');
     Capsule::table('tblhosting')->whereIn('id', [$serviceId, $serviceIds[1]])
         ->update(['billingcycle' => 'One Time']);
@@ -527,17 +528,28 @@ try {
         : bad('a refused code was served while another was eligible: ' . json_encode([$first, $second]));
 
     $keyService->reportRejected($owner, (string) $second);
-    ($keyService->accessCodeInfoForUser($owner)['accessCode'] ?? null) === $first
-        ? ok('…with every code refused they take turns — the account never answers "you hold nothing"')
-        : bad('the refused codes did not take turns: ' . json_encode($keyService->accessCodeInfoForUser($owner)));
-
-    $keyService->reportRejected($owner, (string) $first);
     ($keyService->accessCodeInfoForUser($owner)['accessCode'] ?? null) === $second
-        ? ok('…and the turn passes on, so a code that comes back to life is tried again by itself')
-        : bad('the turn did not pass on: ' . json_encode($keyService->accessCodeInfoForUser($owner)));
+        ? ok('…with every code refused the account holds its ground — same code, same honest refusal')
+        : bad('the account did not hold the last refused code: ' . json_encode($keyService->accessCodeInfoForUser($owner)));
+
+    // typing the topped-up code is what selects it — no cycling ever tries the others by itself
+    $keyService->setAccessCode($owner, (string) $first);
+    ($keyService->accessCodeInfoForUser($owner)['accessCode'] ?? null) === $first
+        ? ok('…and typing the code they topped up is what selects it')
+        : bad('typing a refused code did not select it: ' . json_encode($keyService->accessCodeInfoForUser($owner)));
+    $keyService->setAccessCode($owner, null);
 
     $keyService->clearRejection($owner, (string) $first);
     $keyService->clearRejection($owner, (string) $second);
+
+    // …and that holds for a code the account ALREADY OWNS. Both codes work here and the ranking
+    // prefers $first (oldest); typing $second must still switch to it — the old special case
+    // flipped a panel flag instead of filling the slot, and the ranking carried on with $first.
+    $keyService->setAccessCode($owner, (string) $second);
+    ($keyService->accessCodeInfoForUser($owner)['accessCode'] ?? null) === $second
+        ? ok('typing a code the account already owns selects it — no owned-code special case')
+        : bad('typing an owned code did not select it: ' . json_encode($keyService->accessCodeInfoForUser($owner)));
+    $keyService->setAccessCode($owner, null);
 
     // TYPING A CODE MEANS "USE THIS ONE". While nobody is being billed, the code somebody typed
     // outranks the codes we sold them — anything else leaves them staring at an app that took

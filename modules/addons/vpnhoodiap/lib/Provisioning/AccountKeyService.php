@@ -49,13 +49,13 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
  *    what makes RENEWAL work with no machinery: a renewed service is paid-now again, so its code
  *    is offered again without anybody clearing anything;
  *  - A REJECTION DEMOTES A CODE; IT NEVER TAKES IT AWAY. A refused code ranks below every eligible
- *    one, and when every code an account holds has been refused they TAKE TURNS, least recently
- *    refused first (the refusal's row id is the order — no clock). The account never answers "you
- *    hold nothing" while it holds something: the person does hold them, their device keeps its code
- *    either way (§8), and a second device must not be told a different story than the first. It is
- *    also how a code that gains time returns with no machinery — topped up or extended, tried again
- *    on its next turn, accepted this time. Nothing we ENDED comes back this way: an ended
- *    subscription, a code switched off in the panel and a dead service are not candidates at all;
+ *    one, and when every code an account holds has been refused the account holds its ground: it
+ *    keeps answering with the most recently refused one — what the devices already hold — so every
+ *    press meets the same honest refusal. It never answers "you hold nothing" while it holds
+ *    something, and it never cycles through the rest hoping one works (decided 2026-08-21): whoever
+ *    tops a code up knows which one they paid, and typing it is what selects it. Nothing we ENDED
+ *    comes back this way: an ended subscription, a code switched off in the panel and a dead
+ *    service are not candidates at all;
  *  - A REJECTION IS KEYED BY THE CODE, PER ACCOUNT (§4). Identical access codes ARE the same
  *    credential, so a rejection applies to every inventory entry holding that string — the upload
  *    slot and any service delivering it. Per account, because a bearer code may be serving somebody
@@ -143,9 +143,11 @@ class AccountKeyService
      * the portal an authority on validity that it is not, and turned a blocked reseller code into
      * a save failure the person could do nothing about.
      *
-     * Uploading a code the account ALREADY OWNS does not consume the slot: the lookup runs for
-     * classification only, and an owned code is turned back on for the ranking instead — because
-     * typing a code is saying *use this* (§5).
+     * EVERY typed code fills the slot — one the account already owns exactly like a stranger's
+     * (§5). The old special case turned an owned code back on for the ranking instead, which
+     * quietly broke *typing means use this one*: an older owned code could still outrank the one
+     * just typed, and the person watched the app take their code and change nothing. Identical
+     * strings are one credential, so the slot's copy and the owned service simply agree.
      *
      * A null value idempotently empties the slot.
      *
@@ -160,13 +162,6 @@ class AccountKeyService
         $this->withIdentityLock($user, function () use ($user, $userId, $accessCode): void {
             if ($accessCode !== null) {
                 $this->clearRejection($user, $accessCode);
-            }
-
-            // an owned code goes back into the ranking rather than into the slot
-            $ownServiceId = $accessCode === null ? null : $this->findServiceIdByCode($accessCode);
-            if ($ownServiceId !== null && $this->serviceBelongsToUser($user, $ownServiceId)) {
-                $this->setAutoSelectable($user, $ownServiceId, true);
-                return;
             }
 
             if ($userId > 0) {
@@ -465,20 +460,21 @@ class AccountKeyService
         // them, the device that met the refusal keeps its code either way (keyring plan §8), and a
         // second device must not be told a different story than the first.
         //
-        // So they take turns, LEAST RECENTLY REFUSED FIRST. Whichever code comes back to life —
-        // topped up, extended by support, renewed somewhere we cannot see — is tried again on its
-        // own within one turn of the keyring, with nothing to press and nothing to remember. The
-        // order is the refusal's own row id, which only grows: no clock, and no two refusals a
-        // second apart that a timestamp could not tell apart.
+        // The account HOLDS ITS GROUND: it keeps answering with the code refused most recently —
+        // the same one the devices already have — so every press meets the same honest refusal.
+        // There is NO cycling through the others hoping one works (decided 2026-08-21): whoever
+        // tops a code up knows which one they paid, and typing it is what selects it (§4 Retry).
+        // Most-recent, not least-, because the last refusal was recorded only if that code was
+        // being SERVED at the time — so it is the person's own latest state, not a leftover.
         //
-        // Nothing we ENDED comes back this way. A subscription past its paid time, a code switched
-        // off in the panel and a dead service never became candidates at all, so there is nothing
-        // here to rotate; only a refusal, which is somebody else's verdict about a code the person
-        // still holds, is softened. A subscription still being paid for is never demoted to begin
-        // with, so it never reaches this at all.
+        // Nothing we ENDED can come back this way. A subscription past its paid time, a code
+        // switched off in the panel and a dead service never became candidates at all; only a
+        // refusal, which is somebody else's verdict about a code the person still holds, is
+        // softened. A subscription still being paid for is never demoted to begin with, so it
+        // never reaches this at all.
         usort($candidates, fn (array $a, array $b): int
-            => [$a['refusedOrder'], $byRank($a)] <=> [$b['refusedOrder'], $byRank($b)]);
-        return $candidates;
+            => [-$a['refusedOrder'], $byRank($a)[0]] <=> [-$b['refusedOrder'], $byRank($b)[0]]);
+        return array_slice($candidates, 0, 1);
     }
 
     /**
