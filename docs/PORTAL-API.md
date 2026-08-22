@@ -346,10 +346,10 @@ the only thing that leaves is the upload slot's previous occupant.
   and nothing to inspect in the reply. A promo, admin-issued, partner or MANAGER-issued
   code is saved like any other. Uploading consumes NOTHING — the code keeps working for
   everyone already using it, any number of accounts may hold it, and nothing about billing
-  moves. Uploading a code the account already owns does not consume the slot: it turns that
-  code back on for the ranking instead, because typing a code is saying *use this*. What
-  the account then serves is a separate question, answered by `GET /v1/account`, and it
-  need not be the code just uploaded.
+  moves. Every typed code fills the slot, one the account already owns included — identical
+  strings are one credential, so the slot's copy and the owned service simply agree. What
+  the account then serves is a separate question, answered by `GET /v1/account`: the slot
+  outranks everything nobody is being billed for, and nothing that is.
 - **Emptying the slot removes the uploaded code account-wide.** The same PUT is idempotent.
   Every signed-in device applies the change on its next successful account refresh.
   Emptying deletes only the account's copy — the bearer code itself keeps working and may
