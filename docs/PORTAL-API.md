@@ -31,6 +31,8 @@ this same document and the apps will not know the difference.
 | `DELETE` | `/v1/auth/sessions/current` | ✔ | Sign out (revokes the token server-side) |
 | `GET` | `/v1/account` | ✔ | The complete account snapshot: identity, THE one access code serving it, and the store subscription behind it |
 | `DELETE` | `/v1/account` | ✔ | Delete the account everywhere. Never touches a store subscription |
+| `PUT` | `/v1/account/access-code` | ✔ | Fill, replace or empty the account's ONE upload slot (`accessCode: null` empties it). Answers 204 — the code is taken on trust |
+| `POST` | `/v1/account/access-code/rejected` | ✔ | A device reports that the access server refused the code it was serving; applied only while that is still the account's current code |
 | `GET` | `/v1/billing/products?store=&packageName=` | — | The store product ids this app may sell in that store |
 | `POST` | `/v1/billing/purchases` | ✔ | Redeem a store purchase; `GET /v1/account` then carries what it delivered |
 
@@ -232,7 +234,7 @@ keep the money for.
 | `unknown_store` | 400 | Store is not one this API knows |
 | `purchase_invalid` | 400 | The store would not confirm the proof |
 | `not_found` | 404 | No such resource — **or the addon is not active on this install** |
-| `code_not_found` | 404 | No key answers to this code (claims / default-key) |
+| `code_not_found` | 404 | RETIRED for `PUT /v1/account/access-code`: a code is taken on trust and validity is the access server's verdict. Still answered by the client-area `isAutoSelectable` control for a service the account does not hold |
 | `method_not_allowed` | 405 | Wrong verb for an existing resource (see `Allow`) |
 | `purchase_unattributed` | 409 | No attribution the portal can resolve to an account; recorded for an admin |
 | `purchase_inactive` | 410 | Expired, cancelled or refunded at the store |
@@ -250,52 +252,131 @@ ones may be added.
 
 **Rate limits** (sliding window, per IP): `POST /v1/auth/sessions` 20 per 5 min,
 `POST /v1/billing/purchases` 30 per 5 min, `GET /v1/system/status` 30 per min,
-`DELETE /v1/account` 5 per 5 min.
+`DELETE /v1/account` 5 per 5 min, `PUT /v1/account/access-code` 10 per 5 min, and
+`POST /v1/account/access-code/rejected` 30 per 5 min — each per IP address and per account.
 
-## The server-chosen code
+## The ranking, and the one upload slot
 
-An account never *owns* a code — it **points** at codes (a code is a bearer
-credential with its own device limit, enforced by the access manager wherever it is
-used). And the account always has **exactly one** code, chosen here, server-side
-(lifecycle §8): **the app is told a code, not a list.** No inventory ever crosses to
-a device; the list lives in the client area (`index.php?m=vpnhoodiap&action=codes`),
-next to the invoices — the only picker there is, and the only way to change codes on
-a build that cannot take a typed one.
+An account never *owns* a code — it **holds** codes (a code is a bearer credential with
+its own device limit, enforced by the access manager wherever it is used). All of them are
+treated the same way, whichever of the three channels put them there: a store
+subscription, a portal-store purchase, or the one code the person typed and uploaded.
+**The app is told a code, not a list.** No inventory ever crosses to a device; the list
+lives in the client area, next to the invoices.
 
-- `GET /v1/account` carries a single `accessCodeInfo` — `{accessCode, expirationTime}` or null,
-  whichever channel delivered it: an active store subscription's own code first,
-  else the website choice. That choice is **recomputed on every read**:
-  the stored choice while it is usable; when it dies, the next usable code takes
-  over on the spot (running codes first, soonest expiry first, unstarted prepaid
-  codes strictly last — promoting one of those would start a clock nobody meant to
-  start). No cron is involved.
-  **Reseller stock never qualifies.** A bulk (CSV) order is merchant inventory:
-  it has no single code, it is never a personal code, and it is a portal concept the
-  app is deliberately not told about. The one place it still matters — the delivered
-  file dies with the client-area login — is warned about on the web deletion page and
-  in the final email, both server-side.
-- **Importing a code is a PORTAL act, not an API one.** The client-area codes page
-  (`index.php?m=vpnhoodiap&action=codes`) is where a person adds a code to their
-  account and where they name which one serves it; it calls `AccountKeyService::
-  importCode` directly, so no endpoint is involved. Importing consumes NOTHING: the
-  code keeps its own expiry, keeps working for everyone already using it, and any
-  number of accounts may import the same code. Nothing about billing moves — no
-  invoices, no customer record, no cancel rights.
+**Nothing is stored as "the" selection.** The winner is recomputed on every read, so a
+code that dies leaves nothing to repair — and the order is **deterministic**, with no dates
+in it:
 
-  There was an app-facing `POST /account/claims`, fired when someone pasted a code
-  in the app. It is gone. It could only ever match a code sold through **this**
-  portal — a promo, admin-issued, partner or MANAGER-issued code has no service
-  here, so the call 404'd and recorded nothing while the code itself worked fine —
-  and the app swallowed the outcome either way, so nobody could tell which had
-  happened. The client area reports success or "no code matches" to a person who is
-  looking at it. Pasting a code in the app is now purely local.
-- **There is no remove-code endpoint, deliberately.** A code the account applied
-  leaves the device only with the account (sign-out, deletion); a code the person
-  typed is their own and removing it is purely local, so nothing is reported here.
-  An earlier `POST /account/code-removed` cleared and *parked* the account's choice
-  to re-open store buying — machinery that existed only to escape a purchase refusal
-  that no longer exists (see below). Both are gone, along with the
-  `users.default_cleared_at` column (dropped in 1.0.16).
+0. **The store subscription** — this device's own store first, and only while the store is
+   still charging for it. A subscription that has ended is not a candidate at all: we ended
+   it, so its code stops being one of this person's codes at that moment.
+1. **A portal code with live recurring billing.** Somebody who is paying never does code
+   management.
+2. **The imported code** — somebody typed it in, and typing a code is saying *use this
+   one*, so it wins over anything nobody is being billed for and never over anything that
+   is. Whoever wants their own code ahead of a subscription signs out.
+3. **The other portal codes.**
+4. **Nothing.**
+
+Within a group, a code whose clock has already started comes before one that has not — an
+unused one-time code is worth more unspent — and then oldest purchase first.
+
+**One function decides all of it**, store subscription included. That is deliberate: while
+the subscription was chosen separately, a rejection report was compared against one answer
+and the account was served from another, so a refused subscription code matched nothing and
+could never be retired.
+
+**Every code is either eligible or rejected**, and that is the whole model. Only an
+access-server refusal sets it — an expiry this install can read is *display*, never a
+verdict, because a clock that can retire a code can equally start an **unused** one early
+and a prepaid code begins its life on first use. Consumption order is not optimised at all,
+deliberately: it cost a table, an endpoint and a per-account trust argument to save a code
+from expiring slightly sooner.
+
+**A rejection never skips what is being paid for right now.** Downgrading a paying person
+to a lesser code would hide a provisioning fault behind a worse credential; the refusal is
+recorded and shown in the client area instead. It is also what makes renewal recover by
+itself — a renewed service is paid-now again, so its code is offered again with nothing to
+clear by hand.
+
+**A rejection demotes a code; it never takes it away.** The next working code is served, and when
+every code an account holds has been refused they TAKE TURNS — least recently refused first, ordered
+by the refusal row's own id, which only grows. The account never answers "you hold nothing" while it
+holds something: the person does hold those codes, their device keeps its copy either way, and a
+second device must not be told a different story. It is also how a topped-up or support-extended
+code returns with nothing to press — tried again on its next turn, accepted this time.
+
+A device takes ONE turn per connection attempt: it reports the refusal (which is what moves the
+account on), swaps once, and stops there if the next code is refused too. Without that cap a keyring
+of dead codes would be walked end to end in a single press, and then walked again for ever.
+
+Only a refusal is softened this way: an ended subscription, a code switched off in the panel and a
+dead service are not candidates at all, and a subscription still being paid for is never demoted to
+begin with.
+
+This is settled, not a gap: a live subscription whose code the access server refuses is a
+**support case**, fixed at the source. The account never substitutes another code the
+person holds — that would spend somebody's saved code to cover our own failure and remove
+the only sign that anything is wrong. An **ended** subscription is the opposite case and
+needs no refusal at all: it stops being one of their codes the moment the paid time is
+over.
+
+Two reversible marks steer the ranking and **neither deletes anything**: `isAutoSelectable`,
+set in the client area and **true by default**, and `rejected`, set from a device. They are
+kept apart on purpose — a system rejection must not erase a deliberate *keep this for
+later*, and a retry must not re-arm a code somebody parked. The system never removes a code;
+the only thing that leaves is the upload slot's previous occupant.
+
+- `GET /v1/account` carries a single `accessCodeInfo` — `{accessCode, expirationTime}` or
+  null — computed by that ranking. `expirationTime` is advisory display; whether a code
+  still works is the ACCESS SERVER's verdict at connect time.
+  **Reseller stock never qualifies.** A bulk (CSV) order is merchant inventory: it has no
+  single code, it is never a personal code, and it is a portal concept the app is
+  deliberately not told about. The one place it still matters — the delivered file dies
+  with the client-area login — is warned about on the web deletion page and in the final
+  email, both server-side.
+- **Both writes validate the code's SHAPE, never its existence.** A string that is not an
+  access code (version 1, 20 digits, checksum) is a `400`; a well-formed code the portal has
+  never issued is stored on trust and settled at use time by the access server.
+- **`PUT /v1/account/access-code` fills the account's ONE upload slot**, or empties it when
+  `accessCode` is null, and **answers 204 with no body**. This is how a code typed on one
+  device becomes usable on all of the person's devices — including iOS, which cannot take a
+  typed code. The backend takes any well-formed code **on trust**: validity is settled at
+  use time by the access server, never at save time here, so there is no `code_not_found`
+  and nothing to inspect in the reply. A promo, admin-issued, partner or MANAGER-issued
+  code is saved like any other. Uploading consumes NOTHING — the code keeps working for
+  everyone already using it, any number of accounts may hold it, and nothing about billing
+  moves. Uploading a code the account already owns does not consume the slot: it turns that
+  code back on for the ranking instead, because typing a code is saying *use this*. What
+  the account then serves is a separate question, answered by `GET /v1/account`, and it
+  need not be the code just uploaded.
+- **Emptying the slot removes the uploaded code account-wide.** The same PUT is idempotent.
+  Every signed-in device applies the change on its next successful account refresh.
+  Emptying deletes only the account's copy — the bearer code itself keeps working and may
+  be uploaded again. Purchased subscription codes are not touched by this endpoint. A
+  failed refresh never means removal: devices retain their last good account snapshot until
+  the portal answers successfully.
+- **`POST /v1/account/access-code/rejected` is the only thing a device ever reports.** One
+  bit: the access server refused the code it was serving. No reason, no expiry, no
+  observation time, and no successful-connection counterpart — every code is simply
+  **eligible** or **rejected**, and the ranking never asked for more than that.
+- **The code travels in the authenticated body, never in the URL**, and is redacted out of
+  the audit log like every other secret. Only a fingerprint is stored: recording that a
+  credential stopped working must not give it a second home.
+- **A report applies only while it is still about the account's current code**, compared
+  atomically before anything changes, so a delayed refusal overtaken by a different code
+  does nothing. One case slips through deliberately: remove-then-re-add of the *same*
+  string, where a late report lands on the restored code. Telling those two incarnations
+  apart would cost a whole code-identity system; the recovery is one more Retry. The answer
+  is 204 either way — the device can do nothing useful with the difference.
+- **A rejection covers every entry holding that code.** Identical access codes are the same
+  credential, so the upload slot and any service delivering the same string are skipped
+  together. Recorded **per account**, never globally: that bearer string may be serving
+  somebody else perfectly well.
+- **Rejection skips a code, it never deletes one.** `PUT /v1/account/access-code` with the
+  same code clears it — which is the whole of "Retry", with no second endpoint — and the
+  client area can clear it by hand.
 
 ## Account deletion
 
