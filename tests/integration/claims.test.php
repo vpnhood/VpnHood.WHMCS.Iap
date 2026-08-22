@@ -1,8 +1,8 @@
 <?php
 /**
- * claims.test.php — the deliberately chosen code, end to end on the dev WHMCS
- * (lifecycle §8 + keyring plan: one imported-code slot, the LAST DELIBERATE
- * CHOICE serves, and the app is told a code — never a list):
+ * claims.test.php — the account's one served code, end to end on the dev WHMCS
+ * (lifecycle §8 + keyring plan: one imported-code slot, ONE RANKING recomputed on
+ * every read, and the app is told a code — never a list):
  *
  *   - provisioning marks (Phase 2): a real vpnhoodstore order leaves
  *     accessCodeHash + isDefaultKey on the service;

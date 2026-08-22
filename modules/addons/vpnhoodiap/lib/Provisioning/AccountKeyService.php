@@ -207,7 +207,7 @@ class AccountKeyService
         }
 
         $this->withIdentityLock($user, function () use ($user, $userId, $accessCode): void {
-            $current = $this->accessCodeInfoForUser($user);
+            $current = $this->servingCandidate($user);
             if ($current === null || !hash_equals((string) $current['accessCode'], $accessCode)) {
                 return; // overtaken: the account has moved on to a different code
             }
@@ -223,10 +223,10 @@ class AccountKeyService
 
             // A refusal on something being PAID FOR RIGHT NOW is our fault, not theirs (§4): the
             // account keeps serving it, we never swap in another code, and support fixes the
-            // provisioning at the source. Until now the only thing that raised a hand was the
-            // customer writing in — so somebody could pay for months and get nothing. Say it where
-            // an admin sees it and WHMCS can notify on it. The code itself is never written down.
-            if ($this->isPaidNowCode($user, $accessCode)) {
+            // provisioning at the source. Nobody is chased about it — the customer still starts the
+            // conversation — but the evidence is written where an admin can find it, so support
+            // confirms it in seconds instead of guessing. The code itself is never written down.
+            if ($current['paidNow']) {
                 $clientId = (int) ($user['client_id'] ?? 0);
                 logActivity(sprintf(
                     'vpnhoodiap: the access server REFUSED the code of a subscription being paid for '
@@ -234,29 +234,6 @@ class AccountKeyService
                     $userId, $clientId > 0 ? ", client #$clientId" : ''));
             }
         });
-    }
-
-    /**
-     * Is this the code of something the person is PAYING FOR RIGHT NOW — a store subscription, or a
-     * portal service on live recurring billing? Asked only when a refusal has just been recorded, so
-     * the cost (one code read per live service, usually one or none) is paid on the rare path.
-     */
-    private function isPaidNowCode(array $user, string $accessCode): bool
-    {
-        $reader = new DeliveryReader();
-        $store = $this->storeSubscriptionRow($user);
-        if ($store !== null && $reader->readAccessCode((int) $store['service_id']) === $accessCode) {
-            return true;
-        }
-        foreach ($this->visibleServices($user) as $serviceId => $meta) {
-            if ($meta['bulk'] || !$this->serviceBilling($serviceId)['paidNow']) {
-                continue;
-            }
-            if ($reader->readAccessCode($serviceId) === $accessCode) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
@@ -322,38 +299,57 @@ class AccountKeyService
      *   0. the STORE SUBSCRIPTION, this device's own store first.
      *   1. a portal code with live recurring billing. Someone who is paying never does code
      *      management.
-     *   2. the other portal codes.
-     *   3. the imported code.
+     *   2. THE IMPORTED CODE — somebody typed it in, and that is them saying "use this one".
+     *   3. the other portal codes.
      *   4. nothing.
      *
      * Deterministic all the way down: within a group, a started clock outranks one that has not
      * begun — an unused one-time code is worth more unspent — and then oldest purchase first. No
      * expiry sorting, because ordering consumption was never worth the machinery it cost (§2).
      *
-     * Skipped, never deleted (§3): is_auto_selectable turned off in the panel, and a code a device
-     * reported refused — the latter only when it is not what is being paid for right now. An
-     * expired clock skips nothing: expiry is display, and only the access server retires a code.
+     * Skipped, never deleted (§3): is_auto_selectable turned off in the panel. A refusal is not a
+     * skip but a DEMOTION — a refused code falls behind every working one, is exempt while it is
+     * being paid for, and is still served when it is all the account has, with refused codes taking
+     * turns. An expired clock skips nothing: expiry is display, and only the access server retires
+     * a code.
      *
      * @return array{accessCode: string, expiresAt: ?string}|null
      */
     public function accessCodeInfoForUser(array $user): ?array
+    {
+        $best = $this->servingCandidate($user);
+        return $best === null
+            ? null
+            : ['accessCode' => $best['accessCode'], 'expiresAt' => $best['expiresAt']];
+    }
+
+    /**
+     * The winner with its code resolved — what the account read answers with, plus what the ranking
+     * knew about it. A refusal report needs to know whether it landed on something being PAID FOR
+     * right now, and asking the ranking is how it finds out without reading every code a second time
+     * inside the identity lock.
+     *
+     * @return array{accessCode: string, expiresAt: ?string, paidNow: bool}|null
+     */
+    private function servingCandidate(array $user): ?array
     {
         $candidates = $this->rankCandidates($user);
         if ($candidates === []) {
             return null;
         }
         $best = $candidates[0];
-        if ($best['serviceId'] === null) {
-            return ['accessCode' => $best['accessCode'], 'expiresAt' => null];
-        }
-
-        $code = $best['accessCode'] ?? (new DeliveryReader())->readAccessCode($best['serviceId']);
+        $code = $best['accessCode'] ?? (new DeliveryReader())->readAccessCode((int) $best['serviceId']);
         if ($code === null) {
             // A temporary provisioning/partner outage must not look like an intentional account-wide
             // removal. Fail the refresh so devices retain their last good snapshot and code.
             throw new ApiException('The selected access code is temporarily unavailable.', 503, 'unavailable');
         }
-        return ['accessCode' => $code, 'expiresAt' => $best['expiresAt']];
+        // an imported code has no service and therefore no clock this install can show
+        return [
+            'accessCode' => $code,
+            'expiresAt'  => $best['serviceId'] === null ? null : $best['expiresAt'],
+            'paidNow'    => $best['paidNow'],
+        ];
     }
 
     /**
