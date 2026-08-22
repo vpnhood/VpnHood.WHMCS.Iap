@@ -101,6 +101,8 @@ const VPNHOODIAP_ROUTES = [
     '/v1/auth/sessions'         => ['POST' => 'vpnhoodiap_createSession'],
     '/v1/auth/sessions/current' => ['DELETE' => 'vpnhoodiap_deleteCurrentSession'],
     '/v1/account'               => ['GET' => 'vpnhoodiap_getAccount', 'DELETE' => 'vpnhoodiap_deleteAccount'],
+    '/v1/account/access-code'   => ['PUT' => 'vpnhoodiap_setAccessCode'],
+    '/v1/account/access-code/rejected' => ['POST' => 'vpnhoodiap_reportAccessCodeRejected'],
     '/v1/billing/products'      => ['GET' => 'vpnhoodiap_listProducts'],
     '/v1/billing/purchases'     => ['POST' => 'vpnhoodiap_createPurchase'],
 ];
@@ -109,6 +111,7 @@ $remoteIp = $_SERVER['REMOTE_ADDR'] ?? '';
 $route = '';
 $repo = null;
 $logged = null;
+$request = [];
 
 try {
     if (!IapRepository::isModuleActive()) {
@@ -144,11 +147,13 @@ try {
     $result = $handlers[$method]($repo, $request);
     [$status, $data] = $result;
 
-    $repo->log(null, $route, $remoteIp, $status, vpnhoodiap_redact($logged), vpnhoodiap_redact($data));
+    $repo->log($request['logUserId'] ?? null, $route, $remoteIp, $status,
+        vpnhoodiap_redact($logged), vpnhoodiap_redact($data));
     vpnhoodiap_respond($status, $data);
 } catch (ApiException $e) {
     $status = $e->getHttpStatus();
-    $repo?->log(null, $route, $remoteIp, $status, vpnhoodiap_redact($logged), $e->getMessage());
+    $repo?->log($request['logUserId'] ?? null, $route, $remoteIp, $status,
+        vpnhoodiap_redact($logged), $e->getMessage());
     vpnhoodiap_problem($status, $e->getErrorCode(), $e->getMessage());
 } catch (\Throwable $e) {
     logModuleCall('vpnhoodiap', 'api', $route, $e->getMessage(), $e->getTraceAsString());
@@ -349,7 +354,7 @@ function vpnhoodiap_deleteCurrentSession(IapRepository $repo, array $request): a
  * GET /v1/account — the COMPLETE account snapshot, mapping the app's account model
  * 1:1: identity, THE one access code serving the account, and the store
  * subscription behind it when one exists. One call, one object. The server does
- * the ranking — an active subscription's code outranks the website choice — so
+ * the ranking — a delivered subscription's code outranks the website choice — so
  * no device ever sees a list or picks a code (lifecycle §8).
  */
 function vpnhoodiap_getAccount(IapRepository $repo, array $request): array
@@ -371,10 +376,9 @@ function vpnhoodiap_accountSnapshot(IapRepository $repo, array $user): array
         }
     }
 
-    // The store subscription serving the account: the newest provisioned, unexpired
-    // purchase whose code is deliverable. Its code IS the account's code — it is what
-    // the person is paying for right now. The price is the STORE's own charge for the
-    // current period, not a catalogue price.
+    // The store subscription serving the account: the newest purchase that already
+    // delivered a code. Portal status and expiry are metadata; they never withdraw
+    // that credential. Only the access server may refuse it at connection time.
     //
     // THIS DEVICE'S OWN STORE COMES FIRST (lifecycle §8). One account can hold a
     // subscription in more than one store, and only the device's own store can manage,
@@ -383,53 +387,36 @@ function vpnhoodiap_accountSnapshot(IapRepository $repo, array $user): array
     // offer no way to manage either. So the home store's serving subscription is
     // preferred, and the account-wide newest is the fallback — for a device whose store
     // sold nothing, and for sessions issued before the session knew its store.
+    $keyService = new AccountKeyService($repo);
+
+    // ONE selector decides what this account serves (keyring plan §2): the store subscription
+    // first, then a portal code being paid for right now, then the other portal codes, then the
+    // imported one. It lives in AccountKeyService so that the rejection report compares against
+    // exactly this answer — when they were two functions, a refused subscription code matched
+    // neither and could never be retired. Deterministic, with no dates in it, and no list ever
+    // crosses to a device.
+    $info = $keyService->accessCodeInfoForUser($user);
+    $accessCode = $info === null
+        ? null
+        : ['accessCode' => $info['accessCode'], 'expirationTime' => $info['expiresAt']];
+
+    // The subscription block is billing metadata for the same row the ranking put first — price,
+    // period and dates, which no code carries.
     $subscription = null;
-    $accessCode = null;
-    $reader = new DeliveryReader();
-    $homeStore = $user['session_store'] ?? null;
-    $rows = \WHMCS\Database\Capsule::table('mod_vpnhood_iap_purchases')
-        ->where('user_id', (int) $user['id'])
-        ->where('status', 'provisioned')
-        ->orderByDesc('id')
-        ->limit(10)
-        ->get()->map(fn ($row) => (array) $row)->all();
-    if ($homeStore !== null) {
-        usort($rows, fn ($a, $b) => ((string) $b['store'] === $homeStore ? 1 : 0)
-            <=> ((string) $a['store'] === $homeStore ? 1 : 0));
-    }
-    foreach ($rows as $row) {
+    $row = $keyService->storeSubscriptionRow($user);
+    if ($row !== null) {
         $expiry = $row['expiry_time'] !== null ? strtotime((string) $row['expiry_time']) : null;
-        if (($expiry !== null && $expiry < time()) || $row['service_id'] === null) {
-            continue;
-        }
-        $code = $reader->readAccessCode((int) $row['service_id']);
-        if ($code === null) {
-            continue; // not deliverable (partner outage) — try the next purchase
-        }
-        $expirationTime = $expiry !== null ? gmdate('c', $expiry) : null;
-        $accessCode = ['accessCode' => $code, 'expirationTime' => $expirationTime];
         $subscription = [
             'storeId'        => (string) $row['store'],
             'createdTime'    => $row['created_at'] !== null
                 ? gmdate('c', strtotime((string) $row['created_at']))
                 : null,
-            'expirationTime' => $expirationTime,
+            'expirationTime' => $expiry !== null ? gmdate('c', $expiry) : null,
             'priceAmount'    => $row['store_amount'] !== null ? (float) $row['store_amount'] : null,
             'priceCurrency'  => $row['store_currency'],
             'billingPeriod'  => IapRepository::billingPeriodForService((int) $row['service_id']),
             'isAutoRenew'    => (bool) $row['auto_renewing'],
         ];
-        break;
-    }
-
-    // No subscription: THE one website code fills in — chosen by the server and
-    // recomputed on this very read (a dead choice is replaced by the next usable
-    // code, lifecycle §8). No list ever crosses to a device.
-    if ($accessCode === null) {
-        $info = (new AccountKeyService($repo))->accessCodeInfoForUser($user);
-        if ($info !== null) {
-            $accessCode = ['accessCode' => $info['accessCode'], 'expirationTime' => $info['expiresAt']];
-        }
     }
 
     return [
@@ -439,6 +426,79 @@ function vpnhoodiap_accountSnapshot(IapRepository $repo, array $user): array
         'accessCodeInfo' => $accessCode,
         'subscription' => $subscription,
     ];
+}
+
+/**
+ * PUT /v1/account/access-code — fill, replace or empty the account's ONE upload slot. A null
+ * accessCode is the explicit empty value.
+ *
+ * ANSWERS NO BODY (204). The backend takes any well-formed code on trust — validity is settled at
+ * use time by the access server, never at save time here (keyring plan §5) — so there is nothing to
+ * inspect in a reply: it either worked or the call failed. What the account then RANKS is a
+ * different question, asked with GET /v1/account, and it need not be the code just uploaded.
+ */
+function vpnhoodiap_setAccessCode(IapRepository $repo, array &$request): array
+{
+    $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
+    $request['logUserId'] = (int) $user['id'];
+    vpnhoodiap_rateLimit($repo, $request, 10, 300, (int) $user['id']);
+
+    if (!array_key_exists('accessCode', $request['body'])) {
+        throw new ApiException('accessCode is required.', 400, 'bad_request');
+    }
+    $rawAccessCode = $request['body']['accessCode'];
+    if ($rawAccessCode !== null && !is_string($rawAccessCode)) {
+        throw new ApiException('accessCode must be a non-empty string or null.', 400, 'bad_request');
+    }
+    // SHAPE, never existence: a malformed string is bad input, while an unknown-but-well-formed
+    // code is taken on trust and settled at use time by the access server (§5). Without this the
+    // slot would accept anything the 64-character column then had to survive.
+    $accessCode = $rawAccessCode === null ? null : IapRepository::normalizeAccessCode((string) $rawAccessCode);
+    if ($rawAccessCode !== null && $accessCode === null) {
+        throw new ApiException('accessCode is not a valid access code.', 400, 'bad_request');
+    }
+
+    (new AccountKeyService($repo))->setAccessCode($user, $accessCode);
+    return [204, null];
+}
+
+/**
+ * POST /v1/account/access-code/rejected — a DEVICE reports that the access server REFUSED the code
+ * the account gave it (keyring plan §4). One bit of news, and the whole of what the ranking needs:
+ * no reason, no expiry, no observation time, and no successful-connection counterpart.
+ *
+ * The code travels in the AUTHENTICATED BODY and never in the URL — a path is logged, cached and
+ * proxied in places a bearer credential must not appear — and `accessCode` is on the audit log's
+ * redaction list, so the body is recorded as `[redacted]` like every other secret.
+ *
+ * Applied only while the report is still about the account's CURRENT code, compared inside the
+ * identity lock: a delayed refusal overtaken by a different code changes nothing. Remove-then-re-add
+ * of the same string is the one case that slips through, and its recovery is one more Retry — the
+ * alternative was a whole code-identity system for an edge case nobody will meet twice.
+ *
+ * ANSWERS NO BODY (204), including when the report no longer applies: the device can do nothing
+ * useful with the difference, and an error would only invite it to retry a report that never will.
+ *
+ * Recorded PER ACCOUNT, because a code is a bearer string many accounts may hold: one account's
+ * report must never disable the code for somebody else who is using it perfectly well.
+ */
+function vpnhoodiap_reportAccessCodeRejected(IapRepository $repo, array &$request): array
+{
+    $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
+    $request['logUserId'] = (int) $user['id'];
+    vpnhoodiap_rateLimit($repo, $request, 30, 300, (int) $user['id']);
+
+    $rawAccessCode = $request['body']['accessCode'] ?? null;
+    if (!is_string($rawAccessCode)) {
+        throw new ApiException('accessCode is required.', 400, 'bad_request');
+    }
+    $accessCode = IapRepository::normalizeAccessCode($rawAccessCode);
+    if ($accessCode === null) {
+        throw new ApiException('accessCode is not a valid access code.', 400, 'bad_request');
+    }
+
+    (new AccountKeyService($repo))->reportRejected($user, $accessCode);
+    return [204, null];
 }
 
 /**
@@ -481,7 +541,12 @@ function vpnhoodiap_deleteAccount(IapRepository $repo, array $request): array
  */
 function vpnhoodiap_collectFarewell(IapRepository $repo, array $user): array
 {
-    $keys = (new AccountKeyService($repo))->webKeysForUser($user);
+    // ONLY what they bought here. An uploaded code is not mailed back (keyring plan §5): the person
+    // still has it wherever it reached them from, and this account merely held it meanwhile — the
+    // deletion dialog is where that is said, not this mail.
+    $keys = array_values(array_filter(
+        (new AccountKeyService($repo))->webKeysForUser($user),
+        fn (array $key) => !$key['uploaded']));
 
     $warnings = [];
     $rows = \WHMCS\Database\Capsule::table('mod_vpnhood_iap_purchases')
@@ -502,7 +567,7 @@ function vpnhoodiap_collectFarewell(IapRepository $repo, array $user): array
                 $keys[] = [
                     'accessCode' => $code,
                     'expiresAt'  => $expiry !== null ? gmdate('c', $expiry) : null,
-                    'isDefault'  => false,
+                    'uploaded'   => false,
                 ];
             }
         }
@@ -640,10 +705,12 @@ function vpnhoodiap_jsonBody(): array
     return $body;
 }
 
-/** Sliding-window limit per IP and route. */
-function vpnhoodiap_rateLimit(IapRepository $repo, array $request, int $limit, int $windowSeconds): void
+/** Sliding-window limit per IP and route, plus account where authenticated. */
+function vpnhoodiap_rateLimit(IapRepository $repo, array $request, int $limit, int $windowSeconds,
+    ?int $userId = null): void
 {
-    if ($repo->requestCount($request['ip'], $request['route'], $windowSeconds) > $limit) {
+    if ($repo->requestCount($request['ip'], $request['route'], $windowSeconds) >= $limit ||
+        ($userId !== null && $repo->requestCountForUser($userId, $request['route'], $windowSeconds) >= $limit)) {
         throw new ApiException('Too many requests.', 429, 'rate_limited');
     }
 }
@@ -668,7 +735,7 @@ function vpnhoodiap_redact(mixed $value): mixed
     if (!is_array($value)) {
         return $value;
     }
-    static $secretKeys = ['idtoken', 'proof', 'accesstoken', 'token', 'password', 'code', 'challengetoken', 'newbackupcode'];
+    static $secretKeys = ['idtoken', 'proof', 'accesstoken', 'accesscode', 'token', 'password', 'code', 'challengetoken', 'newbackupcode'];
     $redacted = [];
     foreach ($value as $key => $item) {
         $redacted[$key] = is_string($key) && in_array(strtolower($key), $secretKeys, true)

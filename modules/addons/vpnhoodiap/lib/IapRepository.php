@@ -345,6 +345,46 @@ class IapRepository
         return hash('sha256', trim($accessCode));
     }
 
+    /**
+     * An access code's SHAPE, and nothing about whether it exists — the same rule the apps apply
+     * before they send one (AccessCodeUtils): separators are ignored, version 1 is 20 digits, and
+     * the second digit is a checksum over the other eighteen.
+     *
+     * Shape is not validity. The portal must never be an authority on whether a code works — that
+     * is the access server's answer, given at use time (§5) — but it must not store a string the
+     * access server could not possibly accept, and the slot column is 64 characters wide.
+     *
+     * @return string|null the normalized code, or null when the string is not one
+     */
+    public static function normalizeAccessCode(string $accessCode): ?string
+    {
+        // separators are decoration; the app strips them the same way before validating
+        $code = preg_replace('/[^a-zA-Z0-9]/', '', trim($accessCode)) ?? '';
+        if (strlen($code) !== 20 || !ctype_alnum($code)) {
+            return null;
+        }
+        // version 1, then one checksum DIGIT, then eighteen alphanumerics. The random part is not
+        // digits-only — AccessCodeUtils sums character codes, so letters are legal there and a
+        // stricter rule here would refuse codes the apps accept.
+        if ($code[0] !== '1' || !ctype_digit($code[1])) {
+            return null;
+        }
+        return (int) $code[1] === self::accessCodeChecksum(substr($code, 2)) ? $code : null;
+    }
+
+    /** Sum the character codes, then fold to one digit — AccessCodeUtils.CalculateChecksum. */
+    private static function accessCodeChecksum(string $input): int
+    {
+        $sum = 0;
+        for ($i = 0, $len = strlen($input); $i < $len; $i++) {
+            $sum += ord($input[$i]);
+        }
+        while ($sum >= 10) {
+            $sum = array_sum(str_split((string) $sum));
+        }
+        return $sum;
+    }
+
     /** Case and surrounding space never distinguish two people. */
     public static function normalizeEmail(string $email): string
     {
@@ -761,6 +801,16 @@ class IapRepository
     {
         return (int) Capsule::table('mod_vpnhood_iap_log')
             ->where('remote_ip', $remoteIp)
+            ->where('action', $action)
+            ->where('created_at', '>=', date('Y-m-d H:i:s', time() - $windowSeconds))
+            ->count();
+    }
+
+    /** Sliding-window request count for one authenticated account + action. */
+    public function requestCountForUser(int $userId, string $action, int $windowSeconds): int
+    {
+        return (int) Capsule::table('mod_vpnhood_iap_log')
+            ->where('user_id', $userId)
             ->where('action', $action)
             ->where('created_at', '>=', date('Y-m-d H:i:s', time() - $windowSeconds))
             ->count();

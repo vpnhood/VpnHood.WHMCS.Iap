@@ -35,7 +35,7 @@ function vpnhoodiap_config(): array
     return [
         'name'        => 'VpnHood! In-App Purchase',
         'description' => 'Processes app-store purchases (Google Play / Apple / Microsoft) into WHMCS clients, orders and paid invoices, delivering VpnHood access codes through the install\'s provisioning module.',
-        'version'     => '1.0.17',
+        'version'     => '1.2.0',
         'author'      => 'VpnHood',
         'fields'      => [
             'AdminAlertEmail' => [
@@ -257,6 +257,8 @@ function vpnhoodiap_activate(): array
         vpnhoodiap_migrateToServerChosenCode();
         vpnhoodiap_migrateOffRemovedCodePark();
         vpnhoodiap_migrateToPasswordSignIn();
+        vpnhoodiap_migrateToOneImportSlot();
+        vpnhoodiap_migrateToKeyring();
         vpnhoodiap_ensureAdminAccess();
         vpnhoodiap_hideGatewayFromCheckout();
 
@@ -273,11 +275,120 @@ function vpnhoodiap_activate(): array
 }
 
 /**
+ * The keyring (access-code-keyring-plan.md). Three additive pieces, all idempotent:
+ *
+ *  - users.uploaded_access_code — THE one upload slot, as a STORED STRING. It used to be a
+ *    claim pointing at a service, which forced the portal to recognise a code before it would
+ *    accept one; validity is settled at use time by the access server, never at save time here
+ *    (§5), so the slot now holds whatever was typed and the 404 disappears with it;
+ *  - claims.is_auto_selectable — DEFAULT TRUE, so an ordinary code needs no decision from
+ *    anyone (§3). Turning it off in the panel means the ranking never picks that code — how
+ *    somebody protects a code they bought to give away — and it is reversible;
+ *  - mod_vpnhood_iap_code_rejections — ELIGIBILITY, the one concept that replaced learned expiry
+ *    (§4). A code is eligible until a device reports the access server refusing it, and the row is
+ *    keyed by (account, code fingerprint) because identical codes ARE the same credential: the
+ *    upload slot and any service delivering that string are skipped together. A repeat refusal
+ *    re-inserts the row, so its id is the ORDER of the refusals: once every code an account holds
+ *    has been refused they take turns, least recently refused first, and whichever one comes back
+ *    to life is tried again by itself. Only the fingerprint
+ *    is stored — the credential must not gain a second home. mod_vpnhood_iap_code_expiry is DROPPED
+ *    with the idea it served: predicting a clock cost a table, an endpoint and a trust argument to
+ *    optimise consumption order, and the ranking never needed more than "skip this one?".
+ *
+ * The backfill moves each legacy imported claim into the slot it became, then drops the claim.
+ * Nothing is trimmed silently: an identity holding several is left for vpnhoodiap_migrateToOneImportSlot
+ * to report, and only the first is carried across.
+ */
+function vpnhoodiap_migrateToKeyring(): void
+{
+    $schema = Capsule::schema();
+
+    if ($schema->hasTable('mod_vpnhood_iap_users') && !$schema->hasColumn('mod_vpnhood_iap_users', 'uploaded_access_code')) {
+        $schema->table('mod_vpnhood_iap_users', function ($table) {
+            $table->string('uploaded_access_code', 64)->nullable();
+        });
+    }
+
+    if ($schema->hasTable('mod_vpnhood_iap_claims') && !$schema->hasColumn('mod_vpnhood_iap_claims', 'is_auto_selectable')) {
+        $schema->table('mod_vpnhood_iap_claims', function ($table) {
+            $table->boolean('is_auto_selectable')->default(true);
+        });
+    }
+
+    // Eligibility replaces learned expiry (§4). A row here means "a device met a refusal with this
+    // code"; no row is the default, so every existing code stays eligible through the migration.
+    // An unreleased 1.2.0 dev shape (created_at, updated in place). A rejection is transient
+    // state a device re-reports the instant it meets the refusal again, so there is nothing here
+    // worth migrating — and the row id has to order the refusals, which an updated row cannot do.
+    if ($schema->hasTable('mod_vpnhood_iap_code_rejections')
+        && !$schema->hasColumn('mod_vpnhood_iap_code_rejections', 'refused_at')) {
+        $schema->drop('mod_vpnhood_iap_code_rejections');
+    }
+    if (!$schema->hasTable('mod_vpnhood_iap_code_rejections')) {
+        $schema->create('mod_vpnhood_iap_code_rejections', function ($table) {
+            // the id is not decoration: a refusal is re-inserted, so the id is the ORDER of the
+            // refusals, which is what lets refused codes take turns without a clock (§4)
+            $table->increments('id');
+            $table->integer('user_id')->unsigned()->index();
+            // the code is never stored — a fingerprint recognises it again, and a bearer credential
+            // must not gain a second home just to record that it stopped working
+            $table->string('code_hash', 64);
+            $table->timestamp('refused_at')->nullable();
+            $table->unique(['user_id', 'code_hash'], 'iap_code_rejections_user_code');
+        });
+    }
+
+    // The learned-expiry table goes with the mechanism. Nothing reads it, and keeping a per-account
+    // record of when somebody's credential dies is not something to hold on to for sentiment.
+    if ($schema->hasTable('mod_vpnhood_iap_code_expiry')) {
+        $schema->drop('mod_vpnhood_iap_code_expiry');
+    }
+
+    vpnhoodiap_backfillUploadSlot();
+}
+
+/** Carry each legacy imported claim into users.uploaded_access_code, then drop the claim row. */
+function vpnhoodiap_backfillUploadSlot(): void
+{
+    $schema = Capsule::schema();
+    if (!$schema->hasTable('mod_vpnhood_iap_claims') || !$schema->hasColumn('mod_vpnhood_iap_users', 'uploaded_access_code')) {
+        return;
+    }
+    require_once __DIR__ . '/lib/Provisioning/DeliveryReader.php';
+
+    // claims on services the claimer's own client does NOT own = imported (the old slot)
+    $imported = Capsule::table('mod_vpnhood_iap_claims as c')
+        ->join('tblhosting as h', 'h.id', '=', 'c.service_id')
+        ->join('mod_vpnhood_iap_users as u', 'u.id', '=', 'c.user_id')
+        ->whereNull('u.uploaded_access_code')
+        ->whereRaw('h.userid <> COALESCE(u.client_id, -1)')
+        ->orderBy('c.id')
+        ->get(['c.id as claim_id', 'c.service_id', 'u.id as user_id']);
+
+    $reader = new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\DeliveryReader();
+    $filled = [];
+    foreach ($imported as $row) {
+        $userId = (int) $row->user_id;
+        if (isset($filled[$userId])) {
+            continue; // several imported claims: carry the first, leave the rest to the audit
+        }
+        $code = $reader->readAccessCode((int) $row->service_id);
+        if ($code === null) {
+            continue; // not provisioned (yet) — leave the claim alone rather than lose the pointer
+        }
+        Capsule::table('mod_vpnhood_iap_users')->where('id', $userId)->update(['uploaded_access_code' => $code]);
+        Capsule::table('mod_vpnhood_iap_claims')->where('id', (int) $row->claim_id)->delete();
+        $filled[$userId] = true;
+    }
+}
+
+/**
  * Migration point for future versions (invoked by WHMCS when the version in
  * vpnhoodiap_config() increases). Keep migrations additive and idempotent.
  */
 function vpnhoodiap_upgrade(array $vars): void
 {
+    vpnhoodiap_migrateToKeyring();
     // installs activated before this ran (API/automation) have no access row and
     // are invisible in the Addons menu until someone notices
     vpnhoodiap_ensureAdminAccess();
@@ -296,6 +407,7 @@ function vpnhoodiap_upgrade(array $vars): void
     vpnhoodiap_migrateToClientAreaVerificationGate();
     vpnhoodiap_migrateToDeletionJournal();
     vpnhoodiap_migrateToSessionStore();
+    vpnhoodiap_migrateToOneImportSlot();
 }
 
 /**
@@ -312,6 +424,42 @@ function vpnhoodiap_migrateToSessionStore(): void
         $schema->table('mod_vpnhood_iap_sessions', function ($table) {
             $table->string('store', 16)->nullable();
         });
+    }
+}
+
+/**
+ * Audit the one-slot imported-code invariant. The one-slot limit itself is
+ * transactional logic because a unique key on user_id would outlaw selection
+ * markers on purchased services that share the claims table. Explicit PUT or
+ * DELETE heals a legacy overfull identity; migration never silently trims one.
+ */
+function vpnhoodiap_migrateToOneImportSlot(): void
+{
+    $schema = Capsule::schema();
+    if ($schema->hasTable('mod_vpnhood_iap_claims')) {
+        // claims on services the claimer's own client does NOT own = imported
+        $overfull = Capsule::table('mod_vpnhood_iap_claims as c')
+            ->join('tblhosting as h', 'h.id', '=', 'c.service_id')
+            ->leftJoin('mod_vpnhood_iap_users as u', 'u.id', '=', 'c.user_id')
+            ->whereRaw('h.userid <> COALESCE(u.client_id, c.client_id, -1)')
+            ->selectRaw('COALESCE(c.user_id, -c.client_id) as identity, COUNT(*) as n')
+            ->groupBy('identity')->havingRaw('COUNT(*) > 1')->get();
+        if ($overfull->isNotEmpty()) {
+            logModuleCall('vpnhoodiap', 'oneImportSlotAudit',
+                'accounts holding more than one imported claim (decide by hand, nothing was trimmed)',
+                $overfull->toJson());
+        }
+    }
+
+    // Retire the short-lived removal-stamp draft if a development install ran it.
+    if ($schema->hasTable('mod_vpnhood_iap_users')) {
+        foreach (['import_removed_at', 'import_removed_suffix'] as $retiredColumn) {
+            if ($schema->hasColumn('mod_vpnhood_iap_users', $retiredColumn)) {
+                $schema->table('mod_vpnhood_iap_users', function ($table) use ($retiredColumn) {
+                    $table->dropColumn($retiredColumn);
+                });
+            }
+        }
     }
 }
 
@@ -856,21 +1004,40 @@ function vpnhoodiap_clientareaCodes(): array
                 throw new \RuntimeException('Invalid or expired security token. Please reload the page and try again.');
             }
             $do = (string) ($_POST['do'] ?? '');
-            if ($do === 'set-default') {
-                $keyService->setDefaultService($keyUser, (int) ($_POST['serviceId'] ?? 0));
-                $notice = 'Done — that code now serves your account, and your signed-in devices pick it up '
-                    . 'the next time they check in.';
+            if ($do === 'auto-select') {
+                // The panel's one inventory control (keyring plan §3). Reversible, and it deletes
+                // nothing: the ranking simply stops offering that code from the next read.
+                $on = ($_POST['isAutoSelectable'] ?? '') === 'yes';
+                $keyService->setAutoSelectable($keyUser, (int) ($_POST['serviceId'] ?? 0), $on);
+                $notice = $on
+                    ? 'That code can be chosen for your devices again.'
+                    : 'That code will no longer be chosen automatically. It still works for anyone '
+                        . 'who has it, and a device already using it keeps it until it expires.';
             } elseif ($do === 'import') {
-                $import = $keyService->importCode($keyUser, (string) ($_POST['accessCode'] ?? ''));
-                $notice = $import['created']
-                    ? 'The code was added to your account and now serves it. Nothing changes for anyone '
-                        . 'else already using this code.'
-                    : 'You already had this code — it now serves your account.';
+                // PUT semantics: this deliberate form submission fills or replaces the account's
+                // one upload slot. Nothing is proved here — the access server settles at use time
+                // whether the code works (keyring plan §5).
+                $keyService->setAccessCode($keyUser, (string) ($_POST['accessCode'] ?? ''));
+                $notice = 'The code was saved to your account. Which code your devices are handed is '
+                    . 'decided fresh each time they check in — anything you are paying for right now '
+                    . 'comes first.';
+            } elseif ($do === 'remove-import') {
+                if (($_POST['confirm'] ?? '') !== 'yes') {
+                    throw new \RuntimeException('Please tick the confirmation box to remove your saved code.');
+                }
+                $keyService->setAccessCode($keyUser, null);
+                $notice = 'Your saved code was removed from this account. The code itself keeps working — '
+                    . 'you can add it again any time. Your signed-in devices apply the change at '
+                    . 'their next successful account refresh.';
+            } elseif ($do === 'retry-import') {
+                // The client-area half of Retry (keyring plan §4): put a rejected code back in the
+                // ranking. The app's half needs nothing new — typing the code again clears it.
+                $keyService->clearRejection($keyUser, (string) ($_POST['accessCode'] ?? ''));
+                $notice = 'Your saved code will be offered to your devices again. If the server refuses '
+                    . 'it once more, it goes back to being skipped — nothing is deleted either way.';
             }
         } catch (\WHMCS\Module\Addon\VpnHoodIap\ApiException $e) {
-            $error = $e->getErrorCode() === 'code_not_found'
-                ? 'No code matches what you entered. Check it and try again.'
-                : $e->getMessage();
+            $error = $e->getMessage();
         } catch (\Throwable $e) {
             $error = $e->getMessage();
         }
@@ -879,9 +1046,8 @@ function vpnhoodiap_clientareaCodes(): array
     $codes = [];
     if ($clientId > 0) {
         try {
-            // resolve first, so the badge shows the server's live choice (a dead
-            // choice is replaced by the next usable code right here, §8)
-            $keyService->resolveDefaultServiceId($keyUser);
+            // No "active" badge: there is no stored selection to show (keyring plan §2). What each
+            // row carries is the one thing the panel decides — whether the ranking may pick it.
             $codes = $keyService->webKeysForUser($keyUser);
         } catch (\Throwable $e) {
             logModuleCall('vpnhoodiap', 'clientarea.codes', (string) $clientId, $e->getMessage(), '');

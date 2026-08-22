@@ -242,7 +242,7 @@
         ],
         "operationId": "getAccount",
         "summary": "The signed-in account — the complete snapshot",
-        "description": "The account holds exactly one serving access code, and the portal chooses it — the app never sees a list. When the account is subscribed in more than one store, THIS DEVICE'S OWN STORE WINS: the session remembers the store the device signed in with, and a serving subscription from that store outranks any other; the newest across all stores is the fallback. Only the store that sold a subscription can manage it, so answering with a foreign one would hide the device's own subscription and leave it unmanageable.",
+        "description": "The account holds exactly one serving access code, and ONE function chooses it — the app never sees a list. The choice is RECOMPUTED ON EVERY READ and is deterministic: the store subscription for this device's own store, then a portal code being paid for right now, then the IMPORTED code (typing a code means \"use this one\", so it wins over anything nobody is being billed for and never over anything that is), then the other portal codes, then nothing. Within a group, a code whose clock has started comes before one that has not, then oldest purchase first. Nothing is stored as *the* selection, so no dead choice ever has to be repaired.\n\nEvery code is either **eligible** or **rejected**, and only an access-server refusal sets it. `expirationTime` is advisory display, never an entitlement decision — a clock that could retire a code could equally start an unused one early. A rejection never skips what is being paid for right now.\n\nWhen the account is subscribed in more than one store, THIS DEVICE'S OWN STORE WINS: the session remembers the store the device signed in with, and a serving subscription from that store outranks any other; the newest across all stores is the fallback. Only the store that sold a subscription can manage it, so answering with a foreign one would hide the device's own subscription and leave it unmanageable.",
         "responses": {
           "200": {
             "description": "One object: identity, THE one access code serving the account, and the store subscription behind it. One call renders the whole account page.",
@@ -303,6 +303,80 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/v1/account/access-code": {
+      "put": {
+        "tags": [
+          "account"
+        ],
+        "operationId": "setAccessCode",
+        "summary": "Fill, replace or empty the account's one upload slot",
+        "description": "Stores the supplied code in the account's single upload slot, or empties it when `accessCode` is null. The backend takes any well-formed code **on trust**: validity is settled at use time by the access server, never at save time here, so there is no *not found* answer and nothing to inspect in the reply. Uploading a different code replaces what is there; uploading a code the account already owns does not consume the slot and turns that code back on for the ranking instead. Which code the account then *serves* is a different question — ask `GET /v1/account` — and it need not be the code just uploaded.\n\nThe code's **shape** is validated (version 1, 20 digits, checksum) and a malformed string is a `400`. Shape is not validity: a well-formed code this portal never issued is still taken on trust, because only the access server can say whether a code works.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetAccessCodeRequest"
+              },
+              "example": {
+                "accessCode": "PREM-4H2K-9QX7"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Stored. No body: the save either worked or the call failed."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/v1/account/access-code/rejected": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "operationId": "reportAccessCodeRejected",
+        "summary": "Report that the access server refused the imported code",
+        "description": "One bit of news, and the whole of what the ranking needs: no reason, no expiry, no observation time, and no successful-connection counterpart. Every code an account holds is either **eligible** or **rejected**, and a device meeting an access-server refusal is the only thing that sets the second.\n\nThe code travels in the **authenticated body, never in the URL** — a path is logged, cached and proxied where a bearer credential must not appear — and it is redacted out of the audit log like every other secret. Only a fingerprint is stored.\n\nApplied only while the report is still about the account's **current** code, compared atomically: a delayed refusal that has been overtaken by a different code changes nothing. Remove-then-re-add of the same string is the one case that slips through — identical codes are the same credential and cannot be told apart here — and the recovery is one more Retry.\n\nA rejection applies to **every entry holding that code**: the upload slot and any service delivering the same string are skipped together. It skips, it never deletes — uploading the code again through `PUT /v1/account/access-code` clears it, which is all that *Retry* is.\n\nThe code's **shape** is validated (version 1, 20 digits, checksum) and a malformed string is a `400`. Shape is not validity: a well-formed code this portal never issued is still taken on trust, because only the access server can say whether a code works.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportAccessCodeRejectedRequest"
+              },
+              "example": {
+                "accessCode": "12345678901234567890"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Recorded, or ignored because the report named an occupant that is no longer there. The device cannot act on the difference."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         }
       }
@@ -887,7 +961,8 @@
           "purchase_unattributed",
           "purchase_in_progress",
           "plan_not_available",
-          "provisioning_failed"
+          "provisioning_failed",
+          "code_not_found"
         ]
       },
       "PurchaseState": {
@@ -917,6 +992,35 @@
             ],
             "format": "date-time",
             "description": "The code's own clock where it can be read; null for a one-time code that has not started, or where the install cannot read it."
+          }
+        }
+      },
+      "SetAccessCodeRequest": {
+        "type": "object",
+        "description": "Fill, replace or empty the account's one upload slot.",
+        "required": [
+          "accessCode"
+        ],
+        "properties": {
+          "accessCode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The code exactly as the person holds it, or null to empty the slot. Taken on trust — the access server, not the portal, decides whether it works."
+          }
+        }
+      },
+      "ReportAccessCodeRejectedRequest": {
+        "type": "object",
+        "description": "Which code the access server refused. Compared against the account's current code before anything changes.",
+        "required": [
+          "accessCode"
+        ],
+        "properties": {
+          "accessCode": {
+            "type": "string",
+            "description": "The code the device was serving when the access server refused it."
           }
         }
       },
@@ -981,7 +1085,7 @@
       },
       "AccountSnapshot": {
         "type": "object",
-        "description": "The complete account: identity, THE one access code serving it (server-ranked: an active subscription’s code outranks the website choice), and the subscription behind it. The app model maps this 1:1.",
+        "description": "The complete account: identity, THE one access code serving it (a delivered subscription credential outranks the deliberate code choice; portal billing status and expiration metadata never withdraw it, and the choice itself is never re-picked), and the subscription behind it. The app model maps this 1:1.",
         "required": [
           "userId",
           "name",

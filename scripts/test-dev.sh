@@ -110,6 +110,10 @@ run_endpoints() {
   probe GET "$api/v1/account" - 401 '"code":"unauthorized"' 'a protected resource needs a session'
   probe DELETE "$api/v1/account" - 401 '"code":"unauthorized"' 'account deletion needs a session'
   probe POST "$api/v1/account" '{}' 405 '"code":"method_not_allowed"' 'wrong verb on a real resource is 405'
+  probe PUT "$api/v1/account/access-code" '{"accessCode":"x"}' 401 '"code":"unauthorized"' 'setting the account code needs a session'
+  probe POST "$api/v1/account/access-code" '{"accessCode":"x"}' 405 '"code":"method_not_allowed"' 'the account-code slot is PUT-only'
+  probe POST "$api/v1/account/access-code/rejected" '{"accessCode":"x"}' 401 '"code":"unauthorized"' 'reporting a refusal needs a session'
+  probe PUT "$api/v1/account/access-code/rejected" '{}' 405 '"code":"method_not_allowed"' 'the rejection report is POST-only'
   probe GET "$api/v1/billing/products?store=googleplay&packageName=no.such.app" - 403 '"code":"unknown_app"' \
     'the product catalog is public — an unknown app is 403, never 401'
   probe GET "$api/v1/billing/products" - 400 '"code":"bad_request"' 'products without store/packageName is a clean 400'
