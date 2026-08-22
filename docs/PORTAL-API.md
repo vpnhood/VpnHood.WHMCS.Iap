@@ -301,15 +301,14 @@ itself — a renewed service is paid-now again, so its code is offered again wit
 clear by hand.
 
 **A rejection demotes a code; it never takes it away.** The next working code is served, and when
-every code an account holds has been refused they TAKE TURNS — least recently refused first, ordered
-by the refusal row's own id, which only grows. The account never answers "you hold nothing" while it
-holds something: the person does hold those codes, their device keeps its copy either way, and a
-second device must not be told a different story. It is also how a topped-up or support-extended
-code returns with nothing to press — tried again on its next turn, accepted this time.
+every code an account holds has been refused the account HOLDS ITS GROUND: it keeps answering with
+the most recently refused one — what the devices already hold — so every press meets the same honest
+refusal. It never answers "you hold nothing" while the person holds something, and it never cycles
+through their other refused codes hoping one works: whoever tops a code up knows which one they
+paid, and typing it is what selects it.
 
-A device takes ONE turn per connection attempt: it reports the refusal (which is what moves the
-account on), swaps once, and stops there if the next code is refused too. Without that cap a keyring
-of dead codes would be walked end to end in a single press, and then walked again for ever.
+A device swaps its code at most once per connection attempt: it reports the refusal (which is what
+moves the account on), takes what the account answers, and stops there if that is refused too.
 
 Only a refusal is softened this way: an ended subscription, a code switched off in the panel and a
 dead service are not candidates at all, and a subscription still being paid for is never demoted to
