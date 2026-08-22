@@ -389,9 +389,9 @@ function vpnhoodiap_accountSnapshot(IapRepository $repo, array $user): array
     // sold nothing, and for sessions issued before the session knew its store.
     $keyService = new AccountKeyService($repo);
 
-    // ONE selector decides what this account serves: the store subscription
-    // first, then a portal code being paid for right now, then the other portal codes, then the
-    // imported one. It lives in AccountKeyService so that the rejection report compares against
+    // ONE selector decides what this account serves: the store subscription first, then a portal
+    // code being paid for right now, then the code the person typed in, then the other portal
+    // codes. It lives in AccountKeyService so that the rejection report compares against
     // exactly this answer — when they were two functions, a refused subscription code matched
     // neither and could never be retired. Deterministic, with no dates in it, and no list ever
     // crosses to a device.
