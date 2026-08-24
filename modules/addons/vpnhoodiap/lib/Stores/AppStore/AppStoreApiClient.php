@@ -80,8 +80,12 @@ class AppStoreApiClient
         }
 
         $response = ($this->http)($method, self::PRODUCTION_BASE . $path, $headers, $body);
-        if ($response['status'] === 404) {
-            // sandbox purchases 404 on the production host — retry there
+        if ($response['status'] === 404 || $response['status'] === 401) {
+            // sandbox purchases 404 on the production host — retry there. 401 is retried too:
+            // production answers a BARE 401 (empty body) for an app that has never been published
+            // to the App Store (e.g. TestFlight-only), even with perfectly valid credentials.
+            // A genuinely bad key still surfaces: the sandbox host then 401s as well, and THAT
+            // response is the one reported below.
             $response = ($this->http)($method, self::SANDBOX_BASE . $path, $headers, $body);
         }
         if ($response['status'] < 200 || $response['status'] >= 300) {
