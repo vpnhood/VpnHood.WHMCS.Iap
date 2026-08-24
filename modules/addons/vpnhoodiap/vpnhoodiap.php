@@ -961,8 +961,7 @@ function vpnhoodiap_clientarea(array $vars): array
  *
  *  - LISTING here is deliberate and allowed: the client area is the portal,
  *    exactly where "someone who owns several codes is already looking". The
- *    app never gets a list — this page is the only listing besides the
- *    farewell mail.
+ *    app never gets a list — this page is the only listing there is.
  *  - NAMING (set as my code) is the only picker there is. On a build with no
  *    code box (§9) this page is the ONLY way to change codes at all.
  *  - IMPORTING consumes nothing: it records a pointer, the code keeps working
@@ -1142,15 +1141,8 @@ function vpnhoodiap_clientareaDeleteAccount(): array
             }
             $repo = new IapRepository();
             $moduleUser = $email !== '' ? $repo->findUserByEmail($email) : null;
-            // the farewell message carries every key this person can see (§5 step 3);
-            // with no module account, a stand-in row still reaches the client's own keys
-            $keyUser = $moduleUser ?? ['id' => 0, 'client_id' => $clientId];
-            $keyService = new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountKeyService($repo);
             (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService())
-                ->deleteClient($clientId, $moduleUser, [
-                    'keys'       => $keyService->webKeysForUser($keyUser),
-                    'bulkOrders' => $keyService->bulkOrderCount($keyUser),
-                ]);
+                ->deleteClient($clientId, $moduleUser);
             header('Location: logout.php');
             exit;
         } catch (\Throwable $e) {
