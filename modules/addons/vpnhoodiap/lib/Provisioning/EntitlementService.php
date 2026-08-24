@@ -151,17 +151,19 @@ class EntitlementService
             // other purchase: both subscriptions are real, each serves its own store's
             // devices, and the client area shows both rather than one being unwound by
             // force. An anomalous second purchase is worth SAYING, not refusing.
-            $liveKeys = Capsule::table('mod_vpnhood_iap_purchases')
+            $liveRows = Capsule::table('mod_vpnhood_iap_purchases')
                 ->where('user_id', (int) $user['id'])
                 ->where('status', 'provisioned')
                 ->where('purchase_key', '!=', $record->purchaseKey)
                 ->where(function ($query) {
                     $query->whereNull('expiry_time')->orWhere('expiry_time', '>', date('Y-m-d H:i:s'));
                 })
-                ->pluck('purchase_key')->all();
+                ->get(['purchase_key', 'store'])->map(fn ($liveRow) => (array) $liveRow)->all();
+            $liveKeys = array_column($liveRows, 'purchase_key');
             $supersedes = $record->linkedPurchaseKey !== null
                 && in_array($record->linkedPurchaseKey, $liveKeys, true);
-            if ($liveKeys !== [] && !$supersedes) {
+            $doubledWith = $liveKeys !== [] && !$supersedes ? $liveRows : [];
+            if ($doubledWith !== []) {
                 $this->alertAdmins("vpnhoodiap: purchase {$record->purchaseKey} accepted for user #{$user['id']}"
                     . ' which already holds an active store subscription — the account now holds two.');
             }
@@ -247,7 +249,54 @@ class EntitlementService
             // ---- only now is the store told the purchase was delivered
             $adapter->finalize($app, $record);
 
+            // The acceptance is never silent (lifecycle §8): the person now holds two real
+            // subscriptions, and the one email tells them so — and where each one cancels.
+            // Sent only after delivery succeeded: a rolled-back order must never be announced.
+            if ($doubledWith !== []) {
+                $this->notifyDoubleSubscription($clientId, $record->store, $doubledWith);
+            }
+
             return $this->entitlementFor($record, $primary['serviceId'], $row['created_at'] ?? null);
+    }
+
+    /**
+     * Tell the owner their account now holds more than one active subscription — what each one is,
+     * and that each is cancelled only at the store that sold it (lifecycle §8: surfaced, never
+     * silent; whether to keep both is their decision, our job is to make it a decision rather than
+     * a surprise). Best-effort — mail must never fail a delivered purchase.
+     */
+    private function notifyDoubleSubscription(int $clientId, string $newStore, array $liveRows): void
+    {
+        $this->repo->log(null, 'double_subscription', '', 0, ['clientid' => $clientId],
+            ['new' => $newStore, 'existing' => array_column($liveRows, 'store')]);
+        if ($clientId <= 0 || !function_exists('localAPI')) {
+            return;
+        }
+        try {
+            $items = '';
+            foreach (array_merge([['store' => $newStore]], $liveRows) as $sub) {
+                $label = htmlspecialchars(OrderProvisioner::storeLabel((string) $sub['store']), ENT_QUOTES);
+                $items .= "<li>A subscription bought at <strong>$label</strong> — it renews there,"
+                    . " serves that store's apps, and can only be cancelled there.</li>";
+            }
+            localAPI('SendEmail', [
+                'id'            => $clientId,
+                'customtype'    => 'general',
+                'customsubject' => 'Your VpnHood account now has two active subscriptions',
+                'custommessage' => '<p>A new subscription from '
+                    . htmlspecialchars(OrderProvisioner::storeLabel($newStore), ENT_QUOTES)
+                    . ' was just added to your VpnHood account — and the account already had an active'
+                    . ' subscription. Both purchases are real; nothing needs to be undone.</p>'
+                    . "<ul>$items</ul>"
+                    . '<p>Keeping both is your choice. If you did not mean to pay twice, cancel the one'
+                    . ' you do not want <strong>at the store that sold it</strong> — cancelling one never'
+                    . ' affects the other, and time already paid for keeps working until it runs out.</p>'
+                    . '<p>You can see everything your account holds on the website, under'
+                    . ' <em>Your premium codes</em>.</p>',
+            ]);
+        } catch (\Throwable) {
+            // tolerated — the log row above is the durable trace
+        }
     }
 
     /**

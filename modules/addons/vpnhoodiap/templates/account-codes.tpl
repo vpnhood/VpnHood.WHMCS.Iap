@@ -42,6 +42,11 @@
                 {if $code.uploaded}
                   <br><span class="text-muted small">added by you</span>
                 {/if}
+                {* An app-store subscription is billed and cancelled only at its store (lifecycle
+                   §8) — an account holding two sees both here, each naming its own store. *}
+                {if $code.storeLabel}
+                  <br><span class="text-muted small">billed via {$code.storeLabel|escape} — renewals and cancellation live there</span>
+                {/if}
                 {if !$code.isAutoSelectable}
                   <br><span class="label label-default badge badge-secondary">not chosen automatically</span>
                 {/if}

@@ -973,6 +973,7 @@ function vpnhoodiap_clientareaCodes(): array
     require_once __DIR__ . '/lib/ApiException.php';
     require_once __DIR__ . '/lib/IapRepository.php';
     require_once __DIR__ . '/lib/Provisioning/DeliveryReader.php';
+    require_once __DIR__ . '/lib/Provisioning/OrderProvisioner.php'; // storeLabel for store-billed rows
     require_once __DIR__ . '/lib/Provisioning/AccountKeyService.php';
 
     $clientId = (int) ($_SESSION['uid'] ?? 0);

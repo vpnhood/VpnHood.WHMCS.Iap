@@ -249,6 +249,8 @@ try {
     // moved only ever worked on the one store that auto-refunds an unacknowledged
     // purchase, so here the account simply ends up holding two — visibly.
     $secondRecord = makeRecord(['obfuscatedUid' => $unverifiedUser['external_uid'], 'purchaseKey' => "itest-second-$marker"]);
+    $noticeCountSql = "SELECT COUNT(*) c FROM tblemails WHERE userid=? AND subject LIKE '%two active subscriptions%'";
+    $noticesBefore = (int) one($db, $noticeCountSql, [(int) $buyer['id']])['c'];
     try {
         $secondResult = $service->redeem($app, $secondRecord, $repo->getUser($linkedUserId), new FakeStoreAdapter($secondRecord));
         ($secondResult['state'] === 'provisioned'
@@ -262,6 +264,12 @@ try {
     ($second && $second['status'] === 'provisioned')
         ? ok('…and the ledger shows both, so a double subscription is surfaced rather than hidden')
         : bad('second purchase not recorded as provisioned: ' . json_encode($second));
+    // "one message says so plainly" (lifecycle §8): the owner is emailed that the account
+    // now holds two, each cancelling at the store that sold it
+    $noticesAfterSecond = (int) one($db, $noticeCountSql, [(int) $buyer['id']])['c'];
+    $noticesAfterSecond === $noticesBefore + 1
+        ? ok('the double-subscription notice email was sent, exactly once')
+        : bad('double-subscription notices: ' . ($noticesAfterSecond - $noticesBefore) . ', expected 1');
     $secondOrderId = (int) Capsule::table('mod_vpnhood_iap_purchases')
         ->where('purchase_key', "itest-second-$marker")->value('whmcs_order_id');
     if ($secondOrderId > 0) {
@@ -278,6 +286,10 @@ try {
     $upgradeResult['state'] === 'provisioned'
         ? ok('upgrade/resubscribe supersedes the live key instead of being blocked')
         : bad('upgrade was blocked: ' . json_encode($upgradeResult));
+    // superseding is not a double: replacing a live key must not alarm the owner
+    ((int) one($db, $noticeCountSql, [(int) $buyer['id']])['c'] === $noticesAfterSecond)
+        ? ok('an upgrade/resubscribe sends no double-subscription notice')
+        : bad('the upgrade sent a double-subscription notice');
     $upgradeOrderId = (int) Capsule::table('mod_vpnhood_iap_purchases')
         ->where('purchase_key', "itest-upgrade-$marker")->value('whmcs_order_id');
     if ($upgradeOrderId > 0) {
@@ -532,6 +544,9 @@ try {
     }
     Capsule::table('mod_vpnhood_iap_products')->where('app_id', $appId)->delete();
     Capsule::table('mod_vpnhood_iap_apps')->where('id', $appId)->delete();
+    // the double-subscription notice mailed to the shared buyer (kept out of later runs' deltas)
+    Capsule::table('tblemails')->where('userid', (int) $buyer['id'])
+        ->where('subject', 'like', '%two active subscriptions%')->delete();
     // the hand-made renewal-invoice fixture (deleting an order does not touch it)
     foreach (Capsule::table('tblinvoiceitems')->where('description', 'like', "renewal fixture $marker%")->pluck('invoiceid')->all() as $fixtureInvoiceId) {
         Capsule::table('tblinvoiceitems')->where('invoiceid', (int) $fixtureInvoiceId)->delete();

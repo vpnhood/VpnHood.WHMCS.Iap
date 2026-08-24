@@ -677,6 +677,10 @@ class AccountKeyService
                 continue; // not provisioned (yet) — nothing to show
             }
             $state = $reader->readCodeState($serviceId);
+            // which store sold this service, when a store did (tagServiceStore) — the page
+            // says where an app-store subscription's billing and cancel live (lifecycle §8:
+            // an account holding two subscriptions sees both, each with its own store)
+            $store = IapRepository::serviceProperty($serviceId, 'purchasedVia');
             $items[] = [
                 'accessCode'       => $code,
                 'expiresAt'        => $state['expiresAt'],
@@ -684,6 +688,7 @@ class AccountKeyService
                 'serviceId'        => $serviceId,
                 'uploaded'         => false,
                 'rejected'         => isset($rejected[IapRepository::codeHash($code)]),
+                'storeLabel'       => $store === null ? null : OrderProvisioner::storeLabel($store),
             ];
         }
 
@@ -696,6 +701,7 @@ class AccountKeyService
                 'serviceId'        => null,
                 'uploaded'         => true,
                 'rejected'         => isset($rejected[IapRepository::codeHash($uploaded)]),
+                'storeLabel'       => null,
             ];
         }
         return $items;
