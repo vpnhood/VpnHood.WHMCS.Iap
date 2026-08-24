@@ -687,7 +687,7 @@ try {
         ? ok('stock is never served as the account\'s code, whatever else it holds')
         : bad('bulk leaked into accessCodeInfo: ' . json_encode($ownerAsBulk));
     $keyService->bulkOrderCount($owner) === 2
-        ? ok('…but the portal still counts it, for the farewell message and the web deletion page')
+        ? ok('…but the portal still counts it, for the web deletion page')
         : bad('bulkOrderCount did not see the batches');
     \WHMCS\Service\Service::find($serviceIds[1])->serviceProperties->save(['bulkDelivery' => '']);
     \WHMCS\Service\Service::find($serviceId)->serviceProperties->save(['bulkDelivery' => '']);

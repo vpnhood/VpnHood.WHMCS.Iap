@@ -507,8 +507,9 @@ function vpnhoodiap_reportAccessCodeRejected(IapRepository $repo, array &$reques
  * sign-in identities, the account row — and the WHMCS client behind the retained
  * invoices is anonymized and closed. Nothing blocks it (lifecycle §8): web
  * billing is cancelled at the end of its paid period instead, stored payment
- * methods are dropped, and one final message carries the codes and warnings to
- * the address before it is erased. A store subscription is deliberately left
+ * methods are dropped. Nothing is sent to the address on the way out — the
+ * confirmation screen's warning is the whole story (lifecycle §5): codes are
+ * forfeited with the account. A store subscription is deliberately left
  * exactly as it is (lifecycle §8): signing in again brings it back by itself,
  * so cancelling it here would destroy the very thing a return depends on.
  * Running codes are left alone too: open gates with no personal data, already
@@ -519,70 +520,8 @@ function vpnhoodiap_deleteAccount(IapRepository $repo, array $request): array
     vpnhoodiap_rateLimit($repo, $request, 5, 300);
     $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
 
-    // collect everything the farewell message must carry BEFORE anything dies —
-    // the confirmation screen warns, the mail delivers (lifecycle §5 steps 2–3)
-    $farewell = vpnhoodiap_collectFarewell($repo, $user);
-    (new AccountDeletionService())->deleteUser($user, [
-        'keys'                 => $farewell['keys'],
-        // bulk never reaches the wire (a merchant concept, not a code), but the
-        // farewell message still says the delivered file cannot be served again
-        'bulkOrders'           => (new AccountKeyService($repo))->bulkOrderCount($user),
-        'subscriptionWarnings' => $farewell['subscriptionWarnings'],
-    ]);
+    (new AccountDeletionService())->deleteUser($user);
     return [204, null];
-}
-
-/**
- * Everything the farewell mail must carry (lifecycle §5 step 3): every code the
- * person paid for — website services AND the code behind each store purchase —
- * plus one warning line per subscription still open at a store. Feeds only the
- * mail: no preview endpoint exists, deliberately (§10 — the confirmation shows
- * no codes and no counts, so there is nothing for a device to fetch).
- */
-function vpnhoodiap_collectFarewell(IapRepository $repo, array $user): array
-{
-    // ONLY what they bought here. An uploaded code is not mailed back (keyring plan §5): the person
-    // still has it wherever it reached them from, and this account merely held it meanwhile — the
-    // deletion dialog is where that is said, not this mail.
-    $keys = array_values(array_filter(
-        (new AccountKeyService($repo))->webKeysForUser($user),
-        fn (array $key) => !$key['uploaded']));
-
-    $warnings = [];
-    $rows = \WHMCS\Database\Capsule::table('mod_vpnhood_iap_purchases')
-        ->where('user_id', (int) $user['id'])
-        ->where('status', 'provisioned')
-        ->get()->map(fn ($row) => (array) $row)->all();
-    $reader = new DeliveryReader();
-    foreach ($rows as $row) {
-        $expiry = $row['expiry_time'] !== null ? strtotime((string) $row['expiry_time']) : null;
-        $expired = $expiry !== null && $expiry < time();
-        $autoRenewing = (bool) $row['auto_renewing'];
-        if ($expired && !$autoRenewing) {
-            continue; // fully over — nothing to send, nothing to warn about
-        }
-        if (!$expired && $row['service_id'] !== null) {
-            $code = $reader->readAccessCode((int) $row['service_id']);
-            if ($code !== null) {
-                $keys[] = [
-                    'accessCode' => $code,
-                    'expiresAt'  => $expiry !== null ? gmdate('c', $expiry) : null,
-                    'uploaded'   => false,
-                ];
-            }
-        }
-        if ($autoRenewing) {
-            // grace/hold: the store still holds the subscription open although access
-            // stopped — the case most likely to charge again unexpectedly (§8)
-            $warnings[] = $expired && $autoRenewing
-                ? 'A subscription with a failed payment is still open at the store and may start charging again. '
-                    . 'Cancel it in the store it was bought from.'
-                : 'Deleting the account does not cancel the subscription — it may keep renewing until '
-                    . 'cancelled in the store it was bought from.';
-        }
-    }
-
-    return ['keys' => $keys, 'subscriptionWarnings' => array_values(array_unique($warnings))];
 }
 
 /**

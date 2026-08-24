@@ -9,7 +9,7 @@
  * identity before the client row is anonymized, the action is re-runnable,
  * and the real DELETE /account endpoint does all of it over HTTP with a
  * session token. There is deliberately NO deletion-preview endpoint: the
- * confirmation screen warns without listing, and the farewell mail delivers.
+ * confirmation screen warns without listing; nothing is mailed on the way out.
  *
  * Writes go through localAPI (clients, orders, services) or the module's own
  * mod_vpnhood_iap_* tables — never a raw INSERT/UPDATE on WHMCS core (the one
@@ -243,7 +243,7 @@ try {
     $httpToken = (new SessionService())->issue($userIds['http'])['token'];
 
     // NO preview endpoint, deliberately (lifecycle §5/§10): the confirmation shows
-    // no codes and no counts — the screen warns, the farewell mail delivers
+    // no codes and no counts — the warning is the whole story
     $curl = curl_init(API_URL . '/account/deletion-preview');
     curl_setopt_array($curl, [
         CURLOPT_HTTPHEADER     => ['Authorization: Bearer ' . $httpToken],

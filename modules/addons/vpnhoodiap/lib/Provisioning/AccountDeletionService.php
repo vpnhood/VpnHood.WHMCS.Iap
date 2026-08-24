@@ -53,21 +53,15 @@ class AccountDeletionService
      * asset a return depends on — the person cancels in their own store.
      *
      * @param array $user the mod_vpnhood_iap_users row (as SessionService::resolve returns it)
-     * @param array $options keys?: array (the farewell message's code list,
-     *                       collected by the caller before anything is erased),
-     *                       bulkOrders?: int (reseller batches — no code to show, but the
-     *                       delivered file dies with the client-area login),
-     *                       subscriptionWarnings?: string[] (lines for still-running
-     *                       store subscriptions)
      */
-    public function deleteUser(array $user, array $options = []): void
+    public function deleteUser(array $user): void
     {
         $userId = (int) $user['id'];
         $clientId = $user['client_id'] !== null ? (int) $user['client_id'] : null;
         $details = [];
 
         if ($clientId !== null) {
-            $details += $this->deleteClientSide($clientId, $options);
+            $details += $this->deleteClientSide($clientId);
         }
         $this->eraseModuleRows($userId);
         $this->journal($userId, $clientId, 'deleted', $details);
@@ -78,9 +72,9 @@ class AccountDeletionService
      * Play requires). Works for app buyers and pure web customers alike; when a
      * module account hangs on the client's email it dies with it.
      */
-    public function deleteClient(int $clientId, ?array $moduleUser, array $options = []): void
+    public function deleteClient(int $clientId, ?array $moduleUser): void
     {
-        $details = $this->deleteClientSide($clientId, $options);
+        $details = $this->deleteClientSide($clientId);
         if ($moduleUser !== null) {
             $this->eraseModuleRows((int) $moduleUser['id']);
         }
@@ -93,13 +87,11 @@ class AccountDeletionService
      * @return array journal details (agreement references etc.)
      * @throws ApiException
      */
-    private function deleteClientSide(int $clientId, array $options = []): array
+    private function deleteClientSide(int $clientId): array
     {
         $details = $this->cancelWebBillingAtPeriodEnd($clientId);
         $this->cancelUnpaidInvoices($clientId);
         $details['payMethodsDropped'] = $this->dropStoredPayMethods($clientId);
-        $this->sendFinalMessage($clientId, $options['keys'] ?? [], $options['subscriptionWarnings'] ?? [],
-            (int) ($options['bulkOrders'] ?? 0));
         $details += $this->freezeInvoices($clientId);
         $this->anonymizeClient($clientId);
         return $details;
@@ -261,55 +253,6 @@ class AccountDeletionService
             $dropped++;
         }
         return $dropped;
-    }
-
-    /**
-     * The one message the address gets before it stops existing (lifecycle §5
-     * step 3): every code they paid for, and the warning about any subscription
-     * that keeps charging. THE SCREEN WARNS, THE MAIL DELIVERS — the
-     * confirmation deliberately lists nothing, so this mail is the only listing
-     * there is, and an inbox is searchable a year later. Best-effort by design:
-     * a mail outage must not trap a person in an account they asked to erase.
-     */
-    private function sendFinalMessage(int $clientId, array $keys, array $subscriptionWarnings,
-        int $bulkOrders = 0): void
-    {
-        if ($keys === [] && $subscriptionWarnings === [] && $bulkOrders === 0) {
-            return; // nothing worth carrying — no purchases, nothing still billing
-        }
-        $lines = ['<p>Your account has been deleted. This message is the last one we can send you.</p>'];
-        if ($keys !== []) {
-            $lines[] = '<p><strong>Your premium codes — save them now.</strong> They keep working for the time '
-                . 'already paid; after this we can never look them up for you again:</p><ul>';
-            foreach ($keys as $key) {
-                $code = htmlspecialchars((string) ($key['accessCode'] ?? ''), ENT_QUOTES);
-                $expires = isset($key['expiresAt']) && $key['expiresAt'] !== null
-                    ? ' — valid until ' . htmlspecialchars(substr((string) $key['expiresAt'], 0, 10), ENT_QUOTES)
-                    : '';
-                $lines[] = "<li><code>{$code}</code>{$expires}</li>";
-            }
-            $lines[] = '</ul>';
-        }
-        if ($bulkOrders > 0) {
-            // stock has no single code to list; what matters is that the CSV was
-            // served by the client area, and that door has just closed
-            $lines[] = '<p><strong>Your bulk orders (' . $bulkOrders . ') were delivered as a CSV file at '
-                . 'purchase.</strong> That file cannot be downloaded again now the account is gone. The codes '
-                . 'inside it are unaffected and keep working until they expire.</p>';
-        }
-        foreach ($subscriptionWarnings as $warning) {
-            $lines[] = '<p>' . htmlspecialchars($warning, ENT_QUOTES) . '</p>';
-        }
-        try {
-            localAPI('SendEmail', [
-                'id'            => $clientId,
-                'customtype'    => 'general',
-                'customsubject' => 'Your account was deleted — your premium codes, one last time',
-                'custommessage' => implode("\n", $lines),
-            ]);
-        } catch (\Throwable $e) {
-            logModuleCall('vpnhoodiap', 'deletion.finalMessage', (string) $clientId, $e->getMessage(), '');
-        }
     }
 
     /** Nothing may ever bill a deleted person again: open invoices are cancelled, paid ones retained. */

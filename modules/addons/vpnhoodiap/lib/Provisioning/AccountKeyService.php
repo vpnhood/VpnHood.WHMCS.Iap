@@ -648,9 +648,7 @@ class AccountKeyService
      * hub, stored on a partner install.
      *
      * THIS LIST NEVER REACHES A DEVICE (lifecycle §8: the app is told a code,
-     * not a list). Its two callers are portal-side: the client-area codes page,
-     * and the farewell mail at deletion (§5 step 3 — the mail delivers, the
-     * screen only warns).
+     * not a list). Its one caller is portal-side: the client-area codes page.
      *
      * BULK IS NOT A CODE AND NEVER APPEARS HERE. Reseller stock is a merchant
      * concept of the portal: it was handed over once as a file, has no single
@@ -705,9 +703,9 @@ class AccountKeyService
 
     /**
      * How many bulk (CSV) orders this account holds. The portal side only:
-     * the farewell message and the web deletion page warn that the delivered
-     * file cannot be served again once the client-area login is gone, while
-     * the codes inside it keep working to their own expiry.
+     * the web deletion page warns that the delivered file cannot be served
+     * again once the client-area login is gone, while the codes inside it
+     * keep working to their own expiry.
      */
     public function bulkOrderCount(array $user): int
     {
