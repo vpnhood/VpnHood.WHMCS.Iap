@@ -35,7 +35,7 @@ function vpnhoodiap_config(): array
     return [
         'name'        => 'VpnHood! In-App Purchase',
         'description' => 'Processes app-store purchases (Google Play / Apple / Microsoft) into WHMCS clients, orders and paid invoices, delivering VpnHood access codes through the install\'s provisioning module.',
-        'version'     => '1.2.0',
+        'version'     => '1.2.1',
         'author'      => 'VpnHood',
         'fields'      => [
             'AdminAlertEmail' => [
@@ -260,6 +260,7 @@ function vpnhoodiap_activate(): array
         vpnhoodiap_migrateToOneImportSlot();
         vpnhoodiap_migrateToKeyring();
         vpnhoodiap_ensureAdminAccess();
+        vpnhoodiap_ensureIapGateway();
         vpnhoodiap_hideGatewayFromCheckout();
 
         return [
@@ -408,6 +409,74 @@ function vpnhoodiap_upgrade(array $vars): void
     vpnhoodiap_migrateToDeletionJournal();
     vpnhoodiap_migrateToSessionStore();
     vpnhoodiap_migrateToOneImportSlot();
+    vpnhoodiap_ensureIapGateway();
+    vpnhoodiap_repairIapPaymentMethods();
+}
+
+/**
+ * Register the bookkeeping gateway (modules/gateways/vpnhoodiappay.php) if nobody has activated it
+ * in admin — an in-app purchase must never depend on a manual activation step. The rows are the
+ * ones WHMCS activation writes for a config-less Invoices gateway; existing values are never
+ * touched (the visible clamp below is the one exception, and it exists already).
+ */
+function vpnhoodiap_ensureIapGateway(): void
+{
+    $existing = Capsule::table('tblpaymentgateways')
+        ->where('gateway', \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner::GATEWAY)
+        ->pluck('setting')->all();
+    // one name across installs — renamed from "In-App Purchase (billed by the app store)"
+    // (owner, 2026-08-25: reads as Apple-only); the update below carries the rename onto
+    // installs that already hold the old default, production included when it rolls out
+    Capsule::table('tblpaymentgateways')
+        ->where('gateway', \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner::GATEWAY)
+        ->where('setting', 'name')
+        ->where('value', 'In-App Purchase (billed by the app store)')
+        ->update(['value' => 'In-App Purchase']);
+    $wanted = [
+        'name'      => 'In-App Purchase',
+        'type'      => 'Invoices',
+        'convertto' => '',
+        'visible'   => '',
+    ];
+    foreach ($wanted as $setting => $value) {
+        if (!in_array($setting, $existing, true)) {
+            Capsule::table('tblpaymentgateways')->insert([
+                'gateway' => \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner::GATEWAY,
+                'setting' => $setting,
+                'value'   => $value,
+                'order'   => 0,
+            ]);
+        }
+    }
+}
+
+/**
+ * Put in-app orders back on their own gateway. AddOrder silently SUBSTITUTES the default visible
+ * gateway when the requested one is hidden from checkout (observed 2026-08-11, the day a real
+ * checkout gateway was activated beside this module) — so store purchases started reading
+ * "PaymentHood" in the client area, and the renewal-invoice cleanup, which filters on this
+ * module's gateway, stopped matching them. placeOrder() now stamps every new order; this repairs
+ * the rows written while WHMCS was substituting. Only services this module provisioned are
+ * touched.
+ */
+function vpnhoodiap_repairIapPaymentMethods(): void
+{
+    $gateway = \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner::GATEWAY;
+    $serviceIds = Capsule::table('mod_vpnhood_iap_purchases')
+        ->whereNotNull('service_id')->pluck('service_id')->all();
+    if ($serviceIds === []) {
+        return;
+    }
+    $orderIds = Capsule::table('tblhosting')->whereIn('id', $serviceIds)
+        ->where('paymentmethod', '!=', $gateway)->pluck('orderid')->all();
+    Capsule::table('tblhosting')->whereIn('id', $serviceIds)
+        ->where('paymentmethod', '!=', $gateway)->update(['paymentmethod' => $gateway]);
+    if ($orderIds !== []) {
+        Capsule::table('tblorders')->whereIn('id', $orderIds)->update(['paymentmethod' => $gateway]);
+        Capsule::table('tblinvoices')
+            ->whereIn('id', Capsule::table('tblorders')->whereIn('id', $orderIds)->pluck('invoiceid')->all())
+            ->update(['paymentmethod' => $gateway]);
+    }
 }
 
 /**

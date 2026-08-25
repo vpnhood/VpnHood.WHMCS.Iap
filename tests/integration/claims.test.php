@@ -49,6 +49,7 @@ use WHMCS\Module\Addon\VpnHoodIap\IapRepository;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountKeyService;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\DeliveryReader;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\EntitlementService;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\PurchaseRecord;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\StoreNotification;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\StoreAdapterInterface;
@@ -399,6 +400,18 @@ try {
     ($code2 !== null && $code2 !== '' && $code2 !== $code)
         ? ok("second order provisioned with its own code (service #{$serviceIds[1]})")
         : bad('second order has no distinct code');
+
+    // WHMCS substitutes the default visible gateway for a hidden one; the module stamps its own
+    // back, or store purchases read as paid by the website's checkout gateway (found 2026-08-25:
+    // a Google purchase showing "PaymentHood") and the gateway-filtered cleanups go blind. The
+    // website orders above are banktransfer on purpose — only the STORE purchase is checked.
+    $iapServiceId = (int) Capsule::table('mod_vpnhood_iap_purchases')
+        ->where('user_id', $userIds['claimer'])->whereNotNull('service_id')->orderByDesc('id')
+        ->value('service_id');
+    Capsule::table('tblhosting')->where('id', $iapServiceId)->value('paymentmethod') === OrderProvisioner::GATEWAY
+        ? ok('an in-app order stays on the In-App Purchase gateway, whatever checkout runs')
+        : bad('the in-app order was left on a substituted gateway: '
+            . Capsule::table('tblhosting')->where('id', $iapServiceId)->value('paymentmethod'));
     $ownerAfterPurchase = $keyService->accessCodeInfoForUser($owner);
     ($ownerAfterPurchase !== null && $ownerAfterPurchase['accessCode'] === $code)
         ? ok('buying a second code leaves the buyer on their own working one (§8 rule 1)')

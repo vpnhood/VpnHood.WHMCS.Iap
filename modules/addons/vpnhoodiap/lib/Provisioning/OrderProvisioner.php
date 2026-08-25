@@ -54,6 +54,16 @@ class OrderProvisioner
             throw new ApiException('Order creation failed.', 502, 'provisioning_failed');
         }
 
+        // AddOrder SUBSTITUTES the default visible gateway when the requested one is hidden from
+        // checkout — and ours must be hidden (it collects nothing). Stamp the rows back, or store
+        // purchases read as paid by whatever gateway the website happens to run, and everything
+        // that filters on this module's gateway (renewal-invoice cleanup, monitors) goes blind.
+        Capsule::table('tblorders')->where('id', $orderId)->update(['paymentmethod' => self::GATEWAY]);
+        Capsule::table('tblhosting')->where('id', $serviceId)->update(['paymentmethod' => self::GATEWAY]);
+        if ($invoiceId > 0) {
+            Capsule::table('tblinvoices')->where('id', $invoiceId)->update(['paymentmethod' => self::GATEWAY]);
+        }
+
         try {
             // the store already collected the money — record it and require Paid
             if ($invoiceId > 0) {
