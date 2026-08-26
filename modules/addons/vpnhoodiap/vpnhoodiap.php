@@ -84,7 +84,7 @@ function vpnhoodiap_activate(): array
         if (!$schema->hasTable('mod_vpnhood_iap_apps')) {
             $schema->create('mod_vpnhood_iap_apps', function ($table) {
                 $table->increments('id');
-                $table->string('store', 16); // googleplay | appstore | microsoft
+                $table->string('store', 16); // googleplay | appstore | microsoft | web (no store)
                 $table->string('package_name'); // android package / apple bundle id / ms store id
                 $table->text('oauth_client_ids')->nullable(); // comma separated aud allowlist for sign-in idTokens
                 $table->text('credentials')->nullable(); // encrypted JSON, store-specific (SA key / .p8 / AAD)
@@ -1410,7 +1410,8 @@ function vpnhoodiap_renderApps(IapRepository $repo, string $modulelink, int $edi
     echo '<div class="form-group"><label>Package / Bundle Name</label>'
         . '<input type="text" name="package_name" class="form-control" required value="'
         . ($isEdit ? htmlspecialchars($app['package_name']) : '') . '">'
-        . '<p class="help-block">Android package name, Apple bundle id, or Microsoft Store id. Webhook and sign-in requests are matched to this app by it.</p></div>';
+        . '<p class="help-block">Android package name, Apple bundle id, or Microsoft Store id. Webhook and sign-in requests are matched to this app by it. '
+        . 'Pick store <code>web</code> for a direct-download build (own website, sideloaded APK): it registers the package so it can sign in, and needs no credentials — nothing can be purchased through it.</p></div>';
     echo '<div class="form-group"><label>OAuth Client IDs (comma separated)</label>'
         . '<input type="text" name="oauth_client_ids" class="form-control" value="'
         . ($isEdit ? htmlspecialchars($app['oauth_client_ids'] ?? '') : '') . '">'

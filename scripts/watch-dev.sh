@@ -20,7 +20,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VH_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-SSH_KEY="${WHMCS_DEV_SSH_KEY:-$VH_ROOT/.user/account-dev.vpnhood.com/ssh.openssh}"
+SSH_KEY="${WHMCS_DEV_SSH_KEY:-$VH_ROOT/.user/ssh/ssh.openssh}"
 SSH_HOST="${WHMCS_DEV_SSH_HOST:-whmcsdev@webhost-ftps.vpnhood.com}"
 WEBROOT="/home/whmcsdev/web/whmcs-dev.vpnhood.com/public_html"
 # tests and dev deploys run ONLY against the dev box — never production (account.vpnhood.com)

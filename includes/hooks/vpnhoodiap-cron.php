@@ -111,9 +111,14 @@ add_hook('DailyCronJob', 1, function () {
             }
         }
 
-        // voided sweep: last 30 days
+        // voided sweep: last 20 days. Google's voidedpurchases API rejects any startTime
+        // older than its 30-day history window, measured on Google's clock when the request
+        // lands — asking for exactly now-30d fails by the seconds of cron drift (seen on
+        // production: "Start time must be within 30 days of data", every night). 20 days
+        // leaves a 10-day margin for drift and clock skew; the sweep is a nightly safety
+        // net behind the webhooks, so consecutive runs still overlap by ~20 days.
         try {
-            foreach ($adapter->listVoidedPurchaseKeys($app, time() - 30 * 86400) as $voidedKey) {
+            foreach ($adapter->listVoidedPurchaseKeys($app, time() - 20 * 86400) as $voidedKey) {
                 $row = Capsule::table('mod_vpnhood_iap_purchases')
                     ->where('store', $app['store'])->where('purchase_key', $voidedKey)->first();
                 if ($row === null || $row->status === 'refunded') {

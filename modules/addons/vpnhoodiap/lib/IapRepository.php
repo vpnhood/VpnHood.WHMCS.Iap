@@ -17,7 +17,14 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
  */
 class IapRepository
 {
-    public const STORES = ['googleplay', 'appstore', 'microsoft'];
+    /**
+     * Store ids an app row may carry. `web` is the odd one and deliberate: a direct-download
+     * build (our own site, a sideloaded APK) belongs to no store, but its package still has to
+     * be registered here or sign-in answers `unknown_app`. Such a row holds no credentials and
+     * no adapter, so it can never validate a purchase or receive a webhook — registration, and
+     * nothing else. It is an install-side label only: `web` is never a storeId on the wire.
+     */
+    public const STORES = ['googleplay', 'appstore', 'microsoft', 'web'];
     public const MODULE = 'vpnhoodiap';
 
     /** @throws \RuntimeException when the store id is unknown */

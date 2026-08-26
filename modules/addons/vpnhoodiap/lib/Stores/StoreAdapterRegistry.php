@@ -33,6 +33,9 @@ final class StoreAdapterRegistry
             'googleplay' => new GooglePlayAdapter(),
             'appstore'   => new AppStoreAdapter(),
             'microsoft'  => throw new ApiException("Store '$store' is not supported yet.", 501, 'store_not_supported'),
+            // registration-only: a direct-download build has no store to validate against, so a
+            // purchase or webhook claiming this "store" is a category error, not a missing feature
+            'web'        => throw new ApiException("'$store' is a direct-download build, not a store.", 400, 'unknown_store'),
             default      => throw new ApiException("Unknown store: $store", 400, 'unknown_store'),
         };
     }
