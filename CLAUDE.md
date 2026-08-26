@@ -38,7 +38,8 @@ the partner package (VpnHood.WHMCS.Partner).
 
 - Dev WHMCS + deploy tooling live in the sibling `VpnHood.WHMCS` repo:
   `scripts/deploy-dev.sh iap` deploys THIS repo's tree (env `IAP_REPO` overrides the
-  sibling path). SSH key + admin credentials: `<Vh root>/.user/account-dev.vpnhood.com/`.
+  sibling path). SSH key: `<Vh root>/.user/ssh/ssh.openssh`; admin credentials:
+  `<Vh root>/.user/account-dev.vpnhood.com/secrets.json`.
 - Integration tests follow the hub repo's `tests/integration` style: upload
   `.test.php` over SSH, run with the server's PHP, assert via localAPI reads.
   All writes in tests go through localAPI — never raw INSERT/UPDATE on core tables.

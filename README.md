@@ -4,12 +4,9 @@
 orders — and delivers VpnHood access codes through the install's own provisioning
 module.**
 
-Supported stores: **Google Play** (first), **Apple App Store** and **Microsoft Store**
-(planned). The store remains the merchant of record; WHMCS becomes the single system of
-record for customers, orders, invoices, renewals and refunds.
-
-> ⚠️ **Status: in development.** The module skeleton (admin UI, tables, fail-closed
-> endpoints) is complete; the Google Play purchase pipeline is being built.
+Supported stores: **Google Play** and **Apple App Store** (implemented); **Microsoft
+Store** (planned). The store remains the merchant of record; WHMCS becomes the single
+system of record for customers, orders, invoices, renewals and refunds.
 
 ## How it works
 
@@ -21,7 +18,7 @@ sequenceDiagram
     participant WHMCS as WHMCS core
     participant Prov as Provisioning module
 
-    App->>Iap: POST /auth/sessions (Google/Apple id token)
+    App->>Iap: POST /auth/sessions (Google/Apple id token, or email + password)
     App->>Store: buy subscription
     App->>Iap: POST /billing/purchases {store, proof}
     Iap->>Store: re-validate against the store API
@@ -31,7 +28,8 @@ sequenceDiagram
     Store-->>Iap: webhooks: renew / cancel / refund / expire
 ```
 
-1. **Sign-in** — the app posts a Google/Apple id token to `POST /auth/sessions`; the
+1. **Sign-in** — the app posts a Google/Apple id token — or the WHMCS client-area
+   email + password, with WHMCS two-factor auth honoured — to `POST /auth/sessions`; the
    module creates or links a WHMCS client by email (verified emails only) and returns an
    opaque session token.
 2. **Purchase** — the app buys in the store and posts its proof (`POST /billing/purchases`); the
@@ -42,6 +40,25 @@ sequenceDiagram
 3. **Lifecycle** — store webhooks (`webhook.php`) drive renewals, cancellations and
    refunds through the same WHMCS-native paths (pay renewal invoice / `ModuleSuspend` /
    `ModuleTerminate`).
+4. **Client area** — a codes page in the WHMCS client area lets signed-in customers
+   view and manage the access codes their account holds.
+
+## Accounts & access codes
+
+An account **holds** codes rather than owning one: a store subscription's code, codes
+bought on the portal's own website, and the one code the person typed and uploaded all
+live in a keyring. The app is always told a single code — `GET /v1/account` recomputes
+the best candidate on every read (a paid-now store subscription first, then live web
+billing, then the uploaded code, then the rest) — while the full list lives in the
+client-area codes page, with reversible *keep for later* / *allow again* controls. A
+device whose code the access server refuses reports one bit back and is served the next
+candidate; the system never deletes a code.
+
+Account deletion (`DELETE /v1/account`, or the client-area page so it works without the
+app installed) anonymizes the customer, cancels web billing at the end of its paid
+period, and **never touches a store subscription** — Restore Purchases from a new
+account re-attaches it. The full contract and reasoning live in
+[docs/PORTAL-API.md](docs/PORTAL-API.md).
 
 ## Provisioning-agnostic by design
 
@@ -78,12 +95,18 @@ packages copy the module verbatim and never restamp it.
 
 ```text
 modules/addons/vpnhoodiap/          the addon: admin UI, tables, api.php, webhook.php
+modules/addons/vpnhoodiap/lib/      Auth (Google/Apple id tokens), Stores (GooglePlay /
+                                    AppStore adapters), Provisioning (orders, accounts,
+                                    keyring, deletion), Controllers (api.php routing)
 modules/addons/vpnhoodiap/openapi.json  the Portal API contract, served at /openapi.json
 docs/PORTAL-API.md                  the Portal API, explained
 modules/gateways/vpnhoodiappay.php     bookkeeping gateway (store is the merchant of record)
-includes/hooks/vpnhoodiap-suppress-emails.php   aborts WHMCS invoice mail for store-paid invoices
+includes/hooks/                     WHMCS-level hooks: cron, gateway hiding, product
+                                    actions, refund marks, invoice-mail suppression,
+                                    verification gate
 scripts/set-version.sh              propagate ./VERSION into the module
 scripts/test-dev.sh                 run the test suites against the dev WHMCS
+scripts/watch-dev.sh                live tail of the module pipeline on the dev WHMCS
 tests/unit/                         dependency-free unit tests (pure PHP, no WHMCS)
 tests/integration/                  *.test.php run inside the dev WHMCS over SSH
 ```
@@ -99,8 +122,17 @@ Everything extracts at the WHMCS root.
 - The bookkeeping gateway `vpnhoodiappay` activated but **never shown on the order form**.
 - Products for each sellable plan, using `vpnhoodstore` (hub) or `vpnhoodpartner`
   (partner), mapped in the addon's **Catalog** tab.
-- Per store app: the store credentials (Google service-account JSON, Apple keys, …)
-  entered in the addon's **Apps** tab.
+- **Every app package must be registered** in the addon's **Apps** tab, or sign-in answers
+  `unknown_app` — including builds that sell nothing. A direct-download build (own
+  website, sideloaded APK) is registered under store `web`: no credentials, no adapter,
+  no webhook; it only lets the package sign in.
+- Per store app, in the addon's **Apps** tab: the package/bundle id, the OAuth client
+  ids sign-in tokens may be issued to, and the store credentials —
+  **Google Play**: the Play service-account JSON, plus the Pub/Sub push service account
+  whose OIDC token authenticates RTDN webhooks;
+  **App Store**: the App Store Server API key as `{issuerId, keyId, privateKey}` (the
+  In-App Purchase `.p8`) — ASSN V2 notifications authenticate themselves through their
+  JWS x5c chain, pinned to Apple Root CA-G3.
 
 ## Development & testing
 
