@@ -27,8 +27,12 @@ this same document and the apps will not know the difference.
 | --- | --- | :---: | --- |
 | `GET` | `/openapi.json` | — | This API's OpenAPI 3.1 document |
 | `GET` | `/v1/system/status` | — | Is the portal installed, active and healthy |
-| `POST` | `/v1/auth/sessions` | — | Sign in → session token. Three request forms: Google/Apple id token, the WHMCS client-area password, or a second-factor challenge completion |
+| `POST` | `/v1/auth/sessions` | — | Sign in → session token. Four request forms: Google/Apple id token, the WHMCS client-area password, a second-factor challenge completion, or a restore-credential assertion |
 | `DELETE` | `/v1/auth/sessions/current` | ✔ | Sign out (revokes the token server-side) |
+| `POST` | `/v1/auth/restore-credentials/registration-options` | ✔ | WebAuthn creation options for the device's restore key (zero-tap sign-in restoration) |
+| `POST` | `/v1/auth/restore-credentials` | ✔ | Store the restore key the device registered → `{credentialId}` |
+| `DELETE` | `/v1/auth/restore-credentials?credentialId=` | ✔ | Retire one restore key (a device signing out) |
+| `POST` | `/v1/auth/restore-credentials/assertion-options` | — | WebAuthn request options for the zero-tap sign-in |
 | `GET` | `/v1/account` | ✔ | The complete account snapshot: identity, THE one access code serving it, and the store subscription behind it |
 | `DELETE` | `/v1/account` | ✔ | Delete the account everywhere. Never touches a store subscription |
 | `PUT` | `/v1/account/access-code` | ✔ | Fill, replace or empty the account's ONE upload slot (`accessCode: null` empties it). Answers 204 — the code is taken on trust |
@@ -247,13 +251,49 @@ keep the money for.
 | `purchase_in_progress` | 503 | Another request is redeeming this same purchase; retry shortly |
 | `internal_error` | 500 | Unexpected; recorded in the module log |
 
+### The restore-credential form (zero-tap sign-in restoration)
+
+Android's Restore Credentials (a Play requirement for sign-in apps from April 2027)
+carries a device-held key pair through device-to-device transfer and cloud restore, so
+the app on a person's NEW phone signs back in with no interaction at all. The portal is
+the relying party of a deliberately small WebAuthn subset:
+
+- **Register** (after any interactive sign-in): `POST
+  /v1/auth/restore-credentials/registration-options` hands the app a `requestJson` it
+  feeds VERBATIM to the platform credential API; the result goes back verbatim as
+  `{responseJson}` to `POST /v1/auth/restore-credentials`, which stores the credential's
+  public key against the account and answers `{credentialId}`. Attestation is always
+  `none` on this credential type, so the signed-in session is the trust root — which is
+  why registration requires one. Each account keeps its newest few keys (one per device);
+  the oldest fall off.
+
+- **Sign in** (the restored device): `POST /v1/auth/restore-credentials/assertion-options`
+  (anonymous, app-gated) hands out `requestJson`; the platform's assertion goes to `POST
+  /v1/auth/sessions` as `{assertionResponseJson, packageName}` and answers the same
+  session shape as every other form. Verification is the WebAuthn ceremony: type,
+  single-use purpose-bound challenge, rpId hash (the portal's own host, from SystemURL —
+  never from request headers), then the ES256 signature over
+  `authenticatorData || sha256(clientDataJSON)`. The client origin (on Android, the app's
+  signing-key hash) is captured at registration and must match at assertion. User
+  presence is deliberately NOT required — silence is the feature. Every failure is ONE
+  neutral 401 `invalid_restore_credential`; the reason goes to the audit log only.
+
+- **Sign out**: the device retires its own key — `DELETE
+  /v1/auth/restore-credentials?credentialId=…` alongside clearing it locally. Account
+  deletion drops every key: none of them may survive a person who asked to be gone.
+
+This form never creates an account: the credential was registered over a session, so its
+user exists by construction.
+
 Unrecognised codes should be treated as a generic failure of their status class — new
 ones may be added.
 
 **Rate limits** (sliding window, per IP): `POST /v1/auth/sessions` 20 per 5 min,
 `POST /v1/billing/purchases` 30 per 5 min, `GET /v1/system/status` 30 per min,
-`DELETE /v1/account` 5 per 5 min, `PUT /v1/account/access-code` 10 per 5 min, and
-`POST /v1/account/access-code/rejected` 30 per 5 min — each per IP address and per account.
+`DELETE /v1/account` 5 per 5 min, `PUT /v1/account/access-code` 10 per 5 min,
+`POST /v1/account/access-code/rejected` 30 per 5 min, the restore-credential
+registration pair 10 per 5 min, and its assertion-options 20 per 5 min — each per IP
+address and per account.
 
 ## The ranking, and the one upload slot
 

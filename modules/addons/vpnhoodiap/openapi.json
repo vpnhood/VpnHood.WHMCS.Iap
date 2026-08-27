@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "VpnHood Portal API",
-    "version": "1.0",
+    "version": "1.1",
     "summary": "The API a VpnHood app uses to sign in, redeem an app-store purchase, and receive its access code.",
     "description": "The Portal API is the contract between a VpnHood client app and whatever backend runs the customer's account. It is deliberately backend-neutral: it speaks of sessions, accounts, products, purchases, subscriptions and access codes, and never of the billing system behind them. Today it is implemented by the `vpnhoodiap` WHMCS addon; a different backend can implement the same document without any client change.\n\n**Flow.** The app signs in with an identity token from Google or Apple (`POST /v1/auth/sessions`) and receives an opaque session token. It buys in the app store, then posts the store's proof (`POST /v1/billing/purchases`); the portal re-validates that proof directly with the store and provisions the subscription — one synchronous call, no polling loop. The app then refreshes `GET /v1/account`, the one snapshot that carries the delivered access code and the subscription. Store webhooks drive renewals, cancellations and refunds afterwards, so that snapshot is always the current truth.\n\n**Trust.** Proofs and identity tokens are pointers, never evidence: every one is re-verified against the issuing store or identity provider on arrival. A purchase must carry the signed-in user's own attribution id (`obfuscatedAccountId` on Google, `appAccountToken` on Apple), so a stolen store token cannot be redeemed into another account.",
     "license": {
@@ -146,6 +146,13 @@
                     "code": "123456",
                     "packageName": "com.vpnhood.connect.android"
                   }
+                },
+                "restoreCredential": {
+                  "summary": "Restore-credential assertion (zero-tap)",
+                  "value": {
+                    "assertionResponseJson": "{\"id\":\"pKs3...\",\"response\":{\"clientDataJSON\":\"eyJ0eXBlIjoid2ViYXV0aG4uZ2V0Iiw...\",\"authenticatorData\":\"...\",\"signature\":\"...\"},\"type\":\"public-key\"}",
+                    "packageName": "com.vpnhood.connect.android"
+                  }
                 }
               }
             }
@@ -188,7 +195,7 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "401": {
-            "description": "Provider form: the id token is missing, malformed, expired, or not issued to this app (`invalid_id_token`). Password form: `invalid_credentials` — deliberately ONE answer for an unknown email, a wrong password and a never-set password, so the endpoint cannot be used to scan which emails exist; setting or recovering the password on the account website is the way in. Challenge form: `invalid_code` while attempts remain, `invalid_challenge` when the token is expired or spent (start over from the password).",
+            "description": "Provider form: the id token is missing, malformed, expired, or not issued to this app (`invalid_id_token`). Password form: `invalid_credentials` — deliberately ONE answer for an unknown email, a wrong password and a never-set password, so the endpoint cannot be used to scan which emails exist; setting or recovering the password on the account website is the way in. Challenge form: `invalid_code` while attempts remain, `invalid_challenge` when the token is expired or spent (start over from the password). Restore-credential form: `invalid_restore_credential` - ONE answer for every failure mode (unknown key, spent challenge, wrong signature, foreign origin); re-register after the next interactive sign-in.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -582,6 +589,200 @@
           }
         }
       }
+    },
+    "/v1/auth/restore-credentials/registration-options": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "createRestoreCredentialRegistrationOptions",
+        "summary": "Restore-key creation options",
+        "description": "WebAuthn creation options for registering the signed-in device's restore credential (Android Restore Credentials - zero-tap sign-in restoration). The device passes `requestJson` verbatim to its credential API and posts the result to POST /v1/auth/restore-credentials. The challenge inside is single-use and minutes-long; ask again when the registration was not completed in time.",
+        "responses": {
+          "200": {
+            "description": "The options document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreCredentialOptions"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "description": "Per-IP and per-account rate limit (`rate_limited`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/restore-credentials": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "createRestoreCredential",
+        "summary": "Register a restore key",
+        "description": "Stores the public key of the restore credential the device just created for the options from registration-options. Attestation is always `none` on this credential type, so the signed-in session is the trust root - which is why this endpoint requires one. Re-registering an existing credential replaces it in place; each account keeps its newest few keys and the oldest are dropped.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "responseJson"
+                ],
+                "properties": {
+                  "responseJson": {
+                    "type": "string",
+                    "description": "The WebAuthn registration response JSON produced by the device credential API, passed verbatim."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The key is stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreCredentialRegistered"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_restore_credential` - the response does not verify (spent or foreign challenge, wrong rp, unsupported key, mismatched id). Ask for fresh options and register again.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "description": "Per-IP and per-account rate limit (`rate_limited`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "deleteRestoreCredential",
+        "summary": "Retire a restore key",
+        "description": "Deletes one restore credential of the signed-in account - a device retiring its own key on sign-out, alongside clearing it locally. Idempotent: an unknown id also answers 204.",
+        "parameters": [
+          {
+            "name": "credentialId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The credential id the registration answered."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The key is gone."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/v1/auth/restore-credentials/assertion-options": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "createRestoreCredentialAssertionOptions",
+        "summary": "Restore-key request options",
+        "description": "WebAuthn request options for the zero-tap sign-in: the device passes `requestJson` verbatim to its credential API and sends the resulting assertion as the restore-credential form of POST /v1/auth/sessions. Anonymous by nature - nobody is signed in yet - so it is app-gated and rate-limited like sign-in itself.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "packageName"
+                ],
+                "properties": {
+                  "packageName": {
+                    "type": "string",
+                    "description": "The app's package name (Android) or bundle id (iOS)."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The options document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreCredentialOptions"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "description": "The package name is not a registered app (`unknown_app`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Per-IP rate limit (`rate_limited`).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -686,7 +887,7 @@
         "example": "googleplay"
       },
       "SignInRequest": {
-        "description": "One of three forms, told apart by their fields. The provider form signs in with an id token and creates the account for a new email. The password form checks the WHMCS client-area password and NEVER creates an account — it only signs into one that already exists; when a second factor is due it answers 200 with a challenge instead of a session. The challenge form completes that challenge with the authenticator code or the backup code.",
+        "description": "One of four forms, told apart by their fields. The provider form signs in with an id token and creates the account for a new email. The password form checks the WHMCS client-area password and NEVER creates an account - it only signs into one that already exists; when a second factor is due it answers 200 with a challenge instead of a session. The challenge form completes that challenge with the authenticator code or the backup code. The restore-credential form signs in with a WebAuthn assertion from a restore key the device carried over from its predecessor (zero-tap sign-in restoration) - sign-in only, silent by design.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/ProviderSignIn"
@@ -696,6 +897,9 @@
           },
           {
             "$ref": "#/components/schemas/ChallengeSignIn"
+          },
+          {
+            "$ref": "#/components/schemas/RestoreCredentialSignIn"
           }
         ]
       },
@@ -1133,6 +1337,47 @@
               }
             ],
             "description": "Present exactly when a store subscription serves the account."
+          }
+        }
+      },
+      "RestoreCredentialSignIn": {
+        "type": "object",
+        "required": [
+          "assertionResponseJson",
+          "packageName"
+        ],
+        "properties": {
+          "assertionResponseJson": {
+            "type": "string",
+            "description": "The WebAuthn authentication response JSON produced by the device's restore credential for the challenge handed out by POST /v1/auth/restore-credentials/assertion-options, passed verbatim."
+          },
+          "packageName": {
+            "type": "string",
+            "description": "The app's package name (Android) or bundle id (iOS)."
+          }
+        }
+      },
+      "RestoreCredentialOptions": {
+        "type": "object",
+        "required": [
+          "requestJson"
+        ],
+        "properties": {
+          "requestJson": {
+            "type": "string",
+            "description": "A WebAuthn options document (creation options from registration-options, request options from assertion-options) as a JSON string the device credential API consumes VERBATIM. The server owns the challenge inside it: single-use, minutes-long, bound to its ceremony."
+          }
+        }
+      },
+      "RestoreCredentialRegistered": {
+        "type": "object",
+        "required": [
+          "credentialId"
+        ],
+        "properties": {
+          "credentialId": {
+            "type": "string",
+            "description": "The registered credential's id (base64url) - the handle DELETE /v1/auth/restore-credentials retires on sign-out."
           }
         }
       }

@@ -362,6 +362,10 @@ class AccountDeletionService
     {
         Capsule::table('mod_vpnhood_iap_sessions')->where('user_id', $userId)->delete();
         Capsule::table('mod_vpnhood_iap_identities')->where('user_id', $userId)->delete();
+        // the device-held restore keys must die with the account: any one of them
+        // could silently mint a session for a person who asked to be gone
+        Capsule::table('mod_vpnhood_iap_restore_credentials')->where('user_id', $userId)->delete();
+        Capsule::table('mod_vpnhood_iap_restore_challenges')->where('user_id', $userId)->delete();
         // a fingerprint of somebody's credential, keyed by the id of a person who no longer exists
         Capsule::table('mod_vpnhood_iap_code_rejections')->where('user_id', $userId)->delete();
         // The purchase ledger keeps user_id as a DEAD pointer on purpose: the person it

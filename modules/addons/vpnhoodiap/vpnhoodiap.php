@@ -35,7 +35,7 @@ function vpnhoodiap_config(): array
     return [
         'name'        => 'VpnHood! In-App Purchase',
         'description' => 'Processes app-store purchases (Google Play / Apple / Microsoft) into WHMCS clients, orders and paid invoices, delivering VpnHood access codes through the install\'s provisioning module.',
-        'version'     => '1.2.1',
+        'version'     => '1.3.0',
         'author'      => 'VpnHood',
         'fields'      => [
             'AdminAlertEmail' => [
@@ -257,6 +257,7 @@ function vpnhoodiap_activate(): array
         vpnhoodiap_migrateToServerChosenCode();
         vpnhoodiap_migrateOffRemovedCodePark();
         vpnhoodiap_migrateToPasswordSignIn();
+        vpnhoodiap_migrateToRestoreCredentials();
         vpnhoodiap_migrateToOneImportSlot();
         vpnhoodiap_migrateToKeyring();
         vpnhoodiap_ensureAdminAccess();
@@ -402,6 +403,7 @@ function vpnhoodiap_upgrade(array $vars): void
     vpnhoodiap_migrateToServerChosenCode();
     vpnhoodiap_migrateOffRemovedCodePark();
     vpnhoodiap_migrateToPasswordSignIn();
+    vpnhoodiap_migrateToRestoreCredentials();
     vpnhoodiap_migrateToLinkedIdentities();
     vpnhoodiap_migrateToDisplayName();
     vpnhoodiap_migrateOffEmailVerificationParking();
@@ -839,6 +841,45 @@ function vpnhoodiap_migrateOffRemovedCodePark(): void
     if ($schema->hasTable('mod_vpnhood_iap_users') && $schema->hasColumn('mod_vpnhood_iap_users', 'default_cleared_at')) {
         $schema->table('mod_vpnhood_iap_users', function ($table) {
             $table->dropColumn('default_cleared_at');
+        });
+    }
+}
+
+/**
+ * Zero-tap sign-in restoration (Play policy, April 2027):
+ *
+ *  - restore_credentials — one row per device-held WebAuthn key: the public
+ *    key (PEM), the client origin captured at registration (the app's signing
+ *    key hash — an assertion from a differently-signed app is refused), and
+ *    the authenticator sign count (stored, never enforced: restores reset it).
+ *  - restore_challenges — the single-use nonces both ceremonies answer.
+ *    Hashed at rest, minutes-long, purpose-bound: a registration challenge
+ *    can never sign anybody in.
+ */
+function vpnhoodiap_migrateToRestoreCredentials(): void
+{
+    $schema = Capsule::schema();
+    if (!$schema->hasTable('mod_vpnhood_iap_restore_credentials')) {
+        $schema->create('mod_vpnhood_iap_restore_credentials', function ($table) {
+            $table->increments('id');
+            $table->integer('user_id')->unsigned()->index();
+            $table->string('credential_id', 191)->unique(); // base64url, the device's handle
+            $table->text('public_key_pem');
+            $table->string('origin', 191);
+            $table->integer('sign_count')->unsigned()->default(0);
+            $table->timestamp('created_at')->nullable();
+            $table->timestamp('last_used_at')->nullable();
+        });
+    }
+    if (!$schema->hasTable('mod_vpnhood_iap_restore_challenges')) {
+        $schema->create('mod_vpnhood_iap_restore_challenges', function ($table) {
+            $table->increments('id');
+            $table->string('purpose', 16); // register | assert
+            $table->char('challenge_hash', 64)->index();
+            $table->integer('user_id')->unsigned()->nullable();
+            $table->timestamp('expires_at')->nullable()->index();
+            $table->timestamp('used_at')->nullable();
+            $table->timestamp('created_at')->nullable();
         });
     }
 }
