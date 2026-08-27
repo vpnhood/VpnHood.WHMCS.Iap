@@ -133,6 +133,44 @@ Everything extracts at the WHMCS root.
   **App Store**: the App Store Server API key as `{issuerId, keyId, privateKey}` (the
   In-App Purchase `.p8`) — ASSN V2 notifications authenticate themselves through their
   JWS x5c chain, pinned to Apple Root CA-G3.
+- **Store webhooks wired up** (see below) — without them, renewals, cancellations and
+  refunds never reach WHMCS, so entitlements drift after the first purchase.
+
+## Wiring the store webhooks
+
+Each app row on the **Apps** tab shows its own **Webhook URL**
+(`webhook.php?store=…&t=<secret>`). The token in it is the first auth layer; the second
+is store-native proof, so a leaked URL alone buys nothing — but treat it as a secret
+anyway, and re-create the app row if it leaks.
+
+**Google Play (RTDN via Pub/Sub).** Play cannot call a URL directly; it publishes to a
+Pub/Sub topic and a push subscription delivers to you:
+
+1. In Google Cloud (the same project as the Play service account), create a topic, e.g.
+   `play-rtdn`.
+2. In **Play Console → your app → Monetize → Monetization setup → Real-time developer
+   notifications**, set that topic.
+3. Create a **push subscription** on the topic with the app row's Webhook URL as the
+   endpoint, and **enable authentication (OIDC)** with a service account of your choice.
+4. Enter that service account's email in the app row's **Pub/Sub Push Service Account**
+   field — the module verifies each push's OIDC token against it.
+5. Send a test notification from Play Console; it must appear in the addon's **Events**
+   tab.
+
+**App Store (App Store Server Notifications V2).** Apple calls the URL directly:
+
+1. In **App Store Connect → your app → General → App Information → App Store Server
+   Notifications**, paste the app row's Webhook URL as the **Production Server URL**.
+   Current App Store Connect configures **Version 2** notifications — there is no version
+   choice any more (V1 is deprecated); if an older UI still offers one, pick Version 2.
+2. Point the **Sandbox Server URL** at your *staging/dev* install's webhook URL —
+   sandbox and TestFlight purchases should exercise that install, not production. Leaving
+   it empty sends BOTH environments' notifications to the Production URL.
+3. No extra auth field: ASSN payloads are signed JWS whose x5c chain the module pins to
+   Apple Root CA-G3.
+
+**Microsoft Store** has no webhook at all; when implemented, entitlement drift is covered
+by client push plus daily re-validation instead.
 
 ## Development & testing
 
