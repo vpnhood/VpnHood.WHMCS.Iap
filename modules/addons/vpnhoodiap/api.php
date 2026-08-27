@@ -15,6 +15,13 @@
  *   POST   /v1/auth/sessions          sign in: provider id token, WHMCS password,
  *                                     or second-factor challenge completion (no auth)
  *   DELETE /v1/auth/sessions/current  sign out
+ *   POST   /v1/auth/restore-credentials/registration-options
+ *                                     WebAuthn creation options for the device's
+ *                                     restore key (zero-tap sign-in restoration)
+ *   POST   /v1/auth/restore-credentials  store the registered restore key
+ *   DELETE /v1/auth/restore-credentials  delete one restore key (?credentialId=…)
+ *   POST   /v1/auth/restore-credentials/assertion-options
+ *                                     WebAuthn request options (no auth)
  *   GET    /v1/account                the signed-in account: identity, THE one
  *                                     access code serving it, and the store
  *                                     subscription behind it — the whole snapshot
@@ -51,6 +58,7 @@
 use WHMCS\Module\Addon\VpnHoodIap\ApiException;
 use WHMCS\Module\Addon\VpnHoodIap\Auth\GoogleIdentityProvider;
 use WHMCS\Module\Addon\VpnHoodIap\Auth\SessionService;
+use WHMCS\Module\Addon\VpnHoodIap\Auth\RestoreCredentialService;
 use WHMCS\Module\Addon\VpnHoodIap\IapRepository;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountKeyService;
@@ -72,6 +80,8 @@ require_once __DIR__ . '/lib/Auth/GoogleIdentityProvider.php';
 require_once __DIR__ . '/lib/Jwk.php';
 require_once __DIR__ . '/lib/Auth/AppleIdentityProvider.php';
 require_once __DIR__ . '/lib/Auth/SessionService.php';
+require_once __DIR__ . '/lib/Cbor.php';
+require_once __DIR__ . '/lib/Auth/RestoreCredentialService.php';
 require_once __DIR__ . '/lib/Auth/PasswordSignInService.php';
 require_once __DIR__ . '/lib/Stores/Dto/PurchaseRecord.php';
 require_once __DIR__ . '/lib/Stores/Dto/StoreNotification.php';
@@ -100,6 +110,12 @@ const VPNHOODIAP_ROUTES = [
     '/v1/system/status'         => ['GET' => 'vpnhoodiap_getStatus'],
     '/v1/auth/sessions'         => ['POST' => 'vpnhoodiap_createSession'],
     '/v1/auth/sessions/current' => ['DELETE' => 'vpnhoodiap_deleteCurrentSession'],
+    '/v1/auth/restore-credentials' => [
+        'POST'   => 'vpnhoodiap_createRestoreCredential',
+        'DELETE' => 'vpnhoodiap_deleteRestoreCredential',
+    ],
+    '/v1/auth/restore-credentials/registration-options' => ['POST' => 'vpnhoodiap_createRestoreCredentialRegistrationOptions'],
+    '/v1/auth/restore-credentials/assertion-options'    => ['POST' => 'vpnhoodiap_createRestoreCredentialAssertionOptions'],
     '/v1/account'               => ['GET' => 'vpnhoodiap_getAccount', 'DELETE' => 'vpnhoodiap_deleteAccount'],
     '/v1/account/access-code'   => ['PUT' => 'vpnhoodiap_setAccessCode'],
     '/v1/account/access-code/rejected' => ['POST' => 'vpnhoodiap_reportAccessCodeRejected'],
@@ -190,6 +206,7 @@ function vpnhoodiap_getOpenApi(IapRepository $repo, array $request): array
  *   { provider, idToken, packageName }         provider id token (Google/Apple)
  *   { email, password, packageName }           the WHMCS client-area password
  *   { challengeToken, code, packageName }      second-factor completion
+ *   { assertionResponseJson, packageName }     restore-credential assertion (zero-tap)
  *
  * → 201 { accessToken, expiresAt, userId }
  * The password form may instead answer 200 { challenge } when a second factor
@@ -200,6 +217,9 @@ function vpnhoodiap_createSession(IapRepository $repo, array $request): array
     vpnhoodiap_rateLimit($repo, $request, 20, 300);
 
     $body = $request['body'];
+    if (array_key_exists('assertionResponseJson', $body)) {
+        return vpnhoodiap_restoreCredentialForm($repo, $request);
+    }
     if (array_key_exists('challengeToken', $body)) {
         return vpnhoodiap_passwordChallengeForm($repo, $request);
     }
@@ -347,6 +367,108 @@ function vpnhoodiap_sessionBody(array $user, ?string $store): array
 function vpnhoodiap_deleteCurrentSession(IapRepository $repo, array $request): array
 {
     (new SessionService())->revoke(vpnhoodiap_bearerToken());
+    return [204, null];
+}
+
+/**
+ * The restore-credential form of POST /auth/sessions — zero-tap sign-in
+ * restoration: a WebAuthn assertion signed by a key the device carried over
+ * from its predecessor. Sign-in only, never account creation: the credential
+ * was registered over a session, so its user exists by construction. ONE
+ * neutral 401 for every way it can fail; the exact reason goes to the audit
+ * log, never to the unauthenticated caller.
+ */
+function vpnhoodiap_restoreCredentialForm(IapRepository $repo, array $request): array
+{
+    $body = $request['body'];
+    $assertionResponseJson = (string) ($body['assertionResponseJson'] ?? '');
+    $packageName = (string) ($body['packageName'] ?? '');
+    if ($assertionResponseJson === '' || $packageName === '') {
+        throw new ApiException('assertionResponseJson and packageName are required.', 400, 'bad_request');
+    }
+    $app = $repo->findAppByPackageAnyStore($packageName);
+    if ($app === null) {
+        throw new ApiException('Unknown application.', 403, 'unknown_app');
+    }
+
+    try {
+        $user = (new RestoreCredentialService($repo->portalHost()))->signInUser($assertionResponseJson);
+    } catch (\RuntimeException $e) {
+        // exact reason goes to the audit log; the client only learns "invalid"
+        $repo->log(null, $request['route'], $request['ip'], 401, $packageName, $e->getMessage());
+        throw new ApiException('The restore credential is not valid.', 401, 'invalid_restore_credential');
+    }
+
+    return [201, vpnhoodiap_sessionBody($user, (string) $app['store'])];
+}
+
+/**
+ * POST /v1/auth/restore-credentials/registration-options — WebAuthn creation
+ * options for the signed-in user, as the verbatim requestJson the device API
+ * consumes. The challenge lives server-side, single-use and minutes-long.
+ */
+function vpnhoodiap_createRestoreCredentialRegistrationOptions(IapRepository $repo, array $request): array
+{
+    $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
+    vpnhoodiap_rateLimit($repo, $request, 10, 300, (int) $user['id']);
+    $requestJson = (new RestoreCredentialService($repo->portalHost()))->registrationOptions($user);
+    return [200, ['requestJson' => $requestJson]];
+}
+
+/**
+ * POST /v1/auth/restore-credentials — store the key a device just registered
+ * against the signed-in user. → 201 { credentialId }, the handle sign-out
+ * later deletes. Re-registering the same credential replaces it in place.
+ */
+function vpnhoodiap_createRestoreCredential(IapRepository $repo, array $request): array
+{
+    $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
+    vpnhoodiap_rateLimit($repo, $request, 10, 300, (int) $user['id']);
+    $responseJson = (string) ($request['body']['responseJson'] ?? '');
+    if ($responseJson === '') {
+        throw new ApiException('responseJson is required.', 400, 'bad_request');
+    }
+    try {
+        $credentialId = (new RestoreCredentialService($repo->portalHost()))->register($user, $responseJson);
+    } catch (\RuntimeException $e) {
+        $repo->log((int) $user['id'], $request['route'], $request['ip'], 400, null, $e->getMessage());
+        throw new ApiException('The restore credential registration is not valid.', 400,
+            'invalid_restore_credential');
+    }
+    return [201, ['credentialId' => $credentialId]];
+}
+
+/**
+ * POST /v1/auth/restore-credentials/assertion-options — WebAuthn request
+ * options for the zero-tap sign-in. Anonymous by nature (the whole point is
+ * that nobody is signed in yet), so app-gated and rate-limited like sign-in.
+ */
+function vpnhoodiap_createRestoreCredentialAssertionOptions(IapRepository $repo, array $request): array
+{
+    vpnhoodiap_rateLimit($repo, $request, 20, 300);
+    $packageName = (string) ($request['body']['packageName'] ?? '');
+    if ($packageName === '') {
+        throw new ApiException('packageName is required.', 400, 'bad_request');
+    }
+    if ($repo->findAppByPackageAnyStore($packageName) === null) {
+        throw new ApiException('Unknown application.', 403, 'unknown_app');
+    }
+    $requestJson = (new RestoreCredentialService($repo->portalHost()))->assertionOptions();
+    return [200, ['requestJson' => $requestJson]];
+}
+
+/**
+ * DELETE /v1/auth/restore-credentials?credentialId=… — a device retires its
+ * own restore key on sign-out. Scoped to the signed-in user; idempotent 204.
+ */
+function vpnhoodiap_deleteRestoreCredential(IapRepository $repo, array $request): array
+{
+    $user = (new SessionService())->resolve(vpnhoodiap_bearerToken());
+    $credentialId = (string) ($request['query']['credentialId'] ?? '');
+    if ($credentialId === '') {
+        throw new ApiException('credentialId is required.', 400, 'bad_request');
+    }
+    (new RestoreCredentialService($repo->portalHost()))->deleteCredential($user, $credentialId);
     return [204, null];
 }
 
@@ -674,7 +796,7 @@ function vpnhoodiap_redact(mixed $value): mixed
     if (!is_array($value)) {
         return $value;
     }
-    static $secretKeys = ['idtoken', 'proof', 'accesstoken', 'accesscode', 'token', 'password', 'code', 'challengetoken', 'newbackupcode'];
+    static $secretKeys = ['idtoken', 'proof', 'accesstoken', 'accesscode', 'token', 'password', 'code', 'challengetoken', 'newbackupcode', 'requestjson', 'responsejson', 'assertionresponsejson'];
     $redacted = [];
     foreach ($value as $key => $item) {
         $redacted[$key] = is_string($key) && in_array(strtolower($key), $secretKeys, true)

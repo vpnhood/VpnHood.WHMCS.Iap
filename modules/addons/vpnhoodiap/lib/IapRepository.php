@@ -194,6 +194,20 @@ class IapRepository
             ->where('setting', 'SystemURL')->value('value'), '/');
     }
 
+    /**
+     * The portal's host, used as the restore-credential relying-party id. One
+     * value per install, stable across requests — derived from SystemURL, never
+     * from request headers, so a spoofed Host can not mint a parallel rp.
+     */
+    public function portalHost(): string
+    {
+        $host = parse_url($this->systemUrl(), PHP_URL_HOST);
+        if (!is_string($host) || $host === '') {
+            throw new \RuntimeException('SystemURL carries no host.');
+        }
+        return strtolower($host);
+    }
+
     // -- catalog ------------------------------------------------------------
 
     /** @return array<int,array> joined with app + product names for the admin UI */

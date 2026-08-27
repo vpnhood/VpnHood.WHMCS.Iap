@@ -62,6 +62,40 @@ final class Jwk
         return $pems;
     }
 
+    /**
+     * Build a PEM public key from a P-256 point's raw x and y (32 bytes each,
+     * shorter accepted and left-padded). Used for WebAuthn restore-credential
+     * keys, which arrive as COSE EC2 coordinates.
+     *
+     * @throws \RuntimeException when a coordinate does not fit the curve field
+     */
+    public static function ecP256ToPem(string $x, string $y): string
+    {
+        foreach (['x' => &$x, 'y' => &$y] as $name => &$coordinate) {
+            $coordinate = ltrim($coordinate, "\x00");
+            if ($coordinate === '' || strlen($coordinate) > 32) {
+                throw new \RuntimeException("EC coordinate $name is not a P-256 field element.");
+            }
+            $coordinate = str_pad($coordinate, 32, "\x00", STR_PAD_LEFT);
+        }
+        unset($coordinate);
+
+        // AlgorithmIdentifier: id-ecPublicKey (1.2.840.10045.2.1) + prime256v1 (1.2.840.10045.3.1.7)
+        $algorithm = hex2bin('301306072a8648ce3d020106082a8648ce3d030107');
+        if ($algorithm === false) {
+            throw new \RuntimeException('Could not build the algorithm identifier.');
+        }
+
+        // subjectPublicKey: the uncompressed point 04 || x || y as a BIT STRING
+        $point = "\x04" . $x . $y;
+        $bitString = "\x03" . self::derLength(strlen($point) + 1) . "\x00" . $point;
+        $spki = self::derSequence($algorithm . $bitString);
+
+        return "-----BEGIN PUBLIC KEY-----\n"
+            . chunk_split(base64_encode($spki), 64, "\n")
+            . "-----END PUBLIC KEY-----\n";
+    }
+
     // ---------------------------------------------------------------- DER --
 
     /** INTEGER from unsigned big-endian bytes (leading 0x00 when the high bit is set). */
