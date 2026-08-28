@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "VpnHood Portal API",
-    "version": "1.1",
+    "version": "1.2",
     "summary": "The API a VpnHood app uses to sign in, redeem an app-store purchase, and receive its access code.",
     "description": "The Portal API is the contract between a VpnHood client app and whatever backend runs the customer's account. It is deliberately backend-neutral: it speaks of sessions, accounts, products, purchases, subscriptions and access codes, and never of the billing system behind them. Today it is implemented by the `vpnhoodiap` WHMCS addon; a different backend can implement the same document without any client change.\n\n**Flow.** The app signs in with an identity token from Google or Apple (`POST /v1/auth/sessions`) and receives an opaque session token. It buys in the app store, then posts the store's proof (`POST /v1/billing/purchases`); the portal re-validates that proof directly with the store and provisions the subscription — one synchronous call, no polling loop. The app then refreshes `GET /v1/account`, the one snapshot that carries the delivered access code and the subscription. Store webhooks drive renewals, cancellations and refunds afterwards, so that snapshot is always the current truth.\n\n**Trust.** Proofs and identity tokens are pointers, never evidence: every one is re-verified against the issuing store or identity provider on arrival. A purchase must carry the signed-in user's own attribution id (`obfuscatedAccountId` on Google, `appAccountToken` on Apple), so a stolen store token cannot be redeemed into another account.",
     "license": {
@@ -783,6 +783,87 @@
           }
         }
       }
+    },
+    "/v1/billing/plans": {
+      "get": {
+        "tags": [
+          "billing"
+        ],
+        "operationId": "listPlans",
+        "summary": "Priced plans for one WEB-distributed app",
+        "description": "The plans page of a **web-distributed** build renders from this: one entry per sellable plan with the price and a ready-made purchase URL. Everything is priced in ONE currency per response — the signed-in client's locked currency when there is one, the portal's default otherwise — and each plan's purchase URL pins that same currency, so the price on the card and the price at checkout agree by construction.\n\nStore-distributed apps are refused with `403 store_not_supported`: their store prices their plans, and store policy forbids pointing users at an external purchase. The refusal is the server-side half of that rule; hiding the UI is the client-side half.\n\nAuthentication is OPTIONAL. Anonymous requests get the default currency. A Bearer session whose account has a linked billing profile is priced in that profile's locked currency. A bad token is still a loud `401` — silently pricing a signed-in user as anonymous would break the card/checkout match this endpoint exists to guarantee.",
+        "security": [
+          {
+            "portalSession": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "store",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/StoreId"
+            }
+          },
+          {
+            "name": "packageName",
+            "in": "query",
+            "required": true,
+            "description": "The app's package name.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "com.vpnhood.connect.android.web"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The sellable plans, shortest billing cycle first. Empty when the app has no priced plans.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Plan"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "store/packageName missing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A Bearer token was presented and is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Unknown app, or a store-distributed app asked for priced plans.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1378,6 +1459,44 @@
           "credentialId": {
             "type": "string",
             "description": "The registered credential's id (base64url) - the handle DELETE /v1/auth/restore-credentials retires on sign-out."
+          }
+        }
+      },
+      "Plan": {
+        "type": "object",
+        "description": "One sellable plan of a web-distributed app, priced and ready to buy. `purchaseUrl` opens the portal's checkout with this plan and this currency preselected — the app never assembles a purchase link itself.",
+        "required": [
+          "planId",
+          "billingPeriod",
+          "priceAmount",
+          "priceCurrency",
+          "purchaseUrl"
+        ],
+        "properties": {
+          "planId": {
+            "type": "string",
+            "description": "The catalog's stable plan identifier.",
+            "example": "premium-monthly"
+          },
+          "billingPeriod": {
+            "type": "string",
+            "description": "ISO-8601 duration of one billing cycle.",
+            "example": "P1M"
+          },
+          "priceAmount": {
+            "type": "string",
+            "description": "Decimal price per cycle, as the checkout will bill it.",
+            "example": "7.90"
+          },
+          "priceCurrency": {
+            "type": "string",
+            "description": "ISO 4217 code of priceAmount.",
+            "example": "USD"
+          },
+          "purchaseUrl": {
+            "type": "string",
+            "format": "uri",
+            "description": "Checkout URL with plan and currency preselected; open it in the system browser."
           }
         }
       }
