@@ -109,6 +109,9 @@ function vpnhoodiap_activate(): array
                 $table->integer('whmcs_product_id')->unsigned();
                 $table->integer('billing_cycle_months')->unsigned()->default(1); // 0 = one-time
                 $table->boolean('enabled')->default(true);
+                // sellable=0: redemption-only — purchases on the SKU still map
+                // (redeem + renewals) but the app no longer offers it for sale
+                $table->boolean('sellable')->default(true);
                 $table->unique(['app_id', 'store_product_id', 'store_base_plan_id'], 'iap_products_app_sku_plan');
             });
         }
@@ -260,6 +263,7 @@ function vpnhoodiap_activate(): array
         vpnhoodiap_migrateToRestoreCredentials();
         vpnhoodiap_migrateToOneImportSlot();
         vpnhoodiap_migrateToKeyring();
+        vpnhoodiap_migrateToSellableFlag();
         vpnhoodiap_ensureAdminAccess();
         vpnhoodiap_ensureIapGateway();
         vpnhoodiap_hideGatewayFromCheckout();
@@ -385,12 +389,29 @@ function vpnhoodiap_backfillUploadSlot(): void
 }
 
 /**
+ * Sellable vs redeemable (legacy-store migration): a catalog row must keep MAPPING
+ * a retired SKU's purchases (redeem + renewals) after the app stops OFFERING it.
+ * `enabled` gates everything; `sellable` gates only the public products listing.
+ */
+function vpnhoodiap_migrateToSellableFlag(): void
+{
+    $schema = Capsule::schema();
+
+    if ($schema->hasTable('mod_vpnhood_iap_products') && !$schema->hasColumn('mod_vpnhood_iap_products', 'sellable')) {
+        $schema->table('mod_vpnhood_iap_products', function ($table) {
+            $table->boolean('sellable')->default(true);
+        });
+    }
+}
+
+/**
  * Migration point for future versions (invoked by WHMCS when the version in
  * vpnhoodiap_config() increases). Keep migrations additive and idempotent.
  */
 function vpnhoodiap_upgrade(array $vars): void
 {
     vpnhoodiap_migrateToKeyring();
+    vpnhoodiap_migrateToSellableFlag();
     // installs activated before this ran (API/automation) have no access row and
     // are invisible in the Addons menu until someone notices
     vpnhoodiap_ensureAdminAccess();
@@ -1352,6 +1373,7 @@ function vpnhoodiap_output(array $vars): void
                     'whmcs_product_id'     => $productId,
                     'billing_cycle_months' => max(0, (int) ($_POST['billing_cycle_months'] ?? 1)),
                     'enabled'              => 1,
+                    'sellable'             => isset($_POST['sellable']) ? 1 : 0,
                 ]);
                 $notice = 'Catalog mapping added.';
                 $noticeType = 'success';
@@ -1359,6 +1381,11 @@ function vpnhoodiap_output(array $vars): void
             } elseif ($sub === 'product_delete') {
                 $repo->deleteProductMapping((int) $_POST['id']);
                 $notice = 'Catalog mapping removed.';
+                $noticeType = 'success';
+                $tab = 'catalog';
+            } elseif ($sub === 'product_sellable') {
+                $repo->setProductSellable((int) $_POST['id'], (int) ($_POST['sellable'] ?? 1) === 1);
+                $notice = 'Catalog mapping updated.';
                 $noticeType = 'success';
                 $tab = 'catalog';
             }
@@ -1479,9 +1506,9 @@ function vpnhoodiap_renderCatalog(IapRepository $repo, string $modulelink): void
 {
     $mappings = $repo->allProductMappings();
     echo '<table class="table table-striped"><thead><tr>'
-        . '<th>App</th><th>Store</th><th>Store Product</th><th>Base Plan</th><th>WHMCS Product</th><th>Cycle (months)</th><th>Enabled</th><th></th></tr></thead><tbody>';
+        . '<th>App</th><th>Store</th><th>Store Product</th><th>Base Plan</th><th>WHMCS Product</th><th>Cycle (months)</th><th>Enabled</th><th>Sellable</th><th></th></tr></thead><tbody>';
     if (empty($mappings)) {
-        echo '<tr><td colspan="8" class="text-center text-muted">No catalog mappings. Purchases for unmapped SKUs are parked, never delivered.</td></tr>';
+        echo '<tr><td colspan="9" class="text-center text-muted">No catalog mappings. Purchases for unmapped SKUs are parked, never delivered.</td></tr>';
     }
     foreach ($mappings as $m) {
         // the app implies the store, but a package name alone does not show it — and per-store
@@ -1494,6 +1521,14 @@ function vpnhoodiap_renderCatalog(IapRepository $repo, string $modulelink): void
             . '<td>#' . (int) $m['whmcs_product_id'] . ' ' . htmlspecialchars($m['product_name'] ?? '') . '</td>'
             . '<td>' . ((int) $m['billing_cycle_months'] === 0 ? 'one-time' : (int) $m['billing_cycle_months']) . '</td>'
             . '<td>' . ($m['enabled'] ? 'Yes' : 'No') . '</td>'
+            . '<td>' . ($m['sellable'] ? 'Yes' : 'No')
+            . ' <form method="post" action="' . $modulelink . '&tab=catalog" style="margin:0;display:inline">'
+            . vpnhoodiap_csrfField()
+            . '<input type="hidden" name="do" value="product_sellable">'
+            . '<input type="hidden" name="id" value="' . (int) $m['id'] . '">'
+            . '<input type="hidden" name="sellable" value="' . ($m['sellable'] ? 0 : 1) . '">'
+            . '<button class="btn btn-xs btn-default" title="sellable=No keeps redeeming old purchases; the app just stops offering the plan">'
+            . ($m['sellable'] ? 'Hide from app' : 'Offer in app') . '</button></form></td>'
             . '<td><form method="post" action="' . $modulelink . '&tab=catalog" style="margin:0">'
             . vpnhoodiap_csrfField()
             . '<input type="hidden" name="do" value="product_delete">'
@@ -1522,6 +1557,7 @@ function vpnhoodiap_renderCatalog(IapRepository $repo, string $modulelink): void
     }
     echo '</select> ';
     echo '<input type="number" name="billing_cycle_months" class="form-control" style="width:90px" value="1" min="0" title="months; 0 = one-time"> ';
+    echo '<label class="checkbox-inline" title="untick for a retired SKU that must still redeem"><input type="checkbox" name="sellable" checked> sellable</label> ';
     echo '<button class="btn btn-success">Add</button>';
     echo '</form>';
     echo '<p class="help-block">Mapping unit is the plan: (store product id, base plan) → (WHMCS product, cycle). A plan without a mapping is simply not sellable in that app.</p>';

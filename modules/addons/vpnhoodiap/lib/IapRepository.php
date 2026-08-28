@@ -239,6 +239,28 @@ class IapRepository
         Capsule::table('mod_vpnhood_iap_products')->where('id', $id)->delete();
     }
 
+    /** Flip whether the app offers this plan; redemption is untouched either way. */
+    public function setProductSellable(int $id, bool $sellable): void
+    {
+        Capsule::table('mod_vpnhood_iap_products')->where('id', $id)
+            ->update(['sellable' => $sellable ? 1 : 0]);
+    }
+
+    /**
+     * The distinct product ids one app OFFERS for sale: enabled AND sellable rows.
+     * A redemption-only row (sellable=0, e.g. a retired legacy SKU whose buyers
+     * still renew) keeps mapping purchases via findMappings but never appears here.
+     */
+    public function sellableProductIds(int $appId): array
+    {
+        $ids = Capsule::table('mod_vpnhood_iap_products')
+            ->where('app_id', $appId)
+            ->where('enabled', 1)
+            ->where('sellable', 1)
+            ->pluck('store_product_id')->all();
+        return array_values(array_unique(array_map('strval', $ids)));
+    }
+
     /** Enabled mappings for one app + store SKU (a bundle SKU may return several rows). */
     public function findMappings(int $appId, string $storeProductId, string $basePlanId): array
     {
