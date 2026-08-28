@@ -208,6 +208,12 @@ class IapRepository
         return strtolower($host);
     }
 
+    /** SystemURL without a trailing slash — the base every portal link hangs off. */
+    public function portalBaseUrl(): string
+    {
+        return rtrim($this->systemUrl(), '/');
+    }
+
     // -- catalog ------------------------------------------------------------
 
     /** @return array<int,array> joined with app + product names for the admin UI */
@@ -259,6 +265,60 @@ class IapRepository
             ->where('sellable', 1)
             ->pluck('store_product_id')->all();
         return array_values(array_unique(array_map('strval', $ids)));
+    }
+
+    /** The sellable rows themselves, shortest cycle first — the plans-page order. */
+    public function findSellableMappings(int $appId): array
+    {
+        return Capsule::table('mod_vpnhood_iap_products')
+            ->where('app_id', $appId)
+            ->where('enabled', 1)
+            ->where('sellable', 1)
+            ->orderBy('billing_cycle_months')
+            ->get()->map(fn ($row) => (array) $row)->all();
+    }
+
+    // -- pricing (read-only core access, the same rows the cart bills from) --
+
+    /** The install's default currency (id + code). */
+    public function defaultCurrency(): array
+    {
+        $row = Capsule::table('tblcurrencies')->where('default', 1)->first(['id', 'code'])
+            ?? Capsule::table('tblcurrencies')->orderBy('id')->first(['id', 'code']);
+        if ($row === null) {
+            throw new \RuntimeException('WHMCS has no currencies configured.');
+        }
+        return ['id' => (int) $row->id, 'code' => (string) $row->code];
+    }
+
+    /** The locked currency of one client, or null when client or currency is gone. */
+    public function clientCurrency(int $clientId): ?array
+    {
+        $currencyId = Capsule::table('tblclients')->where('id', $clientId)->value('currency');
+        if ($currencyId === null) {
+            return null;
+        }
+        $row = Capsule::table('tblcurrencies')->where('id', (int) $currencyId)->first(['id', 'code']);
+        return $row === null ? null : ['id' => (int) $row->id, 'code' => (string) $row->code];
+    }
+
+    /**
+     * One product's recurring price for one cycle in one currency, or null when
+     * that cycle is disabled there (WHMCS stores -1) or simply unpriced. The
+     * column name comes from PlanService's fixed cycle table, never from input.
+     */
+    public function productPrice(int $productId, string $cycleColumn, int $currencyId): ?string
+    {
+        $row = Capsule::table('tblpricing')
+            ->where('type', 'product')
+            ->where('relid', $productId)
+            ->where('currency', $currencyId)
+            ->first([$cycleColumn]);
+        $value = $row?->{$cycleColumn};
+        if ($value === null || (float) $value < 0) {
+            return null;
+        }
+        return number_format((float) $value, 2, '.', '');
     }
 
     /** Enabled mappings for one app + store SKU (a bundle SKU may return several rows). */

@@ -66,6 +66,7 @@ use WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountService;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\ClientProvisioner;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\DeliveryReader;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\EntitlementService;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\PlanService;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\StoreAdapterRegistry;
 
 // Bootstrap WHMCS (gives us Capsule, localAPI, models, etc.).
@@ -99,6 +100,7 @@ require_once __DIR__ . '/lib/Provisioning/ClientProvisioner.php';
 require_once __DIR__ . '/lib/Provisioning/OrderProvisioner.php';
 require_once __DIR__ . '/lib/Provisioning/DeliveryReader.php';
 require_once __DIR__ . '/lib/Provisioning/EntitlementService.php';
+require_once __DIR__ . '/lib/Provisioning/PlanService.php';
 
 /**
  * The routing table: resource → method → handler. A path that exists with a
@@ -120,6 +122,7 @@ const VPNHOODIAP_ROUTES = [
     '/v1/account/access-code'   => ['PUT' => 'vpnhoodiap_setAccessCode'],
     '/v1/account/access-code/rejected' => ['POST' => 'vpnhoodiap_reportAccessCodeRejected'],
     '/v1/billing/products'      => ['GET' => 'vpnhoodiap_listProducts'],
+    '/v1/billing/plans'         => ['GET' => 'vpnhoodiap_listPlans'],
     '/v1/billing/purchases'     => ['POST' => 'vpnhoodiap_createPurchase'],
 ];
 
@@ -725,6 +728,43 @@ function vpnhoodiap_listProducts(IapRepository $repo, array $request): array
     // Redemption-only rows (sellable=0: retired SKUs whose buyers still renew) are
     // deliberately absent — they map purchases, they are not offers.
     return [200, $repo->sellableProductIds((int) $app['id'])];
+}
+
+/**
+ * GET /v1/billing/plans?store=&packageName= — the PRICED plan list for one
+ * WEB-distributed app: planId, period, price and a ready-made purchase URL per
+ * plan, all in one currency. Store-distributed apps are refused (403): their
+ * store prices their plans, and store policy forbids external purchase links —
+ * this refusal is the server-side half of "web builds only".
+ *
+ * Bearer is OPTIONAL: anonymous gets the install's default currency; a
+ * signed-in account with a linked client is priced in that client's locked
+ * currency — and each plan's purchase URL pins the same currency, so the card
+ * and the checkout can never disagree. A bad token still fails loudly (401):
+ * silently pricing a signed-in user as anonymous would break exactly that match.
+ */
+function vpnhoodiap_listPlans(IapRepository $repo, array $request): array
+{
+    vpnhoodiap_rateLimit($repo, $request, 30, 60);
+
+    $storeId = (string) ($request['query']['store'] ?? '');
+    $packageName = (string) ($request['query']['packageName'] ?? '');
+    if ($storeId === '' || $packageName === '') {
+        throw new ApiException('store and packageName are required.', 400, 'bad_request');
+    }
+    $app = $repo->findAppByPackageName($storeId, $packageName);
+    if ($app === null) {
+        throw new ApiException('Unknown application.', 403, 'unknown_app');
+    }
+
+    $user = null;
+    $bearer = vpnhoodiap_bearerToken();
+    if ($bearer !== null) {
+        $user = (new SessionService())->resolve($bearer);
+        $request['logUserId'] = (int) $user['id'];
+    }
+
+    return [200, (new PlanService($repo))->plansForApp($app, $user)];
 }
 
 // ---------------------------------------------------------------- helpers --

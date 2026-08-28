@@ -38,6 +38,7 @@ this same document and the apps will not know the difference.
 | `PUT` | `/v1/account/access-code` | ✔ | Fill, replace or empty the account's ONE upload slot (`accessCode: null` empties it). Answers 204 — the code is taken on trust |
 | `POST` | `/v1/account/access-code/rejected` | ✔ | A device reports that the access server refused the code it was serving; applied only while that is still the account's current code |
 | `GET` | `/v1/billing/products?store=&packageName=` | — | The store product ids this app may sell in that store |
+| `GET` | `/v1/billing/plans?store=&packageName=` | optional | Priced plans + checkout URLs — **web-distributed apps only** |
 | `POST` | `/v1/billing/purchases` | ✔ | Redeem a store purchase; `GET /v1/account` then carries what it delivered |
 
 A path that exists but is called with the wrong method answers **405** with an `Allow`
@@ -80,6 +81,29 @@ session. An app has to render its plans page before anyone signs in, and gating 
 force every app to ship a hardcoded product list — the exact drift this catalog exists to
 prevent. It answers only **what** an app sells, never who buys it, and those product ids
 are already public in the store listing.
+
+### Priced plans for web-distributed apps
+
+`GET /v1/billing/plans` serves what a **web-distributed** build's plans page renders: one
+entry per sellable plan — `planId`, `billingPeriod` (ISO-8601), `priceAmount`,
+`priceCurrency`, and a ready-made `purchaseUrl` that opens the portal checkout with the
+plan preselected. The app opens that URL in the system browser and never assembles a
+purchase link itself.
+
+Two rules give the endpoint its shape:
+
+- **One currency per response, pinned through to checkout.** Anonymous requests are
+  priced in the portal's default currency; a Bearer session whose account has a linked
+  billing profile is priced in that profile's locked currency. Whichever it is, every
+  `purchaseUrl` carries the same currency — the price on the card and the price at
+  checkout agree by construction, so the card can never promise what the invoice won't
+  keep. (A presented-but-invalid token is a loud `401`, never a silent anonymous
+  fallback, for the same reason.)
+- **Store-distributed apps are refused** (`403 store_not_supported`). Their store prices
+  their plans, and store policy forbids pointing users at an external purchase. The app
+  hides the purchase-on-web UI on store builds; this refusal is the server-side half of
+  the same rule.
+
 
 Some proxies strip `Authorization`; the same token is also accepted as
 `X-Portal-Token: <token>`. The official client sends both.
