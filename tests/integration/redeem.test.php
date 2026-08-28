@@ -2,7 +2,8 @@
 /**
  * redeem.test.php — the whole redemption pipeline inside the real dev WHMCS,
  * with a FAKE store adapter (no Google): binding guard, catalog gate,
- * unverified-email parking, happy-path provisioning through a real
+ * legacy-purchase adoption (temporary migration), unverified-email parking,
+ * happy-path provisioning through a real
  * vpnhoodstore product (AddOrder → AddInvoicePayment → AcceptOrder →
  * DeliveryReader), idempotent replay, finalize-after-success.
  *
@@ -188,8 +189,17 @@ $createdOrderIds = [];
 $erasedUserIds = [];
 
 try {
-    // ---- 1. binding guard: someone else's purchase token → 403, nothing placed
-    $foreign = makeRecord(['obfuscatedUid' => IapRepository::uuidV4(), 'purchaseKey' => "itest-foreign-$marker"]);
+    // ---- 1. binding guard: a purchase carrying a LIVE account's uid, replayed
+    // by another session → 403, nothing placed. (A uid matching NO account is
+    // the temporary legacy-adoption path — section 10.)
+    $victimUid = IapRepository::uuidV4();
+    Capsule::table('mod_vpnhood_iap_users')->insert([
+        'provider' => 'google', 'provider_subject' => "$marker-victim",
+        'email' => "victim-$marker@vpnhood.itest", 'email_verified_claim' => 1,
+        'client_id' => null, 'external_uid' => $victimUid,
+        'created_at' => $now, 'updated_at' => $now,
+    ]);
+    $foreign = makeRecord(['obfuscatedUid' => $victimUid, 'purchaseKey' => "itest-foreign-$marker"]);
     try {
         $service->redeem($app, $foreign, $repo->getUser($linkedUserId), new FakeStoreAdapter($foreign));
         bad('cross-user purchase was accepted');
@@ -526,6 +536,97 @@ try {
         [$renewal->purchaseKey])['user_id'] === $erasedUserId)
         ? ok('refused take-over left the ledger row untouched')
         : bad('refused take-over still moved the row');
+
+    // ---- 10. TEMPORARY legacy-store migration: a purchase sold before this
+    // backend existed (unknown to the ledger, uid matching no module account)
+    // is ADOPTED by the signed-in account and provisions a fresh code. Remove
+    // this section together with EntitlementService::adoptLegacyPurchase once
+    // the legacy store is drained.
+    $adopterUserId = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
+        'provider' => 'google', 'provider_subject' => "$marker-adopter",
+        'email' => BUYER_EMAIL, 'email_verified_claim' => 1,
+        'client_id' => (int) $buyer['id'], 'external_uid' => IapRepository::uuidV4(),
+        'created_at' => $now, 'updated_at' => $now,
+    ]);
+    $legacy = makeRecord([
+        'obfuscatedUid' => IapRepository::uuidV4(), // the retired backend's uid — matches nobody
+        'purchaseKey'   => "itest-legacy-$marker",
+        'storeOrderId'  => 'ITEST.LEGACY-' . strtoupper(bin2hex(random_bytes(4))),
+        'acknowledged'  => true, // bought long ago
+    ]);
+    $legacyAdapter = new FakeStoreAdapter($legacy);
+    $adopted = $service->redeem($app, $legacy, $repo->getUser($adopterUserId), $legacyAdapter);
+    ($adopted['state'] === 'provisioned' && is_string($adopted['accessCode']) && $adopted['accessCode'] !== '')
+        ? ok('legacy purchase adopted: provisioned with a fresh access code')
+        : bad('legacy adoption failed: ' . json_encode($adopted));
+    $legacyRow = one($db, 'SELECT user_id, whmcs_order_id FROM mod_vpnhood_iap_purchases WHERE purchase_key=?',
+        ["itest-legacy-$marker"]);
+    ((int) $legacyRow['user_id'] === $adopterUserId)
+        ? ok('ledger row attributed to the adopting account')
+        : bad('legacy row not attributed: ' . json_encode($legacyRow));
+    if ((int) $legacyRow['whmcs_order_id'] > 0) {
+        $createdOrderIds[] = (int) $legacyRow['whmcs_order_id'];
+    }
+    (one($db, "SELECT id FROM mod_vpnhood_iap_log WHERE action='purchase.legacy-adopted' AND request LIKE ?",
+        ["%itest-legacy-$marker%"]) !== null)
+        ? ok('adoption left its purchase.legacy-adopted audit row (the drain metric)')
+        : bad('no purchase.legacy-adopted log row');
+
+    // repeat restore rides the row-already-mine branch — same entitlement again
+    $adoptedAgain = $service->redeem($app, $legacy, $repo->getUser($adopterUserId), $legacyAdapter);
+    ($adoptedAgain['state'] === 'provisioned' && $adoptedAgain['accessCode'] === $adopted['accessCode'])
+        ? ok('repeat redeem of the adopted purchase returns the same entitlement')
+        : bad('adopted replay diverged: ' . json_encode($adoptedAgain));
+
+    // first adopter wins: any OTHER account replaying the same legacy token is refused
+    $rivalUserId = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
+        'provider' => 'google', 'provider_subject' => "$marker-rival",
+        'email' => "rival-$marker@vpnhood.itest", 'email_verified_claim' => 1,
+        'client_id' => null, 'external_uid' => IapRepository::uuidV4(),
+        'created_at' => $now, 'updated_at' => $now,
+    ]);
+    try {
+        $service->redeem($app, $legacy, $repo->getUser($rivalUserId), $legacyAdapter);
+        bad('a second account took over an already-adopted legacy purchase');
+    } catch (ApiException $e) {
+        $e->getHttpStatus() === 403
+            ? ok('an already-adopted legacy purchase stays with its first adopter (403)')
+            : bad('rival adoption refused with wrong status ' . $e->getHttpStatus());
+    }
+
+    // no stacking: an account already holding a live subscription may not adopt
+    // (the linked user still holds the live "second" purchase from 3b)
+    $stack = makeRecord([
+        'obfuscatedUid' => null, // legacy purchases may carry no uid at all
+        'purchaseKey'   => "itest-legacystack-$marker",
+        'acknowledged'  => true,
+    ]);
+    try {
+        $service->redeem($app, $stack, $repo->getUser($linkedUserId), new FakeStoreAdapter($stack));
+        bad('an account with a live subscription adopted a legacy purchase');
+    } catch (ApiException $e) {
+        $e->getHttpStatus() === 403
+            ? ok('adoption refused (403) for an account that already holds a live subscription')
+            : bad('stacking adoption refused with wrong status ' . $e->getHttpStatus());
+    }
+
+    // a uid-less legacy purchase clears the guard for a fresh account — parked
+    // at the catalog gate here: the unmapped SKU proves the 403 did NOT fire,
+    // without placing another real order
+    $uidless = makeRecord([
+        'obfuscatedUid'  => null,
+        'purchaseKey'    => "itest-legacynulluid-$marker",
+        'storeProductId' => 'vh_not_mapped',
+        'acknowledged'   => true,
+    ]);
+    try {
+        $service->redeem($app, $uidless, $repo->getUser($rivalUserId), new FakeStoreAdapter($uidless));
+        bad('unmapped legacy SKU was provisioned');
+    } catch (ApiException $e) {
+        $e->getHttpStatus() === 422
+            ? ok('a uid-less legacy purchase clears the binding guard (parks at the catalog gate, not 403)')
+            : bad('uid-less legacy purchase hit status ' . $e->getHttpStatus() . ', expected 422');
+    }
 } finally {
     // -- cleanup -------------------------------------------------------------
     foreach ($createdOrderIds as $orderId) {
