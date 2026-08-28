@@ -43,12 +43,15 @@ class EntitlementService
     public function redeem(array $app, PurchaseRecord $record, ?array $sessionUser, StoreAdapterInterface $adapter): array
     {
         // ---- binding guard (client path): the purchase must carry the session
-        // user's own external uid, or someone is replaying a stolen token. One
-        // carve-out: a uid whose owner deleted their account — restore after
+        // user's own external uid, or someone is replaying a stolen token. Two
+        // carve-outs: a uid whose owner deleted their account — restore after
         // account deletion is the same person holding the same store account,
-        // and must not dead-end on a 403 (see relinkErasedOwner for the rules).
+        // and must not dead-end on a 403 (see relinkErasedOwner for the rules) —
+        // and, TEMPORARILY, a purchase sold before this backend existed
+        // (see adoptLegacyPurchase for the rules and the removal condition).
         if ($sessionUser !== null && $record->obfuscatedUid !== $sessionUser['external_uid']
             && !$this->relinkErasedOwner($record, $sessionUser)
+            && !$this->adoptLegacyPurchase($record, $sessionUser)
         ) {
             throw new ApiException('This purchase belongs to a different account.', 403, 'purchase_account_mismatch');
         }
@@ -401,6 +404,66 @@ class EntitlementService
             ['store' => $record->store, 'purchase' => (int) $row->id,
                 'erased_user' => (int) $row->user_id, 'new_user' => (int) $sessionUser['id']],
             'restore after account deletion: the ledger row was handed to the new account');
+        return true;
+    }
+
+    /**
+     * TEMPORARY (legacy-store migration): may THIS session adopt a purchase
+     * sold before this backend existed?
+     *
+     * Such a purchase carries either no account uid or the retired backend's
+     * uid — one that can never match a module account. Its buyer is real, still
+     * paying, and proves ownership the only way that matters: possession of the
+     * store account holding the receipt. Adoption accepts the purchase for the
+     * signed-in account when ALL of these hold:
+     *
+     *   1. the record's uid resolves to NO module account — a live owner is
+     *      the stolen-token case, and it keeps its 403;
+     *   2. the purchase is unknown to the ledger — every purchase this backend
+     *      sold or redeemed has a row, so an unknown key can only predate it.
+     *      (A row already adopted by this same account passes — repeat restore;
+     *      a row owned by anyone else is refused — the first adopter wins.)
+     *   3. the session account holds no other live subscription — adoption may
+     *      only migrate an entitlement, never stack a second one.
+     *
+     * Every adoption is logged as `purchase.legacy-adopted`, so "drained" is
+     * measured, not guessed. REMOVE this method and its call in redeem() once
+     * every legacy subscription has been redeemed or has lapsed.
+     */
+    private function adoptLegacyPurchase(PurchaseRecord $record, array $sessionUser): bool
+    {
+        // rule 1 — the uid must not belong to any module account
+        if ($record->obfuscatedUid !== null
+            && $this->repo->getUserByExternalUid($record->obfuscatedUid) !== null) {
+            return false;
+        }
+
+        // rule 2 — unknown to the ledger (a known row only passes when this
+        // same account already adopted it — repeat restore on a new device)
+        $row = Capsule::table('mod_vpnhood_iap_purchases')
+            ->where('store', $record->store)
+            ->where('purchase_key', $record->purchaseKey)
+            ->first(['user_id']);
+        if ($row !== null) {
+            return $row->user_id !== null && (int) $row->user_id === (int) $sessionUser['id'];
+        }
+
+        // rule 3 — the session account must not already hold a live subscription
+        $hasLiveSubscription = Capsule::table('mod_vpnhood_iap_purchases')
+            ->where('user_id', (int) $sessionUser['id'])
+            ->where('status', 'provisioned')
+            ->where(function ($query) {
+                $query->whereNull('expiry_time')->orWhere('expiry_time', '>', date('Y-m-d H:i:s'));
+            })
+            ->exists();
+        if ($hasLiveSubscription) {
+            return false;
+        }
+
+        $this->repo->log(null, 'purchase.legacy-adopted', '', 0,
+            ['store' => $record->store, 'purchase_key' => $record->purchaseKey,
+                'record_uid' => $record->obfuscatedUid, 'user' => (int) $sessionUser['id']],
+            'legacy-store migration: a pre-backend purchase was adopted by the signed-in account');
         return true;
     }
 
