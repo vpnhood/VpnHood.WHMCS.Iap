@@ -183,6 +183,24 @@ $linkedUserId = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
 ]);
 ok("fixtures created (app #$appId, mapping vh_itest/monthly → pid $pid, user #$linkedUserId)");
 
+// -- sellable vs redeemable: a retired SKU keeps mapping, stops being offered --
+Capsule::table('mod_vpnhood_iap_products')->insert([
+    'app_id'               => $appId,
+    'store_product_id'     => 'vh_itest_retired',
+    'store_base_plan_id'   => 'legacy-plan',
+    'whmcs_product_id'     => $pid,
+    'billing_cycle_months' => 1,
+    'enabled'              => 1,
+    'sellable'             => 0,
+]);
+$offered = $repo->sellableProductIds($appId);
+($offered === ['vh_itest'])
+    ? ok('products listing offers only the sellable SKU (retired one hidden)')
+    : bad('sellable listing wrong: ' . json_encode($offered));
+(count($repo->findMappings($appId, 'vh_itest_retired', 'legacy-plan')) === 1)
+    ? ok('the redemption path still maps the retired SKU (sellable=0 is listing-only)')
+    : bad('retired SKU lost its redemption mapping');
+
 $app = $repo->getApp($appId);
 $service = new EntitlementService($repo);
 $createdOrderIds = [];

@@ -720,18 +720,11 @@ function vpnhoodiap_listProducts(IapRepository $repo, array $request): array
     if ($app === null) {
         throw new ApiException('Unknown application.', 403, 'unknown_app');
     }
-    $items = [];
-    foreach ($repo->allProductMappings() as $mapping) {
-        if ((int) $mapping['app_id'] !== (int) $app['id'] || !$mapping['enabled']) {
-            continue;
-        }
-        // the store product id alone: the app asks its store to price it, and the store
-        // itself enumerates the base plans within a product — nothing else is consumed
-        $items[] = (string) $mapping['store_product_id'];
-    }
-    // array_values: array_unique keeps the original keys, and a gap would encode as a
-    // JSON object instead of the array this answers with
-    return [200, array_values(array_unique($items))];
+    // the store product ids alone: the app asks its store to price them, and the store
+    // itself enumerates the base plans within a product — nothing else is consumed.
+    // Redemption-only rows (sellable=0: retired SKUs whose buyers still renew) are
+    // deliberately absent — they map purchases, they are not offers.
+    return [200, $repo->sellableProductIds((int) $app['id'])];
 }
 
 // ---------------------------------------------------------------- helpers --
