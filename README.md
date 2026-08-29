@@ -100,6 +100,9 @@ modules/addons/vpnhoodiap/lib/      Auth (Google/Apple id tokens), Stores (Googl
                                     keyring, deletion), Controllers (api.php routing)
 modules/addons/vpnhoodiap/openapi.json  the Portal API contract, served at /openapi.json
 docs/PORTAL-API.md                  the Portal API, explained
+docs/IAP-GOOGLE-PLAY.md             store setup: Google Play (app owner's own accounts)
+docs/IAP-APPLE-APP-STORE.md         store setup: Apple App Store
+docs/IAP-MONEY.md                   how store sales appear in WHMCS billing
 modules/gateways/vpnhoodiappay.php     bookkeeping gateway (store is the merchant of record)
 includes/hooks/                     WHMCS-level hooks: cron, gateway hiding, product
                                     actions, refund marks, mail suppression (store
