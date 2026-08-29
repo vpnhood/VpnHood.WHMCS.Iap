@@ -98,6 +98,12 @@ class EntitlementService
                 $serviceStatus = (string) Capsule::table('tblhosting')
                     ->where('id', (int) $row['service_id'])->value('domainstatus');
                 if (in_array($serviceStatus, ['Active', 'Suspended'], true)) {
+                    // Persist the record's rolling facts before answering. A lapsed lineage that
+                    // just RESUBSCRIBED arrives on this same purchase_key carrying a new future
+                    // expiry; the reply below is honest either way, but the account snapshot reads
+                    // the LEDGER's expiry (isStoreStillCharging), so without this write the person
+                    // who just paid again stays unserved until a store notification happens by.
+                    $this->updateRow($row, ['last_error' => null], $record);
                     return $this->entitlementFor($record, (int) $row['service_id'], $row['created_at'] ?? null);
                 }
             }
