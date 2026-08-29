@@ -1,14 +1,16 @@
 <?php
 /**
- * suppress-emails.test.php — the EmailPreSend hook aborts WHMCS mail for records
- * that belong to the vpnhoodiappay gateway (invoice lifecycle AND the product welcome
- * email) and leaves every other invoice's and service's mail alone.
+ * suppress-emails.test.php — the EmailPreSend hook aborts WHMCS mail that must never
+ * be sent: records belonging to the vpnhoodiappay gateway (invoice lifecycle AND the
+ * product welcome email), and anything addressed to a client account deletion has
+ * anonymized. Every other invoice, service and client mails exactly as before.
  *
- * Runs ON the dev server. Creates two draft invoices for the test buyer via
- * localAPI (one on the vpnhoodiappay bookkeeping gateway, one on banktransfer),
- * fires the EmailPreSend hook point exactly as WHMCS's mailer does, asserts
- * abortsend, then cancels both invoices. No mail is actually sent at any
- * point (the hook is exercised directly; sendinvoice is off).
+ * Runs ON the dev server. Creates draft invoices for the test buyer via localAPI (one
+ * on the vpnhoodiappay bookkeeping gateway, one on banktransfer) plus a throwaway
+ * client carrying the deleted-<id>@anonymized.invalid address, fires the EmailPreSend
+ * hook point exactly as WHMCS's mailer does, asserts abortsend, then removes both.
+ * No mail is actually sent at any point (the hook is exercised directly; sendinvoice
+ * is off).
  */
 
 require __DIR__ . '/lib/common.php';
@@ -44,11 +46,11 @@ if ($iapInvoiceId > 0 && $otherInvoiceId > 0) {
 }
 
 /** Merge the hook-point results the way WHMCS's mailer consumes them. */
-function emailPreSendAborts(string $template, int $invoiceId): bool
+function emailPreSendAborts(string $template, int $relatedId): bool
 {
     $results = run_hook('EmailPreSend', [
         'messagename' => $template,
-        'relid'       => $invoiceId,
+        'relid'       => $relatedId,
     ]);
     foreach ((array) $results as $result) {
         if (is_array($result) && !empty($result['abortsend'])) {
@@ -115,14 +117,89 @@ if ($productTemplate === '') {
     }
 }
 
+// -- deleted people: nothing WHMCS generates may be addressed to an erased client.
+//    Deletion keeps the client row (it anchors the retained invoices) with an
+//    unroutable deleted-<id>@anonymized.invalid address, so every send WHMCS
+//    automation still aims at it is a guaranteed bounce.
+$erasedClient = localAPI('AddClient', [
+    'firstname'      => 'Suppress',
+    'lastname'       => 'Erased',
+    'email'          => 'suppress-erased-' . bin2hex(random_bytes(4)) . '@vpnhood.com',
+    'password2'      => bin2hex(random_bytes(12)),
+    'country'        => 'US',
+    'skipvalidation' => true,
+    'noemail'        => true,
+]);
+$erasedClientId = ($erasedClient['result'] ?? '') === 'success' ? (int) $erasedClient['clientid'] : 0;
+$erasedInvoiceId = 0;
+if ($erasedClientId <= 0) {
+    bad('could not create the erased-client fixture: ' . json_encode($erasedClient));
+} else {
+    // exactly what AccountDeletionService::anonymizeClient writes
+    $anonymized = localAPI('UpdateClient', [
+        'clientid'       => $erasedClientId,
+        'email'          => "deleted-$erasedClientId@anonymized.invalid",
+        'skipvalidation' => true,
+    ]);
+    if (($anonymized['result'] ?? '') !== 'success') {
+        bad('could not anonymize the fixture client: ' . json_encode($anonymized));
+    } else {
+        ok("erased-client fixture #$erasedClientId anonymized");
+
+        // a general template's relid IS the client id
+        if (emailPreSendAborts('Password Reset Validation', $erasedClientId)) {
+            ok('client-addressed mail is aborted for the erased client');
+        } else {
+            bad('client-addressed mail was NOT aborted for the erased client');
+        }
+
+        // and mail about one of its records, on an ordinary gateway, is aborted too
+        $erasedInvoiceId = createDraftInvoice($erasedClientId, 'banktransfer');
+        if ($erasedInvoiceId <= 0) {
+            bad('could not create an invoice for the erased client');
+        } elseif (emailPreSendAborts('Invoice Created', $erasedInvoiceId)) {
+            ok('invoice mail is aborted for the erased client, gateway notwithstanding');
+        } else {
+            bad("invoice mail NOT aborted for the erased client's invoice #$erasedInvoiceId");
+        }
+
+        // the merge fields alone are enough, even with a relid we cannot resolve
+        $mergeOnly = run_hook('EmailPreSend', [
+            'messagename' => 'Password Reset Validation',
+            'relid'       => 0,
+            'mergefields' => ['client_email' => "deleted-$erasedClientId@anonymized.invalid"],
+        ]);
+        $mergeAborted = false;
+        foreach ((array) $mergeOnly as $result) {
+            $mergeAborted = $mergeAborted || (is_array($result) && !empty($result['abortsend']));
+        }
+        $mergeAborted
+            ? ok('an erased address in the merge fields aborts the send on its own')
+            : bad('merge-field-only erased address did not abort the send');
+    }
+}
+
+// negative: a live client's own mail is untouched
+if (!emailPreSendAborts('Password Reset Validation', (int) $buyer['id'])) {
+    ok('mail to a live client passes through untouched');
+} else {
+    bad('mail to a live client was wrongly aborted');
+}
+
 // -- cleanup ----------------------------------------------------------------
-foreach ([$iapInvoiceId, $otherInvoiceId] as $invoiceId) {
+foreach (array_filter([$iapInvoiceId, $otherInvoiceId, $erasedInvoiceId]) as $invoiceId) {
     $r = localAPI('UpdateInvoice', ['invoiceid' => $invoiceId, 'status' => 'Cancelled']);
     if (($r['result'] ?? '') === 'success') {
         ok("invoice #$invoiceId cancelled");
     } else {
         bad("could not cancel invoice #$invoiceId: " . json_encode($r));
     }
+}
+if ($erasedClientId > 0) {
+    $r = localAPI('DeleteClient', ['clientid' => $erasedClientId, 'deleteusers' => true]);
+    ($r['result'] ?? '') === 'success'
+        ? ok("erased-client fixture #$erasedClientId removed")
+        : bad("could not remove the erased-client fixture: " . json_encode($r));
 }
 
 finish();

@@ -102,8 +102,8 @@ modules/addons/vpnhoodiap/openapi.json  the Portal API contract, served at /open
 docs/PORTAL-API.md                  the Portal API, explained
 modules/gateways/vpnhoodiappay.php     bookkeeping gateway (store is the merchant of record)
 includes/hooks/                     WHMCS-level hooks: cron, gateway hiding, product
-                                    actions, refund marks, invoice-mail suppression,
-                                    verification gate
+                                    actions, refund marks, mail suppression (store
+                                    invoices + deleted clients), verification gate
 scripts/set-version.sh              propagate ./VERSION into the module
 scripts/test-dev.sh                 run the test suites against the dev WHMCS
 scripts/watch-dev.sh                live tail of the module pipeline on the dev WHMCS
