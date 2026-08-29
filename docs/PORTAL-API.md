@@ -86,9 +86,11 @@ are already public in the store listing.
 
 `GET /v1/billing/plans` serves what a **web-distributed** build's plans page renders: one
 entry per sellable plan — `planId`, `billingPeriod` (ISO-8601), `priceAmount`,
-`priceCurrency`, and a ready-made `purchaseUrl` that opens the portal checkout with the
-plan preselected. The app opens that URL in the system browser and never assembles a
-purchase link itself.
+`priceCurrency` + `priceCurrencySymbol` (the display prefix the portal's own checkout
+renders, so the card shows the price exactly as the invoice will), and a ready-made
+`purchaseUrl` that opens the portal checkout with the plan preselected. The app opens
+that URL in the system browser and never assembles a purchase link — or a price
+string — itself.
 
 Two rules give the endpoint its shape:
 
@@ -103,7 +105,6 @@ Two rules give the endpoint its shape:
   their plans, and store policy forbids pointing users at an external purchase. The app
   hides the purchase-on-web UI on store builds; this refusal is the server-side half of
   the same rule.
-
 
 Some proxies strip `Authorization`; the same token is also accepted as
 `X-Portal-Token: <token>`. The official client sends both.

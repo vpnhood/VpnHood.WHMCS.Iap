@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "VpnHood Portal API",
-    "version": "1.2",
+    "version": "1.3",
     "summary": "The API a VpnHood app uses to sign in, redeem an app-store purchase, and receive its access code.",
     "description": "The Portal API is the contract between a VpnHood client app and whatever backend runs the customer's account. It is deliberately backend-neutral: it speaks of sessions, accounts, products, purchases, subscriptions and access codes, and never of the billing system behind them. Today it is implemented by the `vpnhoodiap` WHMCS addon; a different backend can implement the same document without any client change.\n\n**Flow.** The app signs in with an identity token from Google or Apple (`POST /v1/auth/sessions`) and receives an opaque session token. It buys in the app store, then posts the store's proof (`POST /v1/billing/purchases`); the portal re-validates that proof directly with the store and provisions the subscription — one synchronous call, no polling loop. The app then refreshes `GET /v1/account`, the one snapshot that carries the delivered access code and the subscription. Store webhooks drive renewals, cancellations and refunds afterwards, so that snapshot is always the current truth.\n\n**Trust.** Proofs and identity tokens are pointers, never evidence: every one is re-verified against the issuing store or identity provider on arrival. A purchase must carry the signed-in user's own attribution id (`obfuscatedAccountId` on Google, `appAccountToken` on Apple), so a stolen store token cannot be redeemed into another account.",
     "license": {
@@ -1470,6 +1470,7 @@
           "billingPeriod",
           "priceAmount",
           "priceCurrency",
+          "priceCurrencySymbol",
           "purchaseUrl"
         ],
         "properties": {
@@ -1492,6 +1493,11 @@
             "type": "string",
             "description": "ISO 4217 code of priceAmount.",
             "example": "USD"
+          },
+          "priceCurrencySymbol": {
+            "type": "string",
+            "description": "The display symbol the portal's own checkout renders before the amount — show prices exactly as \"{priceCurrencySymbol}{priceAmount}\". A symbol-less currency arrives as its code plus a space (\"CHF \").",
+            "example": "$"
           },
           "purchaseUrl": {
             "type": "string",

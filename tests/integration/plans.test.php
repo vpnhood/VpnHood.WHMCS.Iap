@@ -86,6 +86,10 @@ try {
         && $monthly['priceCurrency'] === $currency['code'])
         ? ok('monthly plan carries period, price and currency from the pricing table')
         : bad('monthly plan wrong: ' . json_encode($monthly));
+    $expectedSymbol = $currency['prefix'] !== '' ? $currency['prefix'] : $currency['code'] . ' ';
+    ($monthly['priceCurrencySymbol'] === $expectedSymbol)
+        ? ok("plan carries the checkout's own display symbol ('$expectedSymbol')")
+        : bad('currency symbol wrong: ' . json_encode($monthly['priceCurrencySymbol'] ?? null));
     $expectedUrl = "cart.php?a=add&pid=$fakePid&billingcycle=monthly&currency={$currency['id']}";
     (str_contains($monthly['purchaseUrl'], $expectedUrl) && str_starts_with($monthly['purchaseUrl'], 'http'))
         ? ok('purchase URL pins plan, cycle and the SAME currency as the shown price')

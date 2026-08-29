@@ -43,7 +43,7 @@ class PlanService
     /**
      * @param array $app the mod_vpnhood_iap_apps row
      * @param ?array $sessionUser the signed-in module user, when there is one
-     * @return array[] [{planId, billingPeriod, priceAmount, priceCurrency, purchaseUrl}]
+     * @return array[] [{planId, billingPeriod, priceAmount, priceCurrency, priceCurrencySymbol, purchaseUrl}]
      * @throws ApiException 403 for a store-distributed app
      */
     public function plansForApp(array $app, ?array $sessionUser): array
@@ -60,6 +60,9 @@ class PlanService
         }
         $currency ??= $this->repo->defaultCurrency();
 
+        // the exact prefix the cart renders; a prefix-less currency falls back to "CODE 9.99"
+        $currencySymbol = $currency['prefix'] !== '' ? $currency['prefix'] : $currency['code'] . ' ';
+
         $plans = [];
         foreach ($this->repo->findSellableMappings((int) $app['id']) as $mapping) {
             $cycle = self::CYCLES[(int) $mapping['billing_cycle_months']] ?? null;
@@ -72,11 +75,12 @@ class PlanService
                 continue; // the cycle is disabled for this currency — nothing to promise
             }
             $plans[] = [
-                'planId'        => (string) $mapping['store_product_id'],
-                'billingPeriod' => $period,
-                'priceAmount'   => $price,
-                'priceCurrency' => (string) $currency['code'],
-                'purchaseUrl'   => $this->repo->portalBaseUrl()
+                'planId'              => (string) $mapping['store_product_id'],
+                'billingPeriod'       => $period,
+                'priceAmount'         => $price,
+                'priceCurrency'       => (string) $currency['code'],
+                'priceCurrencySymbol' => $currencySymbol,
+                'purchaseUrl'         => $this->repo->portalBaseUrl()
                     . '/cart.php?a=add&pid=' . (int) $mapping['whmcs_product_id']
                     . "&billingcycle=$cycleName&currency=" . (int) $currency['id'],
             ];
