@@ -4,8 +4,10 @@
 
 The `vpnhoodiap` WHMCS addon: app-store purchases (Google Play / Apple / Microsoft) →
 WHMCS client + order + paid invoice → access code delivered by the install's
-provisioning module. Ships verbatim inside BOTH the hub package (VpnHood.WHMCS) and
-the partner package (VpnHood.WHMCS.Partner).
+provisioning module. Ships verbatim inside the hub package (VpnHood.WHMCS), and
+standalone from its own release, which is how a partner install takes it: the partner
+package does not bundle it, because in-app purchases are optional for a reseller and
+update on their own schedule.
 
 ## Non-negotiable rules
 
@@ -56,6 +58,10 @@ the partner package (VpnHood.WHMCS.Partner).
   so a future non-WHMCS backend can implement the same document without any client
   change. **No WHMCS concept on the wire, ever** — no WHMCS client/invoice/order/
   service ids, no WHMCS error strings; errors are neutral machine codes.
-- The hub and partner release pipelines bundle this repo's released files. Layout
-  (`modules/…`, `includes/hooks/…`) is part of the contract — moving a file means
-  updating both consumers' packaging.
+- The hub release pipeline bundles this repo's released files, and a standalone
+  install extracts the same zip at the WHMCS root. Layout (`modules/…`,
+  `includes/hooks/…`) is part of the contract — moving a file means updating the hub's
+  packaging with it.
+- The partner-facing store setup guides live in `docs/` (`IAP-GOOGLE-PLAY.md`,
+  `IAP-APPLE-APP-STORE.md`, `IAP-MONEY.md`). They are written for a white-label partner
+  and are linked from VpnHood.WHMCS.Partner's WHITE-LABEL.md — keep those links working.
