@@ -280,15 +280,15 @@ class IapRepository
 
     // -- pricing (read-only core access, the same rows the cart bills from) --
 
-    /** The install's default currency (id + code). */
+    /** The install's default currency (id + code + the display prefix the cart itself shows). */
     public function defaultCurrency(): array
     {
-        $row = Capsule::table('tblcurrencies')->where('default', 1)->first(['id', 'code'])
-            ?? Capsule::table('tblcurrencies')->orderBy('id')->first(['id', 'code']);
+        $row = Capsule::table('tblcurrencies')->where('default', 1)->first(['id', 'code', 'prefix'])
+            ?? Capsule::table('tblcurrencies')->orderBy('id')->first(['id', 'code', 'prefix']);
         if ($row === null) {
             throw new \RuntimeException('WHMCS has no currencies configured.');
         }
-        return ['id' => (int) $row->id, 'code' => (string) $row->code];
+        return ['id' => (int) $row->id, 'code' => (string) $row->code, 'prefix' => (string) $row->prefix];
     }
 
     /** The locked currency of one client, or null when client or currency is gone. */
@@ -298,8 +298,9 @@ class IapRepository
         if ($currencyId === null) {
             return null;
         }
-        $row = Capsule::table('tblcurrencies')->where('id', (int) $currencyId)->first(['id', 'code']);
-        return $row === null ? null : ['id' => (int) $row->id, 'code' => (string) $row->code];
+        $row = Capsule::table('tblcurrencies')->where('id', (int) $currencyId)->first(['id', 'code', 'prefix']);
+        return $row === null ? null
+            : ['id' => (int) $row->id, 'code' => (string) $row->code, 'prefix' => (string) $row->prefix];
     }
 
     /**
