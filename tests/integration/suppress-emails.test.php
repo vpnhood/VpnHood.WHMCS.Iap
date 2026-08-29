@@ -119,12 +119,15 @@ if ($productTemplate === '') {
 
 // -- deleted people: nothing WHMCS generates may be addressed to an erased client.
 //    Deletion keeps the client row (it anchors the retained invoices) with an
-//    unroutable deleted-<id>@anonymized.invalid address, so every send WHMCS
-//    automation still aims at it is a guaranteed bounce.
+//    unroutable deleted-<id>@anonymized.invalid address and rewrites the login that
+//    owns it the same way, so every send WHMCS still aims at either row is a
+//    guaranteed bounce. Account-level mail (verification, password reset) is keyed on
+//    the LOGIN, which is why both rows are exercised here.
+$erasedEmail = 'suppress-erased-' . bin2hex(random_bytes(4)) . '@vpnhood.com';
 $erasedClient = localAPI('AddClient', [
     'firstname'      => 'Suppress',
     'lastname'       => 'Erased',
-    'email'          => 'suppress-erased-' . bin2hex(random_bytes(4)) . '@vpnhood.com',
+    'email'          => $erasedEmail,
     'password2'      => bin2hex(random_bytes(12)),
     'country'        => 'US',
     'skipvalidation' => true,
@@ -135,22 +138,44 @@ $erasedInvoiceId = 0;
 if ($erasedClientId <= 0) {
     bad('could not create the erased-client fixture: ' . json_encode($erasedClient));
 } else {
-    // exactly what AccountDeletionService::anonymizeClient writes
+    $erasedUserId = (int) \WHMCS\Database\Capsule::table('tblusers')->where('email', $erasedEmail)->value('id');
+    $anonymizedEmail = "deleted-$erasedClientId@anonymized.invalid";
+
+    // exactly what AccountDeletionService::anonymizeClient writes, on both rows
     $anonymized = localAPI('UpdateClient', [
         'clientid'       => $erasedClientId,
-        'email'          => "deleted-$erasedClientId@anonymized.invalid",
+        'email'          => $anonymizedEmail,
         'skipvalidation' => true,
     ]);
-    if (($anonymized['result'] ?? '') !== 'success') {
-        bad('could not anonymize the fixture client: ' . json_encode($anonymized));
-    } else {
-        ok("erased-client fixture #$erasedClientId anonymized");
+    $anonymizedLogin = $erasedUserId > 0 ? localAPI('UpdateUser', [
+        'user_id'   => $erasedUserId,
+        'firstname' => 'Deleted',
+        'lastname'  => 'Account',
+        'email'     => $anonymizedEmail,
+    ]) : ['result' => 'no login'];
 
-        // a general template's relid IS the client id
-        if (emailPreSendAborts('Password Reset Validation', $erasedClientId)) {
-            ok('client-addressed mail is aborted for the erased client');
+    if (($anonymized['result'] ?? '') !== 'success' || ($anonymizedLogin['result'] ?? '') !== 'success') {
+        bad('could not anonymize the fixture: ' . json_encode([$anonymized, $anonymizedLogin]));
+    } else {
+        ok("erased fixture anonymized (client #$erasedClientId, login #$erasedUserId)");
+
+        // account-level mail: type 'user', relid is the LOGIN id. This is the family the
+        // live bounce came from — WHMCS re-verifies an address the moment it changes.
+        if (emailPreSendAborts('Email Address Verification', $erasedUserId)) {
+            ok('account-level mail is aborted for the erased login');
         } else {
-            bad('client-addressed mail was NOT aborted for the erased client');
+            bad('account-level mail was NOT aborted for the erased login');
+        }
+
+        // client-level mail: type 'general', relid IS the client id
+        $generalTemplate = (string) \WHMCS\Database\Capsule::table('tblemailtemplates')
+            ->where('type', 'general')->orderBy('id')->value('name');
+        if ($generalTemplate === '') {
+            bad('fixture missing: no general template on this install');
+        } elseif (emailPreSendAborts($generalTemplate, $erasedClientId)) {
+            ok("client-addressed mail ('$generalTemplate') is aborted for the erased client");
+        } else {
+            bad("client-addressed mail ('$generalTemplate') was NOT aborted for the erased client");
         }
 
         // and mail about one of its records, on an ordinary gateway, is aborted too
@@ -165,9 +190,9 @@ if ($erasedClientId <= 0) {
 
         // the merge fields alone are enough, even with a relid we cannot resolve
         $mergeOnly = run_hook('EmailPreSend', [
-            'messagename' => 'Password Reset Validation',
+            'messagename' => 'Email Address Verification',
             'relid'       => 0,
-            'mergefields' => ['client_email' => "deleted-$erasedClientId@anonymized.invalid"],
+            'mergefields' => ['client_email' => $anonymizedEmail],
         ]);
         $mergeAborted = false;
         foreach ((array) $mergeOnly as $result) {
@@ -176,14 +201,22 @@ if ($erasedClientId <= 0) {
         $mergeAborted
             ? ok('an erased address in the merge fields aborts the send on its own')
             : bad('merge-field-only erased address did not abort the send');
-    }
-}
 
-// negative: a live client's own mail is untouched
-if (!emailPreSendAborts('Password Reset Validation', (int) $buyer['id'])) {
-    ok('mail to a live client passes through untouched');
-} else {
-    bad('mail to a live client was wrongly aborted');
+        // negative: the same templates for a live person are untouched
+        $buyerUserId = (int) \WHMCS\Database\Capsule::table('tblusers')->where('email', BUYER_EMAIL)->value('id');
+        if ($buyerUserId > 0 && !emailPreSendAborts('Email Address Verification', $buyerUserId)) {
+            ok('account-level mail to a live login passes through untouched');
+        } elseif ($buyerUserId <= 0) {
+            bad('fixture missing: no login for ' . BUYER_EMAIL);
+        } else {
+            bad('account-level mail to a live login was wrongly aborted');
+        }
+        if ($generalTemplate !== '' && !emailPreSendAborts($generalTemplate, (int) $buyer['id'])) {
+            ok('client-addressed mail to a live client passes through untouched');
+        } elseif ($generalTemplate !== '') {
+            bad('client-addressed mail to a live client was wrongly aborted');
+        }
+    }
 }
 
 // -- cleanup ----------------------------------------------------------------

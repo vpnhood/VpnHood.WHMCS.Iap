@@ -40,16 +40,27 @@ if (!defined("WHMCS")) {
 use WHMCS\Database\Capsule;
 
 /**
- * The client a template's `relid` names. The mapping is a property of the template
- * TYPE — that is what lets this file cover templates it has never heard of. 0 when the
- * type carries no client at all (an unknown type, a guest ticket, a deleted record).
+ * The address a template's `relid` resolves to, '' when the type names no recipient we
+ * can follow (an unknown type, a guest ticket, a record that is already gone). Which
+ * table `relid` points at is a property of the template TYPE — that is what lets this
+ * file cover templates it has never heard of.
  */
-function vpnhoodiap_mailRecipientClient(string $templateType, int $relatedId): int
+function vpnhoodiap_mailRecipientAddress(string $templateType, int $relatedId): string
 {
     if ($relatedId <= 0) {
-        return 0;
+        return '';
     }
-    return match ($templateType) {
+
+    // Account-level mail (email verification, password reset) is keyed on the LOGIN,
+    // not the client — and the login is exactly what WHMCS re-verifies when deletion
+    // rewrites its address, which is how these end up aimed at an erased person.
+    // Deletion anonymizes a login only when this client is all it owns, so a shared
+    // login keeps its real address here and its mail keeps flowing.
+    if ($templateType === 'user') {
+        return (string) Capsule::table('tblusers')->where('id', $relatedId)->value('email');
+    }
+
+    $clientId = match ($templateType) {
         'general'   => $relatedId, // relid IS the client id
         'invoice'   => (int) Capsule::table('tblinvoices')->where('id', $relatedId)->value('userid'),
         'product'   => (int) Capsule::table('tblhosting')->where('id', $relatedId)->value('userid'),
@@ -58,6 +69,9 @@ function vpnhoodiap_mailRecipientClient(string $templateType, int $relatedId): i
         'affiliate' => (int) Capsule::table('tblaffiliates')->where('id', $relatedId)->value('clientid'),
         default     => 0,
     };
+    return $clientId > 0
+        ? (string) Capsule::table('tblclients')->where('id', $clientId)->value('email')
+        : '';
 }
 
 /** Deletion's placeholder address: unroutable by construction, so mail to it can only bounce. */
@@ -69,8 +83,8 @@ function vpnhoodiap_isErasedAddress(string $email): bool
 /**
  * Is this mail addressed to somebody who has been deleted? The merge fields carry the
  * recipient's own address and are checked first — they are free and they also cover a
- * template whose `relid` maps to nothing we can resolve. The client row behind `relid`
- * is the authoritative second opinion.
+ * template whose `relid` maps to nothing we can resolve. The row behind `relid` is the
+ * authoritative second opinion.
  */
 function vpnhoodiap_mailGoesToErasedPerson(string $templateType, int $relatedId, array $mergeFields): bool
 {
@@ -80,9 +94,7 @@ function vpnhoodiap_mailGoesToErasedPerson(string $templateType, int $relatedId,
         }
     }
 
-    $clientId = vpnhoodiap_mailRecipientClient($templateType, $relatedId);
-    return $clientId > 0
-        && vpnhoodiap_isErasedAddress((string) Capsule::table('tblclients')->where('id', $clientId)->value('email'));
+    return vpnhoodiap_isErasedAddress(vpnhoodiap_mailRecipientAddress($templateType, $relatedId));
 }
 
 /** Does this mail belong to a purchase the store, not WHMCS, was paid for? */
