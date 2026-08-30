@@ -15,6 +15,11 @@
 
 require __DIR__ . '/lib/common.php';
 
+requireIapLib('ApiException.php', 'Provisioning/AccountService.php', 'Provisioning/ClientProvisioner.php');
+
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountService;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\ClientProvisioner;
+
 $buyer = clientByEmail($db, BUYER_EMAIL);
 if (!$buyer) {
     bad('fixture missing: ' . BUYER_EMAIL . ' — run the hub repo bootstrap first');
@@ -219,6 +224,45 @@ if ($erasedClientId <= 0) {
     }
 }
 
+// -- a client the module creates: WHMCS fires "Email Address Verification" from inside
+//    AddClient (noemail does not cover it), and the identity provider has already proved
+//    that mailbox. The probe hook below records whether the suppression was armed at the
+//    moment the mail fired — and aborts everything, so this test never sends mail.
+$probeEmail = 'suppress-idp-' . bin2hex(random_bytes(4)) . '@vpnhood.com';
+$armedWhenVerificationFired = null;
+add_hook('EmailPreSend', 99, function (array $vars) use (&$armedWhenVerificationFired, $probeEmail) {
+    if (($vars['messagename'] ?? '') === 'Email Address Verification') {
+        $armedWhenVerificationFired = ClientProvisioner::isMailboxProvenByIdp($probeEmail);
+    }
+    return ['abortsend' => true];
+});
+
+$probeClientId = 0;
+try {
+    $probeClientId = (new ClientProvisioner())->createClient($probeEmail, 'Probe Client');
+    ok("module-created client #$probeClientId");
+} catch (\Throwable $e) {
+    bad('createClient threw: ' . $e->getMessage());
+}
+
+if ($probeClientId > 0) {
+    if ($armedWhenVerificationFired === true) {
+        ok('the redundant verification mail was suppressed as it fired');
+    } elseif ($armedWhenVerificationFired === false) {
+        bad('verification mail fired while the suppression was NOT armed');
+    } else {
+        ok('WHMCS sent no verification mail at all for the module-created client');
+    }
+
+    (new AccountService())->isEmailVerified($probeEmail)
+        ? ok('the address is marked verified — the IdP proof carries over to WHMCS')
+        : bad('the module-created address was left unverified');
+
+    !ClientProvisioner::isMailboxProvenByIdp($probeEmail)
+        ? ok('the suppression is disarmed once AddClient returns')
+        : bad('the suppression stayed armed after createClient');
+}
+
 // -- cleanup ----------------------------------------------------------------
 foreach (array_filter([$iapInvoiceId, $otherInvoiceId, $erasedInvoiceId]) as $invoiceId) {
     $r = localAPI('UpdateInvoice', ['invoiceid' => $invoiceId, 'status' => 'Cancelled']);
@@ -227,6 +271,12 @@ foreach (array_filter([$iapInvoiceId, $otherInvoiceId, $erasedInvoiceId]) as $in
     } else {
         bad("could not cancel invoice #$invoiceId: " . json_encode($r));
     }
+}
+if ($probeClientId > 0) {
+    $r = localAPI('DeleteClient', ['clientid' => $probeClientId, 'deleteusers' => true]);
+    ($r['result'] ?? '') === 'success'
+        ? ok("probe client #$probeClientId removed")
+        : bad("could not remove the probe client: " . json_encode($r));
 }
 if ($erasedClientId > 0) {
     $r = localAPI('DeleteClient', ['clientid' => $erasedClientId, 'deleteusers' => true]);
