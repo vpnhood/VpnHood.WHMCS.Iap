@@ -21,6 +21,15 @@
  * activity log — the log line is what names the automation that is still writing to
  * erased people, since no bounce ever says which template it came from.
  *
+ * 3. ADDRESSES THE IDENTITY PROVIDER ALREADY PROVED. `AddClient` fires WHMCS's
+ * "Email Address Verification" synchronously, and `noemail` does not cover it, so every
+ * store buyer the module creates a client for was asked to confirm an address Google or
+ * Apple had already proved (sign-in refuses an unverified one) and that the module marks
+ * verified a moment later. That single mail is aborted while ClientProvisioner is inside
+ * its AddClient call. Verification mail asked for deliberately — the portal gate on a
+ * purchase that attached to a PRE-EXISTING client, or the gate page's resend — is never
+ * touched: nothing is armed then.
+ *
  * The template's own TYPE decides which record `relid` points at, so both rules cover
  * every current and future template without a name list to maintain (the product welcome
  * template is per-product: "Premium Code" uses "Other Product/Service Welcome Email",
@@ -38,6 +47,9 @@ if (!defined("WHMCS")) {
 }
 
 use WHMCS\Database\Capsule;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\ClientProvisioner;
+
+require_once __DIR__ . '/../../modules/addons/vpnhoodiap/lib/Provisioning/ClientProvisioner.php';
 
 /**
  * The address a template's `relid` resolves to, '' when the type names no recipient we
@@ -129,8 +141,12 @@ add_hook('EmailPreSend', 1, function (array $vars) {
             return [];
         }
 
+        $recipient = vpnhoodiap_mailRecipientAddress($templateType, $relatedId);
         $erased = vpnhoodiap_mailGoesToErasedPerson($templateType, $relatedId, (array) ($vars['mergefields'] ?? []));
-        $storeMail = !$erased && vpnhoodiap_mailBelongsToStorePurchase($templateType, $relatedId);
+        $redundantVerification = !$erased && $recipient !== ''
+            && ClientProvisioner::isMailboxProvenByIdp($recipient);
+        $storeMail = !$erased && !$redundantVerification
+            && vpnhoodiap_mailBelongsToStorePurchase($templateType, $relatedId);
     } catch (\Throwable $e) {
         // never let a lookup failure take the mail pipeline down; default to sending
         return [];
@@ -146,5 +162,5 @@ add_hook('EmailPreSend', 1, function (array $vars) {
         }
     }
 
-    return $erased || $storeMail ? ['abortsend' => true] : [];
+    return $erased || $redundantVerification || $storeMail ? ['abortsend' => true] : [];
 });
