@@ -425,8 +425,9 @@ class EntitlementService
      *
      *   1. the record's uid resolves to NO module account — a live owner is
      *      the stolen-token case, and it keeps its 403;
-     *   2. the purchase is unknown to the ledger — every purchase this backend
-     *      sold or redeemed has a row, so an unknown key can only predate it.
+     *   2. no OTHER account holds it in the ledger. An unknown key can only
+     *      predate this backend; a row parked by the webhook with no owner
+     *      (RTDN before the first sign-in) is the same purchase still waiting.
      *      (A row already adopted by this same account passes — repeat restore;
      *      a row owned by anyone else is refused — the first adopter wins.)
      *   3. the session account holds no other live subscription — adoption may
@@ -444,15 +445,20 @@ class EntitlementService
             return false;
         }
 
-        // rule 2 — unknown to the ledger (a known row only passes when this
+        // rule 2 — nobody else may hold it (an owned row only passes when this
         // same account already adopted it — repeat restore on a new device)
         $row = Capsule::table('mod_vpnhood_iap_purchases')
             ->where('store', $record->store)
             ->where('purchase_key', $record->purchaseKey)
             ->first(['user_id']);
-        if ($row !== null) {
-            return $row->user_id !== null && (int) $row->user_id === (int) $sessionUser['id'];
+        if ($row !== null && $row->user_id !== null) {
+            return (int) $row->user_id === (int) $sessionUser['id'];
         }
+        // A row the webhook parked before anyone signed in (user_id NULL, last_error
+        // "no signed-in user for this purchase uid") is the ledger remembering that the
+        // purchase EXISTS, not that anyone holds it. Reading NULL as "someone else"
+        // stranded real legacy customers: a renewal's RTDN lands before their first
+        // sign-in, parks the row, and adoption was then refused forever. Fall through.
 
         // rule 3 — the session account must not already hold a live subscription
         $hasLiveSubscription = Capsule::table('mod_vpnhood_iap_purchases')
