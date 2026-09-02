@@ -66,6 +66,7 @@ use WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountService;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\ClientProvisioner;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\DeliveryReader;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\EntitlementService;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\LegacyStoreHandover;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\PlanService;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\StoreAdapterRegistry;
 
@@ -100,6 +101,7 @@ require_once __DIR__ . '/lib/Provisioning/ClientProvisioner.php';
 require_once __DIR__ . '/lib/Provisioning/OrderProvisioner.php';
 require_once __DIR__ . '/lib/Provisioning/DeliveryReader.php';
 require_once __DIR__ . '/lib/Provisioning/EntitlementService.php';
+require_once __DIR__ . '/lib/Provisioning/LegacyStoreHandover.php';
 require_once __DIR__ . '/lib/Provisioning/PlanService.php';
 
 /**
@@ -279,6 +281,13 @@ function vpnhoodiap_createSession(IapRepository $repo, array $request): array
         // the IdP just gave us fresh data — mirror it onto the WHMCS client
         (new ClientProvisioner())->syncClient($clientId, $identity['name'] ?? null);
     }
+
+    // A subscription bought through the retired .NET store is handed over here, on the
+    // address the IdP just verified — the customer never learns there was a migration.
+    // Provider sign-in only: the safety of matching by address rests on the IdP having
+    // verified the mailbox, which a WHMCS password does not establish.
+    // Never throws: a sign-in must not fail over an entitlement they could also restore.
+    (new LegacyStoreHandover($repo))->claimFor($user, $identity['email']);
 
     return [201, vpnhoodiap_sessionBody($user, (string) $app['store'])];
 }

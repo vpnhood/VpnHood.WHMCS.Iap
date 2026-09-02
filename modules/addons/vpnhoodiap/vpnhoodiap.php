@@ -35,7 +35,7 @@ function vpnhoodiap_config(): array
     return [
         'name'        => 'VpnHood! In-App Purchase',
         'description' => 'Processes app-store purchases (Google Play / Apple / Microsoft) into WHMCS clients, orders and paid invoices, delivering VpnHood access codes through the install\'s provisioning module.',
-        'version'     => '1.7.4',
+        'version'     => '1.8.0',
         'author'      => 'VpnHood',
         'fields'      => [
             'AdminAlertEmail' => [
@@ -264,6 +264,7 @@ function vpnhoodiap_activate(): array
         vpnhoodiap_migrateToOneImportSlot();
         vpnhoodiap_migrateToKeyring();
         vpnhoodiap_migrateToSellableFlag();
+        vpnhoodiap_migrateToLegacyStoreHandover();
         vpnhoodiap_ensureAdminAccess();
         vpnhoodiap_ensureIapGateway();
         vpnhoodiap_hideGatewayFromCheckout();
@@ -405,6 +406,53 @@ function vpnhoodiap_migrateToSellableFlag(): void
 }
 
 /**
+ * The retired .NET store (store.vpnhood.com) sold Play subscriptions that are still
+ * auto-renewing, and its database is the only record of who owns them. This table is a
+ * copy of that record, loaded by scripts/import-legacy-subs.php, and read once per
+ * sign-in by LegacyStoreHandover so a returning customer gets their code without asking.
+ *
+ * Keyed on the address because the old store never stored a Google OIDC subject - see
+ * LegacyStoreHandover for why that is safe and what it costs.
+ *
+ * TEMPORARY. Drop the table, the service and the import script together once every row
+ * has left 'pending'; the runbook is .user/docs/legacy-store-shutdown.md.
+ */
+function vpnhoodiap_migrateToLegacyStoreHandover(): void
+{
+    $schema = Capsule::schema();
+    if ($schema->hasTable('mod_vpnhood_iap_legacy_subs')) {
+        return;
+    }
+    $schema->create('mod_vpnhood_iap_legacy_subs', function ($table) {
+        $table->increments('id');
+        $table->string('store', 32)->default('googleplay');
+        $table->string('package_name');
+        $table->string('store_product_id');
+        $table->string('store_base_plan_id')->default('');
+        // the store's own purchase token: what gets re-verified at claim time
+        $table->string('purchase_key', 255);
+        $table->string('provider_order_id')->nullable();
+        // the OLD store's obfuscated uid - kept for tracing, never matched on
+        $table->string('obfuscated_uid', 64)->nullable();
+        $table->string('email')->index();      // normalized lower-case
+        $table->timestamp('expires_at')->nullable();
+        $table->boolean('is_auto_renew')->default(true);
+        $table->decimal('price_amount', 12, 2)->nullable();
+        $table->string('price_currency', 8)->nullable();
+        // pending -> claimed (handed over) | inactive (the store closed it out)
+        $table->string('status', 16)->default('pending')->index();
+        $table->integer('claimed_user_id')->unsigned()->nullable();
+        $table->timestamp('claimed_at')->nullable();
+        $table->integer('attempts')->unsigned()->default(0);
+        $table->timestamp('last_attempt_at')->nullable();
+        $table->string('last_error', 500)->nullable();
+        $table->timestamp('imported_at')->nullable();
+        // re-importing a refreshed export must update, never duplicate
+        $table->unique(['store', 'purchase_key'], 'iap_legacy_store_purchase');
+    });
+}
+
+/**
  * Migration point for future versions (invoked by WHMCS when the version in
  * vpnhoodiap_config() increases). Keep migrations additive and idempotent.
  */
@@ -412,6 +460,7 @@ function vpnhoodiap_upgrade(array $vars): void
 {
     vpnhoodiap_migrateToKeyring();
     vpnhoodiap_migrateToSellableFlag();
+    vpnhoodiap_migrateToLegacyStoreHandover();
     // installs activated before this ran (API/automation) have no access row and
     // are invisible in the Addons menu until someone notices
     vpnhoodiap_ensureAdminAccess();
