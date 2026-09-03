@@ -1,0 +1,11 @@
+{
+    "module": "vpnhoodiap",
+    "kind": "addon",
+    "label": "VpnHood! In-App Purchase",
+    "repo": "vpnhood/VpnHood.WHMCS.Iap",
+    "package": "vpnhoodiap.zip",
+    "packageLabel": "VpnHood! In-App Purchase",
+    "requires": {
+        "store": 1
+    }
+}
