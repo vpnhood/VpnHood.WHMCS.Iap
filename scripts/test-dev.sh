@@ -88,7 +88,9 @@ probe() {
   resp="$("${SSH[@]}" "$curl_cmd")"
   code="$(printf '%s' "$resp" | tail -n1)"
   body="$(printf '%s' "$resp" | sed '$d')"
-  if [ "$code" = "$want_code" ] && printf '%s' "$body" | grep -q "$want_body"; then
+  # a substring test, not grep -q: under pipefail a body bigger than the pipe buffer fails the
+  # pipeline when grep exits early (seen the day the OpenAPI document passed 64 KB)
+  if [ "$code" = "$want_code" ] && [[ "$body" == *"$want_body"* ]]; then
     echo "   PASS $label (HTTP $code)"
   else
     echo "!! FAIL $label — want HTTP $want_code + '$want_body', got HTTP $code: $(printf '%s' "$body" | head -c 200)" >&2
