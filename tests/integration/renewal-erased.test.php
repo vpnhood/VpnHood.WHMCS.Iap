@@ -28,6 +28,7 @@ requireIapLib(
     'Provisioning/EntitlementService.php',
     'Provisioning/RefundService.php',
     'Provisioning/RenewalService.php',
+    'Provisioning/TermSync.php',
     'Controllers/NotificationController.php'
 );
 

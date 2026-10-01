@@ -28,7 +28,8 @@ requireIapLib(
     'Provisioning/OrderProvisioner.php',
     'Provisioning/DeliveryReader.php',
     'Provisioning/EntitlementService.php',
-    'Provisioning/RenewalService.php'
+    'Provisioning/RenewalService.php',
+    'Provisioning/TermSync.php'
 );
 
 use WHMCS\Database\Capsule;

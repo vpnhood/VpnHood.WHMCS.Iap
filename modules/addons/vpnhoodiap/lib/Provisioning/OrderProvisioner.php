@@ -34,10 +34,13 @@ class OrderProvisioner
 
     /**
      * @param string $transactionId store order id — doubles as the payment idempotency key
+     * @param ?string $dueDate the term the store's paid time calls for (TermSync::dueDateFor),
+     *                         set before provisioning so the module creates the code with it;
+     *                         null keeps WHMCS's own order date + cycle
      * @return array{orderId:int, invoiceId:int, serviceId:int}
      * @throws ApiException
      */
-    public function placeOrder(int $clientId, int $whmcsProductId, int $billingCycleMonths, string $transactionId): array
+    public function placeOrder(int $clientId, int $whmcsProductId, int $billingCycleMonths, string $transactionId, ?string $dueDate): array
     {
         $add = $this->localApi('AddOrder', [
             'clientid'       => $clientId,
@@ -79,6 +82,12 @@ class OrderProvisioner
                 }
             }
 
+            // the term is the STORE's, not the order date's: a migrated or restored subscription
+            // is weeks into its cycle, and the code is created from this date
+            if ($dueDate !== null) {
+                $this->localApi('UpdateClientProduct', ['serviceid' => $serviceId, 'nextduedate' => $dueDate]);
+            }
+
             // provision through the product's own module
             $this->localApi('AcceptOrder', [
                 'orderid'   => $orderId,
@@ -88,6 +97,14 @@ class OrderProvisioner
         } catch (\Throwable $e) {
             $this->safeDeleteOrder($orderId);
             throw $e instanceof ApiException ? $e : new ApiException('Provisioning failed.', 502, 'provisioning_failed');
+        }
+
+        // AcceptOrder provisions from the order's own dates, not from the term just written
+        // (WHMCS 9.0.7: the code came out with order date + cycle while the service already
+        // carried the store's term), so the code is re-synced from the term — loud on failure,
+        // never fatal: the order is paid and delivered, and the code's date is only later.
+        if ($dueDate !== null) {
+            (new TermSync($this->repo))->renewCode($serviceId);
         }
 
         return ['orderId' => $orderId, 'invoiceId' => $invoiceId, 'serviceId' => $serviceId];
@@ -171,6 +188,42 @@ class OrderProvisioner
         } catch (\Throwable $e) {
             $this->repo->log(null, 'invoice.cleanup', '', 0, ['serviceid' => $serviceId], $e->getMessage());
         }
+    }
+
+    /**
+     * End a service for good, with the renewal invoice it would otherwise leave behind. False,
+     * loudly, when the module could not end a service that is still live: the code keeps
+     * working, and the caller must not record the service as gone.
+     */
+    public function terminateService(int $serviceId, string $why): bool
+    {
+        $result = localAPI('ModuleTerminate', ['serviceid' => $serviceId]);
+        if (($result['result'] ?? '') !== 'success') {
+            $status = (string) Capsule::table('tblhosting')->where('id', $serviceId)->value('domainstatus');
+            if (in_array($status, ['Active', 'Suspended'], true)) {
+                $this->repo->alert("vpnhoodiap: terminating service #$serviceId ($why) failed: "
+                    . json_encode($result) . ' — its code is still live.');
+                return false;
+            }
+            // already ended — nothing left to terminate
+        }
+        $this->cancelUnpaidRenewalInvoices($serviceId);
+        return true;
+    }
+
+    /**
+     * Re-enable a Suspended service the store pays for again (a recovery, a restore while
+     * held). Loud on failure: the store charged, and the code would stay disabled.
+     */
+    public function unsuspendService(int $serviceId): bool
+    {
+        $result = localAPI('ModuleUnsuspend', ['serviceid' => $serviceId]);
+        if (($result['result'] ?? '') === 'success') {
+            return true;
+        }
+        $this->repo->alert("vpnhoodiap: unsuspending service #$serviceId failed: " . json_encode($result)
+            . ' — the store grants the purchase, the code stays disabled.');
+        return false;
     }
 
     /**

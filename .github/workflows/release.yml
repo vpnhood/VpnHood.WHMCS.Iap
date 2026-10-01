@@ -273,6 +273,7 @@ jobs:
             modules/addons/vpnhoodiap/lib/IapRepository.php \
             modules/addons/vpnhoodiap/lib/Jwt.php \
             modules/addons/vpnhoodiap/lib/Provisioning/EntitlementService.php \
+            modules/addons/vpnhoodiap/lib/Provisioning/TermSync.php \
             modules/gateways/vpnhoodiappay.php \
             includes/hooks/vpnhoodiap-suppress-emails.php \
             includes/hooks/vpnhoodiap-cron.php \

@@ -8,6 +8,7 @@ use WHMCS\Module\Addon\VpnHoodIap\Provisioning\EntitlementService;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\RenewalService;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\TermSync;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\StoreNotification;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\StoreAdapterInterface;
 
@@ -71,36 +72,55 @@ class NotificationController
                 return 'test';
 
             case StoreNotification::PURCHASED:
-            case StoreNotification::RECOVERED:
             case StoreNotification::RESTARTED:
+                // a purchase, or auto-renew switched back on: redeem is idempotent — a live
+                // service is reused (re-enabled if it was held), never doubled
                 if ($purchaseKey === null) {
                     return 'skipped-no-key';
-                }
-                if ($notification->eventType !== StoreNotification::PURCHASED) {
-                    $this->unsuspendService($purchaseKey, $notification->store);
                 }
                 $record = $adapter->refresh($app, $purchaseKey, (string) $notification->storeProductId);
                 (new EntitlementService($this->repo))->redeem($app, $record, null, $adapter);
                 return $notification->eventType;
 
             case StoreNotification::RENEWED:
+            case StoreNotification::RECOVERED:
+                // the store charged (again). After a hold the charge lands on the suspended
+                // service, which the renewal re-enables — a recovery was once a redeem, and
+                // the held row failed its replay guard into a second service.
                 if ($purchaseKey === null) {
                     return 'skipped-no-key';
                 }
-                return (new RenewalService($this->repo))->renew($app, $purchaseKey, $adapter);
+                $handled = (new RenewalService($this->repo))->renew($app, $purchaseKey, $adapter);
+                return $notification->eventType === StoreNotification::RECOVERED ? 'recovered-' . $handled : $handled;
 
             case StoreNotification::CANCELED:
-                // auto-renew turned off — entitled until expiry, nothing revoked
-                $this->updatePurchase($notification, ['auto_renewing' => 0, 'status' => 'canceled']);
+                // auto-renew turned off — entitled until expiry, nothing revoked, and the row
+                // stays provisioned: the store is still billing the time already paid. A status
+                // of its own made the next restore or RESTARTED provision a second service.
+                $this->updatePurchase($notification, ['auto_renewing' => 0]);
                 return 'canceled';
 
             case StoreNotification::IN_GRACE:
-                // payment problem but still entitled — keep everything running
-                return 'in-grace-noted';
+                // payment problem but still entitled: the store extends the paid time through
+                // the grace period, and the term follows it so the code does not die while the
+                // store retries the charge
+                if ($purchaseKey === null) {
+                    return 'skipped-no-key';
+                }
+                $serviceId = $this->serviceIdFor($notification);
+                if ($serviceId === null) {
+                    return 'in-grace-noted';
+                }
+                $record = $adapter->refresh($app, $purchaseKey, (string) $notification->storeProductId);
+                $this->updatePurchase($notification, [
+                    'auto_renewing' => $record->autoRenewing ? 1 : 0,
+                    'expiry_time'   => $record->expiryTimeUnix !== null ? date('Y-m-d H:i:s', $record->expiryTimeUnix) : null,
+                ]);
+                return 'in-grace-' . (new TermSync($this->repo))->sync($serviceId, $record);
 
             case StoreNotification::ON_HOLD:
             case StoreNotification::PAUSED:
-                $this->suspendService($notification, $notification->eventType === StoreNotification::ON_HOLD ? 'on_hold' : 'on_hold');
+                $this->suspendService($notification);
                 return $notification->eventType;
 
             case StoreNotification::EXPIRED:
@@ -120,32 +140,31 @@ class NotificationController
 
     // ------------------------------------------------------------ actions --
 
-    private function suspendService(StoreNotification $notification, string $status): void
+    private function suspendService(StoreNotification $notification): void
     {
         $serviceId = $this->serviceIdFor($notification);
         if ($serviceId !== null) {
-            localAPI('ModuleSuspend', ['serviceid' => $serviceId, 'suspendreason' => 'Store subscription payment problem']);
+            $result = localAPI('ModuleSuspend', ['serviceid' => $serviceId, 'suspendreason' => 'Store subscription payment problem']);
+            if (($result['result'] ?? '') !== 'success') {
+                $this->repo->alert("vpnhoodiap: suspending service #$serviceId ({$notification->eventType}) failed: "
+                    . json_encode($result) . ' — its code stays enabled while the store is unpaid.');
+            }
         }
-        $this->updatePurchase($notification, ['status' => $status]);
+        $this->updatePurchase($notification, ['status' => 'on_hold']);
     }
 
-    private function unsuspendService(string $purchaseKey, string $store): void
-    {
-        $serviceId = Capsule::table('mod_vpnhood_iap_purchases')
-            ->where('store', $store)->where('purchase_key', $purchaseKey)->value('service_id');
-        if ($serviceId !== null) {
-            localAPI('ModuleUnsuspend', ['serviceid' => (int) $serviceId]);
-        }
-    }
-
+    /**
+     * Ends the service through the module, with the pending renewal invoice it would leave
+     * behind. When the module could not end it, the ledger keeps its status: a dead-looking
+     * row must not hide a working code, and the nightly reconciliation retries.
+     */
     private function terminateService(StoreNotification $notification, string $status, bool $downgradeRefunded = true): void
     {
         $serviceId = $this->serviceIdFor($notification);
-        if ($serviceId !== null) {
-            localAPI('ModuleTerminate', ['serviceid' => $serviceId]);
-            // the subscription is gone at the store — its pending renewal
-            // invoice can never be paid and must not linger as clutter
-            (new OrderProvisioner($this->repo))->cancelUnpaidRenewalInvoices($serviceId);
+        if ($serviceId !== null
+            && !(new OrderProvisioner($this->repo))->terminateService($serviceId, $notification->eventType)
+        ) {
+            return;
         }
         $this->updatePurchase($notification, ['status' => $status], $downgradeRefunded ? [] : ['refunded']);
     }
