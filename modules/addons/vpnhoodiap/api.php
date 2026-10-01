@@ -454,11 +454,15 @@ function vpnhoodiap_createRestoreCredential(IapRepository $repo, array $request)
 /**
  * POST /v1/auth/restore-credentials/assertion-options — WebAuthn request
  * options for the zero-tap sign-in. Anonymous by nature (the whole point is
- * that nobody is signed in yet), so app-gated and rate-limited like sign-in.
+ * that nobody is signed in yet), so app-gated and rate-limited per address —
+ * but six times looser than sign-in: every app start calls this, and a carrier
+ * NAT can put hundreds of phones behind one address. The reply is a random
+ * challenge: nothing to guess, nothing to enumerate, so the limit only bounds
+ * the challenge table.
  */
 function vpnhoodiap_createRestoreCredentialAssertionOptions(IapRepository $repo, array $request): array
 {
-    vpnhoodiap_rateLimit($repo, $request, 20, 300);
+    vpnhoodiap_rateLimit($repo, $request, 120, 300);
     $packageName = (string) ($request['body']['packageName'] ?? '');
     if ($packageName === '') {
         throw new ApiException('packageName is required.', 400, 'bad_request');

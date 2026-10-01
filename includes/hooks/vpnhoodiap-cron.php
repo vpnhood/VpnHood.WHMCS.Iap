@@ -183,6 +183,16 @@ add_hook('DailyCronJob', 1, function () {
         Capsule::table('mod_vpnhood_iap_events')
             ->where('created_at', '<', $cutoff)->whereNotNull('raw')
             ->update(['raw' => null]);
+        // The request log is the rate limiter's window (seconds) and the audit trail. HTTP
+        // traffic rows (route actions, and the empty action of a refused verb) past the
+        // retention go, a bounded batch a night; the module's own audit rows (alerts,
+        // handovers, renewals…) stay — LegacyStoreHandover's removal condition counts them.
+        Capsule::table('mod_vpnhood_iap_log')
+            ->where('created_at', '<', $cutoff)
+            ->where(function ($query) {
+                $query->where('action', 'like', '% /v1/%')->orWhere('action', '')->orWhereNull('action');
+            })
+            ->limit(50000)->delete();
         // refund fingerprints live exactly as long as disclosed: 24 months
         Capsule::table('mod_vpnhood_iap_refund_marks')
             ->where('created_at', '<', date('Y-m-d H:i:s', time() - 24 * 30 * 86400))
