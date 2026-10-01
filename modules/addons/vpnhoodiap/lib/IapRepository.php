@@ -558,7 +558,7 @@ class IapRepository
         // -- 3. several accounts answer to this address: join none, say so loudly
         if (count($candidates) > 1) {
             $ids = implode(', #', array_map(fn ($candidate) => $candidate['id'], $candidates));
-            $this->alertAdmins("vpnhoodiap: sign-in address {$email} is currently reported by the sign-in methods of "
+            $this->alert("vpnhoodiap: sign-in address {$email} is currently reported by the sign-in methods of "
                 . count($candidates) . " accounts (#{$ids}); linked none — a new account was created. Merge by hand.");
         }
 
@@ -624,7 +624,7 @@ class IapRepository
             }
             if (count($rows) > 1) {
                 $ids = implode(', #', $rows->pluck('id')->all());
-                $this->alertAdmins("vpnhoodiap: WHMCS user {$subject} ({$email}) signed in with a password, but "
+                $this->alert("vpnhoodiap: WHMCS user {$subject} ({$email}) signed in with a password, but "
                     . count($rows) . " app accounts (#{$ids}) sit on clients that login owns; refused — merge by hand.");
                 throw new \RuntimeException('Several app accounts on this login\'s own clients.');
             }
@@ -641,7 +641,7 @@ class IapRepository
             }
             if (count($candidates) > 1) {
                 $ids = implode(', #', array_map(fn ($candidate) => $candidate['id'], $candidates));
-                $this->alertAdmins("vpnhoodiap: password sign-in address {$email} is currently reported by the "
+                $this->alert("vpnhoodiap: password sign-in address {$email} is currently reported by the "
                     . 'sign-in methods of ' . count($candidates) . " accounts (#{$ids}); joined none. Merge by hand.");
             }
         }
@@ -778,8 +778,8 @@ class IapRepository
         }
     }
 
-    /** Loud ops: system activity log + module log (same channels as the redeem pipeline's alerts). */
-    private function alertAdmins(string $message): void
+    /** Loud ops: system activity log + module log — the one alert channel of the module. */
+    public function alert(string $message): void
     {
         try {
             if (function_exists('localAPI')) {

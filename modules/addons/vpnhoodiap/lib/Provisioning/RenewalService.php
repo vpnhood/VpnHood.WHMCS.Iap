@@ -16,8 +16,15 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
  * invoice with the NEW store order id as transid — WHMCS itself then advances
  * nextduedate and fires the provisioning module's _Renew (verified on this
  * build). When no renewal invoice exists yet, WHMCS's own GenInvoices creates
- * it (verified: works scoped to one client); if the dates still disagree
- * afterwards, UpdateClientProduct re-syncs.
+ * it (verified: works scoped to one client); when there is none even then (the
+ * store renewed before WHMCS's term — a migrated or restored subscription), the
+ * charge is booked as a plain transaction.
+ *
+ * Whatever the money path, the term is then synced to the store's paid time
+ * (TermSync): WHMCS advances from its own date, the store from the hour it
+ * charged, and only the store's answer may reach the code — the money path
+ * alone moves the date and can leave the code to expire. A renewal onto a
+ * Suspended service (the charge after a hold) also re-enables it.
  */
 class RenewalService
 {
@@ -26,7 +33,7 @@ class RenewalService
     }
 
     /**
-     * @return string what happened: renewed | resynced | skipped-<reason>
+     * @return string what happened: renewed | resynced | reprovisioned | failed-payment | skipped-<reason>
      */
     public function renew(array $app, string $purchaseKey, StoreAdapterInterface $adapter): string
     {
@@ -40,8 +47,7 @@ class RenewalService
         $serviceId = (int) $row->service_id;
         $clientId = (int) $row->client_id;
 
-        $record = $adapter->refresh($app, $purchaseKey, (string) Capsule::table('mod_vpnhood_iap_purchases')
-            ->where('id', $row->id)->value('store_order_id') ?: '');
+        $record = $adapter->refresh($app, $purchaseKey, '');
         if (!$record->isEntitled()) {
             return 'skipped-not-entitled';
         }
@@ -59,9 +65,18 @@ class RenewalService
                 : 'reprovision-' . ($result['state'] ?? 'failed');
         }
 
-        // dedup: if this store order id already paid an invoice, this event is a replay
+        $orders = new OrderProvisioner($this->repo);
+        $sync = new TermSync($this->repo);
         $transactionId = $record->storeOrderId ?? '';
+
+        // dedup: if this store order id already paid an invoice, this event is a replay
+        // of the money. The term is still synced — a sync that failed the first time is
+        // retried by every replay, and the retry books nothing.
         if ($transactionId !== '' && Capsule::table('tblaccounts')->where('transid', $transactionId)->exists()) {
+            $sync->sync($serviceId, $record);
+            if ($serviceStatus === 'Suspended') {
+                $orders->unsuspendService($serviceId);
+            }
             $this->updateRow((int) $row->id, $record, 'provisioned');
             return 'skipped-already-paid';
         }
@@ -73,6 +88,7 @@ class RenewalService
             $invoiceId = $this->outstandingRenewalInvoice($serviceId);
         }
 
+        $outcome = 'resynced';
         if ($invoiceId > 0) {
             $paymentTransactionId = $transactionId !== '' ? $transactionId : $purchaseKey . '-' . time();
             $payment = localAPI('AddInvoicePayment', [
@@ -82,26 +98,29 @@ class RenewalService
                 'noemail'   => true,
             ]);
             if (($payment['result'] ?? '') === 'success') {
-                $orders = new OrderProvisioner($this->repo);
                 $orders->annotateInvoice($invoiceId, $adapter->storeId(), $record->amount, $record->currency);
                 $orders->applyStoreValue($invoiceId, $paymentTransactionId,
                     $record->amount, $record->currency, $clientId, isPrimary: true);
-                $this->updateRow((int) $row->id, $record, 'provisioned');
-                return 'renewed';
+                $outcome = 'renewed';
+            } else {
+                // the store has the money and the customer keeps their code (synced below);
+                // the invoice stays Unpaid as the admin's open item — never booked twice
+                $this->repo->log(null, 'renew', '', 0, ['serviceid' => $serviceId, 'invoiceid' => $invoiceId], $payment);
+                $this->repo->alert("vpnhoodiap: paying renewal invoice #$invoiceId for service #$serviceId failed: "
+                    . json_encode($payment) . ' — the term was synced; the invoice stays Unpaid.');
+                $outcome = 'failed-payment';
             }
-            $this->repo->log(null, 'renew', '', 0, ['serviceid' => $serviceId, 'invoiceid' => $invoiceId], $payment);
+        } else {
+            // renewed before WHMCS's term: no invoice exists to carry the charge
+            $this->recordRenewalRevenue($clientId, $serviceId, $transactionId, $purchaseKey, $record);
         }
 
-        // renewed-early / no invoice yet: re-sync the due date to the store expiry
-        if ($record->expiryTimeUnix !== null) {
-            localAPI('UpdateClientProduct', [
-                'serviceid'   => $serviceId,
-                'nextduedate' => date('Y-m-d', $record->expiryTimeUnix),
-            ]);
+        $sync->sync($serviceId, $record);
+        if ($serviceStatus === 'Suspended') {
+            $orders->unsuspendService($serviceId);
         }
-        $this->recordRenewalRevenue($clientId, $serviceId, $transactionId, $purchaseKey, $record);
         $this->updateRow((int) $row->id, $record, 'provisioned');
-        return 'resynced';
+        return $outcome;
     }
 
     /**

@@ -52,6 +52,7 @@ add_hook('DailyCronJob', 1, function () {
     require_once $moduleDir . '/lib/Provisioning/EntitlementService.php';
     require_once $moduleDir . '/lib/Provisioning/RefundService.php';
     require_once $moduleDir . '/lib/Provisioning/RenewalService.php';
+    require_once $moduleDir . '/lib/Provisioning/TermSync.php';
 
     if (!\WHMCS\Module\Addon\VpnHoodIap\IapRepository::isModuleActive()) {
         return;
@@ -89,21 +90,40 @@ add_hook('DailyCronJob', 1, function () {
                     $changes['store_amount'] = $record->amount;
                     $changes['store_currency'] = $record->currency;
                 }
-                // expired on the store but still provisioned here → terminate (with grace)
+                // the term follows the store's paid time (TermSync): the nightly net under a lost
+                // RENEWED or IN_GRACE, and the retry of a sync that failed. A charge the ledger has
+                // never seen is a renewal that never arrived — booked like one, which also re-enables
+                // a service held until the store recovered the payment.
+                if (
+                    $purchase['service_id'] !== null
+                    && $record->isEntitled()
+                    && in_array($purchase['status'], ['provisioned', 'canceled', 'on_hold'], true)
+                ) {
+                    if ($record->storeOrderId !== null && $record->storeOrderId !== $purchase['store_order_id']) {
+                        (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RenewalService($repo))
+                            ->renew($app, (string) $purchase['purchase_key'], $adapter);
+                    } else {
+                        $sync = new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\TermSync($repo);
+                        $sync->sync((int) $purchase['service_id'], $record);
+                        $sync->repairCode((int) $purchase['service_id']);
+                    }
+                }
+                // expired on the store but still provisioned here → terminate (with grace); a
+                // service the module could not end keeps its status, so this retries tomorrow
                 $graceDays = max(0, (int) $repo->setting('TerminateGraceDays'));
                 if (
-                    $purchase['status'] === 'provisioned'
+                    in_array($purchase['status'], ['provisioned', 'canceled'], true)
                     && !$record->isEntitled()
                     && $record->expiryTimeUnix !== null
                     && $record->expiryTimeUnix < time() - $graceDays * 86400
                 ) {
-                    if ($purchase['service_id'] !== null) {
-                        localAPI('ModuleTerminate', ['serviceid' => (int) $purchase['service_id']]);
-                        (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner($repo))
-                            ->cancelUnpaidRenewalInvoices((int) $purchase['service_id']);
+                    $ended = $purchase['service_id'] === null
+                        || (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner($repo))
+                            ->terminateService((int) $purchase['service_id'], 'expired at the store');
+                    if ($ended) {
+                        $changes['status'] = $record->state === \WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\PurchaseRecord::STATE_REVOKED
+                            ? 'refunded' : 'expired';
                     }
-                    $changes['status'] = $record->state === \WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\PurchaseRecord::STATE_REVOKED
-                        ? 'refunded' : 'expired';
                 }
                 Capsule::table('mod_vpnhood_iap_purchases')->where('id', $purchase['id'])->update($changes);
             } catch (\Throwable $e) {
@@ -124,15 +144,18 @@ add_hook('DailyCronJob', 1, function () {
                 if ($row === null || $row->status === 'refunded') {
                     continue;
                 }
-                if ($row->service_id !== null) {
-                    localAPI('ModuleTerminate', ['serviceid' => (int) $row->service_id]);
-                    (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner($repo))
-                        ->cancelUnpaidRenewalInvoices((int) $row->service_id);
-                }
+                $ended = $row->service_id === null
+                    || (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner($repo))
+                        ->terminateService((int) $row->service_id, 'voided at the store');
                 $refund = (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo))->refund((array) $row);
-                Capsule::table('mod_vpnhood_iap_purchases')->where('id', $row->id)
-                    ->update(['status' => 'refunded', 'updated_at' => date('Y-m-d H:i:s')]);
-                localAPI('LogActivity', ['description' => "vpnhoodiap: purchase {$voidedKey} voided at the store — service terminated, refund $refund."]);
+                // a service the module could not end keeps its status: tomorrow's sweep retries
+                // the termination, and the refund booking is idempotent
+                if ($ended) {
+                    Capsule::table('mod_vpnhood_iap_purchases')->where('id', $row->id)
+                        ->update(['status' => 'refunded', 'updated_at' => date('Y-m-d H:i:s')]);
+                }
+                localAPI('LogActivity', ['description' => "vpnhoodiap: purchase {$voidedKey} voided at the store — service "
+                    . ($ended ? 'terminated' : 'NOT terminated (retried tomorrow)') . ", refund $refund."]);
             }
         } catch (\Throwable $e) {
             $repo->log(null, 'cron.voided', '', 0, ['app' => $app['id']], $e->getMessage());
@@ -174,15 +197,29 @@ add_hook('DailyCronJob', 1, function () {
         if ($alertEmail !== '') {
             $parked = (int) Capsule::table('mod_vpnhood_iap_purchases')
                 ->where('status', 'failed')->count();
+            $since = date('Y-m-d H:i:s', time() - 86400);
             $failedEvents = (int) Capsule::table('mod_vpnhood_iap_events')
                 ->where('status', 'failed')
-                ->where('created_at', '>=', date('Y-m-d H:i:s', time() - 86400))->count();
-            if ($parked > 0 || $failedEvents > 0) {
+                ->where('created_at', '>=', $since)->count();
+            // accounts whose live store subscription's code the access server refused: our
+            // provisioning fault by definition (AccountKeyService) — a locked-out subscriber
+            // shows here before the customer writes in
+            $refusedPaying = (int) Capsule::table('mod_vpnhood_iap_code_rejections as r')
+                ->join('mod_vpnhood_iap_purchases as p', 'p.user_id', '=', 'r.user_id')
+                ->where('r.refused_at', '>=', $since)
+                ->whereIn('p.status', ['provisioned', 'canceled'])
+                ->where(function ($query) {
+                    $query->whereNull('p.expiry_time')->orWhere('p.expiry_time', '>', date('Y-m-d H:i:s'));
+                })
+                ->distinct()->count('r.user_id');
+            if ($parked > 0 || $failedEvents > 0 || $refusedPaying > 0) {
                 localAPI('SendAdminEmail', [
-                    'customsubject' => "vpnhoodiap digest: $parked failed purchases, $failedEvents failed events",
+                    'customsubject' => "vpnhoodiap digest: $parked failed purchases, $failedEvents failed events, "
+                        . "$refusedPaying paying accounts refused",
                     'custommessage' => "Failed purchases: $parked\n"
-                        . "Failed webhook events in the last 24h: $failedEvents\n\n"
-                        . 'Review them in Addons → VpnHood! In-App Purchase.',
+                        . "Failed webhook events in the last 24h: $failedEvents\n"
+                        . "Accounts with a live store subscription whose code was refused in the last 24h: $refusedPaying\n\n"
+                        . 'Review them in Addons → VpnHood! In-App Purchase; refusals are in the activity log ("REFUSED the code").',
                     'type'          => 'system',
                 ]);
             }

@@ -100,6 +100,7 @@ require_once __DIR__ . '/lib/Provisioning/AccountService.php';
 require_once __DIR__ . '/lib/Provisioning/ClientProvisioner.php';
 require_once __DIR__ . '/lib/Provisioning/OrderProvisioner.php';
 require_once __DIR__ . '/lib/Provisioning/DeliveryReader.php';
+require_once __DIR__ . '/lib/Provisioning/TermSync.php';
 require_once __DIR__ . '/lib/Provisioning/EntitlementService.php';
 require_once __DIR__ . '/lib/Provisioning/LegacyStoreHandover.php';
 require_once __DIR__ . '/lib/Provisioning/PlanService.php';

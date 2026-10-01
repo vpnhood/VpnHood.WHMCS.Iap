@@ -90,21 +90,29 @@ class EntitlementService
                 $user = $this->repo->getUser((int) $row['user_id']);
             }
 
-            // ---- already redeemed: idempotent replay — but only onto a service
-            // that still exists. A terminated/deleted service while the store
-            // still entitles (late renewal, out-of-order events) falls through
-            // and provisions anew; a resurrected status flip is never attempted.
-            if ($row['status'] === 'provisioned' && $row['service_id'] !== null) {
-                $serviceStatus = (string) Capsule::table('tblhosting')
-                    ->where('id', (int) $row['service_id'])->value('domainstatus');
+            // ---- already redeemed: idempotent replay onto a service that still exists, for a
+            // purchase the store still grants. The row's status is the store's billing word
+            // (provisioned, held, a legacy "canceled") and none of them calls for a new service
+            // — a status of its own once sent a cancelled-then-restarted subscription into a
+            // second order. Only a terminated/deleted service (late renewal, out-of-order
+            // events) falls through and provisions anew; a status flip is never attempted.
+            if ($row['service_id'] !== null && $record->isEntitled()
+                && in_array($row['status'], ['provisioned', 'canceled', 'on_hold'], true)
+            ) {
+                $serviceId = (int) $row['service_id'];
+                $serviceStatus = (string) Capsule::table('tblhosting')->where('id', $serviceId)->value('domainstatus');
                 if (in_array($serviceStatus, ['Active', 'Suspended'], true)) {
-                    // Persist the record's rolling facts before answering. A lapsed lineage that
+                    // Persist the record's rolling facts before answering: a lapsed lineage that
                     // just RESUBSCRIBED arrives on this same purchase_key carrying a new future
-                    // expiry; the reply below is honest either way, but the account snapshot reads
-                    // the LEDGER's expiry (isStoreStillCharging), so without this write the person
-                    // who just paid again stays unserved until a store notification happens by.
-                    $this->updateRow($row, ['last_error' => null], $record);
-                    return $this->entitlementFor($record, (int) $row['service_id'], $row['created_at'] ?? null);
+                    // expiry, and the account snapshot reads the LEDGER's expiry
+                    // (isStoreStillCharging). A hold the store recovered from re-enables the
+                    // service, and the term follows the store's paid time either way.
+                    $this->updateRow($row, ['status' => 'provisioned', 'last_error' => null], $record);
+                    if ($serviceStatus === 'Suspended') {
+                        (new OrderProvisioner($this->repo))->unsuspendService($serviceId);
+                    }
+                    (new TermSync($this->repo))->sync($serviceId, $record);
+                    return $this->entitlementFor($record, $serviceId, $row['created_at'] ?? null);
                 }
             }
 
@@ -124,7 +132,19 @@ class EntitlementService
                 ];
             }
             if (!$record->isEntitled()) {
-                $this->updateRow($row, ['status' => 'expired', 'last_error' => 'not entitled at redeem time: ' . $record->state], $record);
+                // Refused — and the ledger keeps the store's word: a hold or pause is recoverable
+                // (the RECOVERED charge is a renewal onto the suspended service), an expiry is
+                // final. A row whose service is still live keeps its status: the nightly
+                // reconciliation ends such a service with the configured grace, which a relabel
+                // here would skip — and leave the service behind as a live orphan.
+                $serviceLive = $row['service_id'] !== null && in_array((string) Capsule::table('tblhosting')
+                    ->where('id', (int) $row['service_id'])->value('domainstatus'), ['Active', 'Suspended'], true);
+                $changes = ['last_error' => 'not entitled at redeem time: ' . $record->state];
+                if (!$serviceLive) {
+                    $changes['status'] = in_array($record->state, [PurchaseRecord::STATE_ON_HOLD, PurchaseRecord::STATE_PAUSED], true)
+                        ? 'on_hold' : 'expired';
+                }
+                $this->updateRow($row, $changes, $record);
                 throw new ApiException('This purchase is no longer active.', 410, 'purchase_inactive');
             }
 
@@ -135,14 +155,14 @@ class EntitlementService
                     'status'     => 'pending',
                     'last_error' => "no catalog mapping for {$record->storeProductId}/{$record->basePlanId}",
                 ], $record);
-                $this->alertAdmins("vpnhoodiap: purchase for UNMAPPED SKU {$record->storeProductId}/{$record->basePlanId} parked (app #{$app['id']}).");
+                $this->repo->alert("vpnhoodiap: purchase for UNMAPPED SKU {$record->storeProductId}/{$record->basePlanId} parked (app #{$app['id']}).");
                 throw new ApiException('This product is not available yet. Please contact support.', 422, 'plan_not_available');
             }
 
             // ---- account gate
             if ($user === null) {
                 $this->updateRow($row, ['status' => 'pending', 'last_error' => 'no signed-in user for this purchase uid'], $record);
-                $this->alertAdmins("vpnhoodiap: purchase {$record->purchaseKey} has no attributable user; parked.");
+                $this->repo->alert("vpnhoodiap: purchase {$record->purchaseKey} has no attributable user; parked.");
                 throw new ApiException('This purchase cannot be attributed to an account.', 409, 'purchase_unattributed');
             }
             // ---- NOTHING IS REFUSED HERE (lifecycle §8: prevent before the money,
@@ -173,7 +193,7 @@ class EntitlementService
                 && in_array($record->linkedPurchaseKey, $liveKeys, true);
             $doubledWith = $liveKeys !== [] && !$supersedes ? $liveRows : [];
             if ($doubledWith !== []) {
-                $this->alertAdmins("vpnhoodiap: purchase {$record->purchaseKey} accepted for user #{$user['id']}"
+                $this->repo->alert("vpnhoodiap: purchase {$record->purchaseKey} accepted for user #{$user['id']}"
                     . ' which already holds an active store subscription — the account now holds two.');
             }
 
@@ -200,6 +220,19 @@ class EntitlementService
             // keep the client in step with the account's latest known name
             $clients->syncClient($clientId, $user['display_name'] ?? null);
 
+            // A live service the ledger still points at while a NEW order is placed is this
+            // same purchase's previous life (an expired lineage that resubscribed, a termination
+            // that failed): it is retired once the new one is delivered, so one purchase never
+            // runs two codes — and the replacement is said out loud, never silent.
+            $supersededServiceId = null;
+            if ($row['service_id'] !== null) {
+                $previousStatus = (string) Capsule::table('tblhosting')
+                    ->where('id', (int) $row['service_id'])->value('domainstatus');
+                if (in_array($previousStatus, ['Active', 'Suspended'], true)) {
+                    $supersededServiceId = (int) $row['service_id'];
+                }
+            }
+
             // ---- order + provision (one order per mapping row; bundles = several)
             $orders = new OrderProvisioner($this->repo);
             $placed = [];
@@ -211,7 +244,8 @@ class EntitlementService
                         $clientId,
                         (int) $mapping['whmcs_product_id'],
                         (int) $mapping['billing_cycle_months'],
-                        $transactionId
+                        $transactionId,
+                        TermSync::dueDateFor($record)
                     );
                     $order['transactionId'] = $transactionId;
                     $placed[] = $order;
@@ -257,6 +291,13 @@ class EntitlementService
 
             // ---- only now is the store told the purchase was delivered
             $adapter->finalize($app, $record);
+
+            if ($supersededServiceId !== null) {
+                $ended = $orders->terminateService($supersededServiceId, 'replaced by a new service of the same purchase');
+                $this->repo->alert("vpnhoodiap: service #$supersededServiceId (ledger status '{$row['status']}') was still live "
+                    . "when its purchase was provisioned anew as service #{$primary['serviceId']} — "
+                    . ($ended ? 'terminated.' : 'and could NOT be terminated; two codes are live.'));
+            }
 
             // The acceptance is never silent (lifecycle §8): the person now holds two real
             // subscriptions, and the one email tells them so — and where each one cancels.
@@ -521,16 +562,5 @@ class EntitlementService
             $rolling['store_currency'] = $record->currency;
         }
         Capsule::table('mod_vpnhood_iap_purchases')->where('id', $row['id'])->update(array_merge($rolling, $changes));
-    }
-
-    /** Loud ops: system activity log + module log (daily digest reads these). */
-    private function alertAdmins(string $message): void
-    {
-        try {
-            localAPI('LogActivity', ['description' => $message]);
-        } catch (\Throwable $e) {
-            // the alert must never take the pipeline down
-        }
-        $this->repo->log(null, 'alert', '', 0, null, $message);
     }
 }

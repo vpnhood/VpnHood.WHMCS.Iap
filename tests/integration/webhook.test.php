@@ -22,6 +22,7 @@ requireIapLib(
     'Provisioning/EntitlementService.php',
     'Provisioning/RefundService.php',
     'Provisioning/RenewalService.php',
+    'Provisioning/TermSync.php',
     'Controllers/NotificationController.php'
 );
 
@@ -142,12 +143,12 @@ try {
         ? ok('foreign package name skipped, never processed')
         : bad('package mismatch: ' . json_encode($result));
 
-    // ---- CANCELED → auto_renewing off, status canceled, no revoke
+    // ---- CANCELED → auto_renewing off, status UNCHANGED (still provisioned), no revoke
     $adapter->next = notif($marker, StoreNotification::CANCELED, "$marker-m3", "$marker-tok", $package);
     $result = $controller->handle($app, $adapter, [], '{}', []);
     $row = one($db, 'SELECT status, auto_renewing FROM mod_vpnhood_iap_purchases WHERE purchase_key=?', ["$marker-tok"]);
-    ($result['status'] === 200 && $row['status'] === 'canceled' && (int) $row['auto_renewing'] === 0)
-        ? ok('CANCELED flips auto-renew off and keeps the entitlement row')
+    ($result['status'] === 200 && $row['status'] === 'provisioned' && (int) $row['auto_renewing'] === 0)
+        ? ok('CANCELED flips auto-renew off and keeps the row provisioned (a status of its own doubled the service)')
         : bad('canceled dispatch: ' . json_encode([$result, $row]));
 
     // ---- REVOKED → terminate + the recorded charge goes back (idempotent)

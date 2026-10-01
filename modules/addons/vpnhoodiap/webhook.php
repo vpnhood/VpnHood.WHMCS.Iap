@@ -44,6 +44,7 @@ require_once __DIR__ . '/lib/Provisioning/DeliveryReader.php';
 require_once __DIR__ . '/lib/Provisioning/EntitlementService.php';
 require_once __DIR__ . '/lib/Provisioning/RefundService.php';
 require_once __DIR__ . '/lib/Provisioning/RenewalService.php';
+require_once __DIR__ . '/lib/Provisioning/TermSync.php';
 require_once __DIR__ . '/lib/Controllers/NotificationController.php';
 
 header('Content-Type: application/json; charset=utf-8');

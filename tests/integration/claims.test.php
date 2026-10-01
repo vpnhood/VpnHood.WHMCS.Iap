@@ -39,6 +39,7 @@ requireIapLib(
     'Provisioning/OrderProvisioner.php',
     'Provisioning/DeliveryReader.php',
     'Provisioning/AccountKeyService.php',
+    'Provisioning/TermSync.php',
     'Provisioning/EntitlementService.php'
 );
 
