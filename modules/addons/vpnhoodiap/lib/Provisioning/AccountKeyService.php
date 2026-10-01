@@ -529,7 +529,9 @@ class AccountKeyService
             return ['paidNow' => false, 'purchasedAt' => $purchasedAt];
         }
         $nextDue = (string) $row->nextduedate;
-        $paidNow = $nextDue !== '' && $nextDue !== '0000-00-00' && strtotime($nextDue) >= strtotime('today');
+        // the code ends at 00:00 UTC of the due date, whatever the install's timezone: on that day
+        // an unpaid renewal is no longer paid for
+        $paidNow = $nextDue !== '' && $nextDue !== '0000-00-00' && $nextDue > gmdate('Y-m-d');
         return ['paidNow' => $paidNow, 'purchasedAt' => $purchasedAt];
     }
 

@@ -519,6 +519,36 @@ try {
         : bad('nothing was raised when a paying subscriber was refused');
     $keyService->clearRejection($owner, (string) $code);
 
+    // …but ON ITS DUE DATE the service is not paid for any more: its code ended at 00:00 UTC that
+    // day. A refusal of it is recorded, raises no "being paid for" alert (an unpaid renewal is not
+    // our fault), and the account moves on to its other paid code instead of raising an alert on
+    // every refusal while those codes sit unused.
+    $paidAlerts = fn () => Capsule::table('tblactivitylog')
+        ->where('description', 'like', '%REFUSED the code of a subscription being paid for%')
+        ->where('description', 'like', '%iap user #' . $userIds['owner'] . '%')
+        ->count();
+    $alertsBefore = $paidAlerts();
+    $ownerDue = (string) Capsule::table('tblhosting')->where('id', $serviceId)->value('nextduedate');
+    Capsule::table('tblhosting')->where('id', $serviceId)->update(['nextduedate' => gmdate('Y-m-d')]);
+    // the other paid code steps out first, so the due-day code is the one the device reports on
+    $keyService->setAutoSelectable($owner, $serviceIds[1], false);
+    ($keyService->accessCodeInfoForUser($owner)['accessCode'] ?? null) === $code
+        ? ok('(setup) the due-day code is the one being served')
+        : bad('setup: the due-day code is not served: ' . json_encode($keyService->accessCodeInfoForUser($owner)));
+    $keyService->reportRejected($owner, (string) $code);
+    $keyService->isRejected($owner, (string) $code)
+        ? ok('on its due date a refused code is recorded like any unpaid one')
+        : bad('a due-date refusal was not recorded');
+    $paidAlerts() === $alertsBefore
+        ? ok('…and raises no "being paid for" alert')
+        : bad('a due-date refusal raised a "being paid for" alert');
+    $keyService->setAutoSelectable($owner, $serviceIds[1], true);
+    ($keyService->accessCodeInfoForUser($owner)['accessCode'] ?? null) === $code2
+        ? ok('…and the account serves its other paid code instead of the dead one')
+        : bad('a service on its due date was still served as paid for');
+    Capsule::table('tblhosting')->where('id', $serviceId)->update(['nextduedate' => $ownerDue]);
+    $keyService->clearRejection($owner, (string) $code);
+
     // ONCE EVERYTHING HAS BEEN REFUSED, THE ACCOUNT HOLDS ITS GROUND. Both of this account's
     // services are one-time here, so neither is being paid for and neither is exempt. A refusal
     // steps aside for the next working code; when no working code is left the account keeps
