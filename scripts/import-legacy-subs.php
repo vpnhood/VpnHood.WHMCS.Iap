@@ -10,15 +10,11 @@
  * customer their entitlement the moment they sign into the new app. The JSON is
  * produced by .user/store.vpnhood.com/legacy-migration/export-legacy-subs.mjs.
  *
- * RUN IT AGAIN, WITH A FRESH EXPORT, IMMEDIATELY BEFORE THE OLD STORE IS SWITCHED
- * OFF. Subscriptions renew, lapse and cancel continuously, so an import from last
- * week describes a world that no longer exists. Re-importing is safe: rows are
- * matched on (store, purchase_key) and updated in place, and a row that has
- * already been claimed is never reopened.
+ * Re-importing is safe: rows are matched on (store, purchase_key) and updated in
+ * place, and a row that has already been claimed is never reopened. The old store
+ * is switched off and its database archived, so production's import is final.
  *
- * Runbook: <Vh root>/.user/docs/legacy-store-shutdown.md
- *
- * TEMPORARY — delete with the table and LegacyStoreHandover once drained.
+ * TEMPORARY — removed with LegacyStoreHandover (the drain condition and the list are there).
  */
 
 foreach (['/home/whmcsdev/web/whmcs-dev.vpnhood.com/public_html', getcwd(), dirname(__DIR__)] as $root) {

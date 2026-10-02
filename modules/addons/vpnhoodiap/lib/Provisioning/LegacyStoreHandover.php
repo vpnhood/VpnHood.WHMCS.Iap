@@ -14,12 +14,12 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
  * Hands a customer of the retired .NET store (store.vpnhood.com / VhStoreDb) their
  * entitlement the moment they sign into the new app, without them doing anything.
  *
- * WHY THIS EXISTS. The old store is being switched off. It sold Play subscriptions that
- * are still auto-renewing, and its database is the only place that records who owns
- * them. The owner's position (2026-09-01) is that we neither chase these customers nor
- * cancel their subscriptions — cancelling is theirs to do in Google — but that anyone
- * who signs in with the same Google account must get their code. This class is that
- * promise, and `mod_vpnhood_iap_legacy_subs` is the copy of the old database it reads.
+ * WHY THIS EXISTS. The old store is switched off and its database archived. It sold Play
+ * subscriptions that are still auto-renewing, and `mod_vpnhood_iap_legacy_subs` (the copy
+ * this class reads) is now the only live record of who owns them. The owner's position
+ * (2026-09-01) is that we neither chase these customers nor cancel their subscriptions —
+ * cancelling is theirs to do in Google — but that anyone who signs in with the same Google
+ * account must get their code. This class is that promise.
  *
  * MATCHING IS BY VERIFIED EMAIL, and it has to be: the old store never stored a Google
  * OIDC subject, so there is no stronger key to join on. The caller has already rejected
@@ -35,8 +35,13 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
  * through adoptLegacyPurchase exactly as it would for a manual restore. Nothing here
  * bypasses a guard; it only saves the customer the trip.
  *
- * DELETE THIS with the rest of the legacy-store carve-out once the table is drained —
- * see adoptLegacyPurchase, and .user/docs/legacy-store-shutdown.md for the runbook.
+ * TODO REMOVE the whole legacy-store carve-out, in a versioned release, once drained (decision
+ * 2026-08-24): no `legacy.handover` or `purchase.legacy-adopted` logged for one release cycle,
+ * and no unclaimed row still live at Google. Google drains it over months: the last yearly row
+ * runs to at least 2027-07-12. Goes together: this class and its call in api.php's sign-in,
+ * EntitlementService::adoptLegacyPurchase and its call in redeem(), the table and
+ * vpnhoodiap_migrateToLegacyStoreHandover() (drop it in _upgrade), scripts/import-legacy-subs.php,
+ * and their tests. A row's 'pending' status is not the measure: a restore adopts without claiming it.
  */
 final class LegacyStoreHandover
 {

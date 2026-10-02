@@ -407,15 +407,14 @@ function vpnhoodiap_migrateToSellableFlag(): void
 
 /**
  * The retired .NET store (store.vpnhood.com) sold Play subscriptions that are still
- * auto-renewing, and its database is the only record of who owns them. This table is a
- * copy of that record, loaded by scripts/import-legacy-subs.php, and read once per
+ * auto-renewing. This table is the copy of its (now archived) record of who owns them,
+ * loaded by scripts/import-legacy-subs.php, and read once per
  * sign-in by LegacyStoreHandover so a returning customer gets their code without asking.
  *
  * Keyed on the address because the old store never stored a Google OIDC subject - see
  * LegacyStoreHandover for why that is safe and what it costs.
  *
- * TEMPORARY. Drop the table, the service and the import script together once every row
- * has left 'pending'; the runbook is .user/docs/legacy-store-shutdown.md.
+ * TEMPORARY: removed with LegacyStoreHandover — the drain condition and the removal list are there.
  */
 function vpnhoodiap_migrateToLegacyStoreHandover(): void
 {
