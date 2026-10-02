@@ -32,8 +32,12 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
  * through adoptLegacyPurchase exactly as it would for a manual restore. Nothing here
  * bypasses a guard; it only saves the customer the trip.
  *
- * DELETE THIS with the rest of the legacy-store carve-out once the table is drained —
- * see adoptLegacyPurchase.
+ * TODO REMOVE the whole legacy-store carve-out, in a versioned release, once drained: no
+ * `legacy.handover` or `purchase.legacy-adopted` logged for one release cycle, and no imported
+ * row still live at the store. Goes together: this class and its call in api.php's sign-in,
+ * EntitlementService::adoptLegacyPurchase and its call in redeem(), the table and
+ * vpnhoodiap_migrateToLegacyStoreHandover() (drop it in _upgrade), the one-shot import, and
+ * their tests. A row's 'pending' status is not the measure: a restore adopts without claiming it.
  */
 final class LegacyStoreHandover
 {

@@ -475,8 +475,8 @@ class EntitlementService
      *      only migrate an entitlement, never stack a second one.
      *
      * Every adoption is logged as `purchase.legacy-adopted`, so "drained" is
-     * measured, not guessed. REMOVE this method and its call in redeem() once
-     * every legacy subscription has been redeemed or has lapsed.
+     * measured, not guessed. REMOVE this method and its call in redeem() with
+     * LegacyStoreHandover — the drain condition and the removal list are there.
      */
     private function adoptLegacyPurchase(PurchaseRecord $record, array $sessionUser): bool
     {

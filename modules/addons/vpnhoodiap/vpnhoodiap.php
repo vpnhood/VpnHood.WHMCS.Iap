@@ -407,14 +407,13 @@ function vpnhoodiap_migrateToSellableFlag(): void
 
 /**
  * A previous store's Play subscriptions that are still auto-renewing, loaded by a one-shot
- * import. This table is the copy of its record of who owns them, read once per
- * sign-in by LegacyStoreHandover so a returning customer gets their code without asking.
+ * import. This table is the copy of its record of who owns them, read once per sign-in by
+ * LegacyStoreHandover so a returning customer gets their code without asking.
  *
  * Keyed on the address because the old store never stored a Google OIDC subject - see
  * LegacyStoreHandover for why that is safe and what it costs.
  *
- * TEMPORARY. Drop the table, the service and the import script together once every row
- * has left 'pending'.
+ * TEMPORARY: removed with LegacyStoreHandover — the drain condition and the removal list are there.
  */
 function vpnhoodiap_migrateToLegacyStoreHandover(): void
 {
