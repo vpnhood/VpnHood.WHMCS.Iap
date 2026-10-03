@@ -73,9 +73,9 @@ add_hook('ClientAreaPageProductDetails', 1, function (array $vars) {
 /**
  * Sidebar items this addon takes off a store-bought service, by child NAME.
  *
- * 'RefundRequest' is the hub's own "Request a Refund" item (VpnHood.WHMCS
- * includes/hooks/vpnhoodcustomhook.php), which opens a support ticket asking us for
- * money back we never took — the single most misleading thing that could sit next to
+ * 'RefundRequest' is a site's own "Request a Refund" item (added by a site hook at
+ * priority 100), which opens a support ticket asking for money back the site never
+ * took — the single most misleading thing that could sit next to
  * a "billed by Google Play" notice. It is matched by name because its URI is an
  * ordinary submitticket.php link that no action pattern would catch. Removing a name
  * that is not present is a no-op, so installs without that hook are unaffected.
@@ -84,7 +84,7 @@ const VPNHOODIAP_REMOVED_SIDEBAR_ITEMS = ['RefundRequest', 'Cancellation Request
 
 // themes that build the same actions as sidebar children (lagom2), plus the hub's own
 // added items. Priority 200 so it runs after BOTH lagom2's sidebar hook (priority 1)
-// and vpnhoodcustomhook.php's (priority 100) — an item can only be removed after the
+// and the site hook that adds RefundRequest (priority 100) — an item can only be removed after the
 // hook that adds it has run, and matching that priority would leave the order to
 // registration sequence.
 add_hook('ClientAreaPrimarySidebar', 200, function ($primarySidebar) {
