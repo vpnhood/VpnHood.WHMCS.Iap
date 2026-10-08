@@ -105,8 +105,8 @@ docs/IAP-APPLE-APP-STORE.md         store setup: Apple App Store
 docs/IAP-MONEY.md                   how store sales appear in WHMCS billing
 modules/gateways/vpnhoodiappay.php     bookkeeping gateway (store is the merchant of record)
 includes/hooks/                     WHMCS-level hooks: cron, gateway hiding, product
-                                    actions, refund marks, mail suppression (store
-                                    invoices + deleted clients), verification gate
+                                    actions, mail suppression (store invoices + deleted
+                                    clients), verification gate
 scripts/set-version.sh              propagate ./VERSION into the module
 scripts/test-dev.sh                 run the test suites against the dev WHMCS
 scripts/watch-dev.sh                live tail of the module pipeline on the dev WHMCS

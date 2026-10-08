@@ -35,7 +35,7 @@ function vpnhoodiap_config(): array
     return [
         'name'        => 'VpnHood! In-App Purchase',
         'description' => 'Processes app-store purchases (Google Play / Apple / Microsoft) into WHMCS clients, orders and paid invoices, delivering VpnHood access codes through the install\'s provisioning module.',
-        'version'     => '1.8.7',
+        'version'     => '1.8.8',
         'author'      => 'VpnHood',
         'fields'      => [
             'AdminAlertEmail' => [
@@ -255,7 +255,8 @@ function vpnhoodiap_activate(): array
             });
         }
 
-        vpnhoodiap_migrateToAccountKeys(); // claims + refund marks + journal details on fresh installs too
+        vpnhoodiap_migrateToAccountKeys(); // claims + journal details on fresh installs too
+        vpnhoodiap_migrateOffRefundMarks();
         vpnhoodiap_migrateToInvoiceFreeze();
         vpnhoodiap_migrateToServerChosenCode();
         vpnhoodiap_migrateOffRemovedCodePark();
@@ -467,6 +468,7 @@ function vpnhoodiap_upgrade(array $vars): void
     vpnhoodiap_migrateToEmailIdentity();
     vpnhoodiap_migrateToIdentityResolution();
     vpnhoodiap_migrateToAccountKeys();
+    vpnhoodiap_migrateOffRefundMarks();
     vpnhoodiap_migrateToInvoiceFreeze();
     vpnhoodiap_migrateToServerChosenCode();
     vpnhoodiap_migrateOffRemovedCodePark();
@@ -838,10 +840,9 @@ function vpnhoodiap_migrateToIdentityResolution(): void
 /**
  * The account→key pointer layer (lifecycle §7/§8): claims record that an
  * account holds a key it proved by pasting the code — nothing about billing
- * moves — and the refund marks are the disclosed 24-month one-way fingerprint
- * of refunded accounts. The deletions journal gains a details column for the
- * gateway agreement references and other non-personal breadcrumbs deletion
- * must not destroy.
+ * moves. The deletions journal gains a details column for the gateway
+ * agreement references and other non-personal breadcrumbs deletion must not
+ * destroy.
  */
 function vpnhoodiap_migrateToAccountKeys(): void
 {
@@ -856,17 +857,28 @@ function vpnhoodiap_migrateToAccountKeys(): void
             $table->unique(['user_id', 'service_id'], 'iap_claims_user_service');
         });
     }
-    if (!$schema->hasTable('mod_vpnhood_iap_refund_marks')) {
-        $schema->create('mod_vpnhood_iap_refund_marks', function ($table) {
-            $table->increments('id');
-            $table->string('email_hash', 64)->index();
-            $table->timestamp('created_at')->nullable()->index();
-        });
-    }
     if ($schema->hasTable('mod_vpnhood_iap_deletions') && !$schema->hasColumn('mod_vpnhood_iap_deletions', 'details')) {
         $schema->table('mod_vpnhood_iap_deletions', function ($table) {
             $table->text('details')->nullable();
         });
+    }
+}
+
+/**
+ * Migration (2026-10): drop a few months after it ships. The refund marks were this
+ * module's own list of refunded addresses, written on every refund. A store's refund is
+ * the store's decision and leaves no record here any more, and a website refund is
+ * remembered by the hub's own hook (vpnhood-refund-memory.php), so the table goes, with
+ * the "repeat refund" rows it produced in the log.
+ */
+function vpnhoodiap_migrateOffRefundMarks(): void
+{
+    $schema = Capsule::schema();
+    if ($schema->hasTable('mod_vpnhood_iap_refund_marks')) {
+        $schema->drop('mod_vpnhood_iap_refund_marks');
+    }
+    if ($schema->hasTable('mod_vpnhood_iap_log')) {
+        Capsule::table('mod_vpnhood_iap_log')->where('action', 'refund.repeat')->delete();
     }
 }
 

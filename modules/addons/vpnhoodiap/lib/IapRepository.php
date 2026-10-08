@@ -853,30 +853,6 @@ class IapRepository
             ->get()->map(fn ($row) => (array) $row)->all();
     }
 
-    // -- refund marks ---------------------------------------------------------
-
-    /**
-     * The 24-month one-way fingerprint of a refunded account (lifecycle §8):
-     * a salted-nothing sha256 of the normalized address — it cannot be turned
-     * back into a person, it survives deletion, and its only use is judging
-     * future refund requests. Disclosed at refund time.
-     */
-    public function addRefundMark(string $email): void
-    {
-        Capsule::table('mod_vpnhood_iap_refund_marks')->insert([
-            'email_hash' => hash('sha256', self::normalizeEmail($email)),
-            'created_at' => date('Y-m-d H:i:s'),
-        ]);
-    }
-
-    /** Was this address refunded before (within the retained 24 months)? */
-    public function hasRefundMark(string $email): bool
-    {
-        return Capsule::table('mod_vpnhood_iap_refund_marks')
-            ->where('email_hash', hash('sha256', self::normalizeEmail($email)))
-            ->exists();
-    }
-
     // -- audit log + rate limiting ------------------------------------------
 
     /**

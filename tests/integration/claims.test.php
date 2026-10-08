@@ -17,8 +17,7 @@
  *   - NO promotion: a dead choice serves nothing and nothing is re-picked — the
  *     access server is the one that breaks the news;
  *   - the legacy code endpoints answering 404, and the account snapshot carrying
- *     a single ranked accessCode (never a list);
- *   - refund marks (the 24-month fingerprint) round-trip.
+ *     a single ranked accessCode (never a list).
  *
  * ⚠ Places TWO real orders on a vpnhoodstore product for a throwaway client —
  * real access tokens are created on the access manager, then terminated and
@@ -735,15 +734,6 @@ try {
         : bad('bulkOrderCount did not see the batches');
     \WHMCS\Service\Service::find($serviceIds[1])->serviceProperties->save(['bulkDelivery' => '']);
     \WHMCS\Service\Service::find($serviceId)->serviceProperties->save(['bulkDelivery' => '']);
-
-    // == refund marks round-trip ==============================================
-    $repo->addRefundMark("refund-$marker@vpnhood.test");
-    $repo->hasRefundMark("Refund-$marker@vpnhood.test  ")
-        ? ok('refund mark found back (normalized, one-way)')
-        : bad('refund mark not found');
-    !$repo->hasRefundMark("never-$marker@vpnhood.test")
-        ? ok('no false positives on refund marks')
-        : bad('refund mark false positive');
 } finally {
     // == cleanup ==============================================================
     foreach ($userIds as $userId) {
@@ -756,8 +746,6 @@ try {
         Capsule::table('mod_vpnhood_iap_claims')->where('client_id', $clientId)->delete();
     }
     Capsule::table('mod_vpnhood_iap_purchases')->where('purchase_key', 'like', "$marker%")->delete();
-    Capsule::table('mod_vpnhood_iap_refund_marks')
-        ->where('email_hash', hash('sha256', "refund-$marker@vpnhood.test"))->delete();
     if (!empty($appId)) {
         Capsule::table('mod_vpnhood_iap_products')->where('app_id', $appId)->delete();
         Capsule::table('mod_vpnhood_iap_apps')->where('id', $appId)->delete();

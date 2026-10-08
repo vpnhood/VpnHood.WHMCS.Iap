@@ -32,9 +32,6 @@ class RefundService
     {
     }
 
-    /** The client the booked refund belonged to — set by bookRefund, read after the transaction. */
-    private ?int $refundedClientId = null;
-
     /**
      * @param array $purchase a mod_vpnhood_iap_purchases row
      * @return string what happened: refunded | skipped-already | skipped-no-payment
@@ -56,7 +53,6 @@ class RefundService
         // the same second (the inbox dedup cannot collapse them), so a plain
         // exists-then-insert double-books the refund. The second request blocks on
         // the row lock until the first one's refund is committed, then sees it.
-        $this->refundedClientId = null;
         $outcome = Capsule::connection()->transaction(function () use ($chargeId, $refundTransactionId, $purchase) {
             $payment = Capsule::table('tblaccounts')->where('transid', $chargeId)->lockForUpdate()->first();
             if ($payment === null) {
@@ -74,9 +70,6 @@ class RefundService
         // round-trip must never run while a WHMCS payment row is locked.
         if ($outcome === 'refunded') {
             $this->revokeKey($purchase);
-            if ($this->refundedClientId !== null) {
-                $this->markRefundedAccount($this->refundedClientId);
-            }
         }
         return $outcome;
     }
@@ -119,28 +112,6 @@ class RefundService
         }
     }
 
-    /**
-     * The disclosed 24-month one-way fingerprint of a refunded account
-     * (lifecycle §8), plus the repeat-refund alert that is its whole purpose.
-     */
-    private function markRefundedAccount(int $clientId): void
-    {
-        $email = (string) Capsule::table('tblclients')->where('id', $clientId)->value('email');
-        if ($email === '' || str_ends_with($email, '@anonymized.invalid')) {
-            return; // deleted account — there is no person left to fingerprint
-        }
-        if ($this->repo->hasRefundMark($email)) {
-            try {
-                localAPI('LogActivity', ['description' =>
-                    "vpnhoodiap: repeat refund — client #{$clientId} was refunded before (within 24 months)."]);
-            } catch (\Throwable) {
-                // repo log below still records it
-            }
-            $this->repo->log(null, 'refund.repeat', '', 0, ['client' => $clientId], 'repeat refund mark');
-        }
-        $this->repo->addRefundMark($email);
-    }
-
     /** @return string refunded | skipped-no-payment */
     private function bookRefund(array $purchase, object $payment, string $chargeId, string $refundTransactionId): string
     {
@@ -164,7 +135,6 @@ class RefundService
             // the customer-facing refund mail is aborted by the suppression hook
             localAPI('UpdateInvoice', ['invoiceid' => $invoiceId, 'status' => 'Refunded']);
         }
-        $this->refundedClientId = (int) $payment->userid;
         return 'refunded';
     }
 }
