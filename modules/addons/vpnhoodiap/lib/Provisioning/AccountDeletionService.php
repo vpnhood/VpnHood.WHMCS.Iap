@@ -182,7 +182,9 @@ class AccountDeletionService
      * the key keeps working for the time already bought. Store-billed services
      * (the module's own) are left to the store lifecycle. The gateway agreement
      * handle is collected for the journal — deletion must never destroy the one
-     * thing that can stop a billing agreement.
+     * thing that can stop a billing agreement. In practice it is empty: a gateway
+     * that charges a stored card keeps no subscription object for WHMCS to record,
+     * and dropping that card (dropStoredPayMethods) is what stops it.
      *
      * @return array{cancelledAtPeriodEnd: array<int,array{service:int, subscriptionId:string}>}
      * @throws ApiException 502 deletion_failed when a cancellation cannot be recorded

@@ -214,7 +214,7 @@ function vpnhoodiap_getOpenApi(IapRepository $repo, array $request): array
  *   { challengeToken, code, packageName }      second-factor completion
  *   { assertionResponseJson, packageName }     restore-credential assertion (zero-tap)
  *
- * → 201 { accessToken, expiresAt, userId }
+ * → 201 { accessToken, expiresAt, userId } — expiresAt null: a session has no time limit
  * The password form may instead answer 200 { challenge } when a second factor
  * is due; the challenge completion may add newBackupCode when one was spent.
  */
@@ -366,9 +366,9 @@ function vpnhoodiap_passwordChallengeForm(IapRepository $repo, array $request): 
 function vpnhoodiap_sessionBody(array $user, ?string $store): array
 {
     $session = (new SessionService())->issue((int) $user['id'], $store);
-    // Identity and lifetime only — what this device may now do. Who the person is (email,
-    // name) belongs to GET /v1/account and is read from there: an address here would be a
-    // second copy of a MUTABLE value, frozen at sign-in and stale the day it is changed.
+    // Identity only — what this device may now do; expiresAt stays on the wire, null. Who the
+    // person is (email, name) belongs to GET /v1/account and is read from there: an address here
+    // would be a second copy of a MUTABLE value, frozen at sign-in and stale the day it is changed.
     return [
         'accessToken' => $session['token'],
         'expiresAt'   => $session['expiresAt'],

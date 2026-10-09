@@ -66,9 +66,13 @@ for additive changes too.
 ## Authentication
 
 `POST /v1/auth/sessions` exchanges an identity provider's id token for a **portal session
-token**: 64 hex characters, valid 30 days, stored only as a SHA-256 hash, revocable at
-any time. It is deliberately *not* a JWT — there are no signing keys to manage and a
-sign-out is real, not just a client-side forget.
+token**: 64 hex characters, stored only as a SHA-256 hash, revocable at any time. It has
+no time limit (`expiresAt` is null): it ends at sign-out, at account deletion, or when
+revoked. An app calls the portal only when something it holds expires, a month or a year
+apart, and its users often reach the portal only through the VPN, so a lifetime would sign
+people out at renewal and make them type a password again. It is deliberately *not* a
+JWT — there are no signing keys to manage and a sign-out is real, not just a client-side
+forget.
 
 Send it on every other call:
 
