@@ -11,15 +11,14 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
 
 /**
  * Opaque app session tokens: 64 hex chars handed to the app, sha256 at rest,
- * constant-time lookup by hash, revocation. Not JWTs on purpose — revocable
- * server-side, no signing keys to manage.
+ * constant-time lookup by hash. Not JWTs on purpose — a sign-out deletes the
+ * session server-side, no signing keys to manage.
  *
- * A session has NO time limit: it ends at sign-out, at account deletion, or when
- * revoked. The app calls the portal only when something it holds expires — a month
- * or a year apart — and many of its users reach the portal only through the VPN, so
- * a time limit signed people out at renewal and made them type a password again, on
- * a TV as well. `expires_at` is therefore left null; rows written while sessions
- * lasted 30 days still carry a date, and nothing reads it.
+ * A session has NO time limit: it ends at sign-out or at account deletion, and
+ * nothing of it is kept after. The app calls the portal only when something it
+ * holds expires — a month or a year apart — and many of its users reach the portal
+ * only through the VPN, so a time limit signed people out at renewal and made them
+ * type a password again, on a TV as well.
  */
 class SessionService
 {
@@ -48,7 +47,7 @@ class SessionService
      * Resolve a bearer token to its user row (module user, not WHMCS client).
      *
      * @return array the mod_vpnhood_iap_users row plus 'session_id'
-     * @throws ApiException 401 when the token is missing/unknown/revoked
+     * @throws ApiException 401 when the token is missing or unknown (a signed-out one is gone)
      */
     public function resolve(?string $token): array
     {
@@ -59,7 +58,6 @@ class SessionService
         $row = Capsule::table('mod_vpnhood_iap_sessions as s')
             ->join('mod_vpnhood_iap_users as u', 'u.id', '=', 's.user_id')
             ->where('s.token_hash', hash('sha256', $token))
-            ->whereNull('s.revoked_at')
             ->first(['u.*', 's.id as session_id', 's.last_used_at', 's.store as session_store']);
         if ($row === null) {
             throw new ApiException('Unauthorized.', 401);
@@ -76,7 +74,7 @@ class SessionService
         return $user;
     }
 
-    /** Revoke one token (sign-out). Unknown tokens are ignored — revoke is idempotent. */
+    /** Sign-out: the session is deleted. Unknown tokens are ignored — revoke is idempotent. */
     public function revoke(?string $token): void
     {
         if ($token === null || $token === '') {
@@ -84,27 +82,6 @@ class SessionService
         }
         Capsule::table('mod_vpnhood_iap_sessions')
             ->where('token_hash', hash('sha256', $token))
-            ->whereNull('revoked_at')
-            ->update(['revoked_at' => date('Y-m-d H:i:s')]);
-    }
-
-    /** Revoke every session of a user (account deletion / security response). */
-    public function revokeAllForUser(int $userId): void
-    {
-        Capsule::table('mod_vpnhood_iap_sessions')
-            ->where('user_id', $userId)
-            ->whereNull('revoked_at')
-            ->update(['revoked_at' => date('Y-m-d H:i:s')]);
-    }
-
-    /**
-     * Cron hygiene: hard-delete sessions revoked for over a week. A session never revoked stays,
-     * whatever `expires_at` an older row carries: deleting it would sign its device out.
-     */
-    public function purgeStale(): int
-    {
-        return Capsule::table('mod_vpnhood_iap_sessions')
-            ->where('revoked_at', '<', date('Y-m-d H:i:s', time() - 7 * 86400))
             ->delete();
     }
 }

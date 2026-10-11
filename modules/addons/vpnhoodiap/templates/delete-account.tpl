@@ -22,8 +22,9 @@
           one, cancel it in the store where you purchased it — before or after deleting.</li>
       <li>Access you have already paid for keeps working until that period ends. Services
           billed by us stop billing at the end of the period you have already paid for.</li>
-      <li>We email you your premium codes one last time before your address is erased.
-          Save them: after this we cannot look them up for you again.</li>
+      <li>Nothing is emailed to you on the way out, and after deletion we cannot look your
+          premium codes up for you. Save them first: the order email that delivered a code,
+          or a copy from this client area, is the way back.</li>
       <li>Invoices are kept because tax law requires it, for as long as that law requires,
           and are used for nothing else. They keep the name they were issued with.</li>
     </ul>

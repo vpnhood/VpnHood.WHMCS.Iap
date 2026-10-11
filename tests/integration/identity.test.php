@@ -29,7 +29,7 @@ if (!iapModuleActive($db)) {
     finish();
 }
 if (!tableExists($db, 'mod_vpnhood_iap_identities')) {
-    bad('identities table missing — run the upgrade (open the addon page) first');
+    bad('identities table missing — run the activation test first');
     finish();
 }
 

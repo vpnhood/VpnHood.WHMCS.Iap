@@ -7,7 +7,7 @@
  *      self-healing net under dropped/failed webhooks.
  *   2. Voided-purchases sweep: store-side refunds terminate the service even
  *      when the webhook never arrived.
- *   3. Hygiene: purge stale sessions, clear raw payloads past retention, and
+ *   3. Hygiene: clear raw payloads and the request log past their retention, and
  *      re-clamp the bookkeeping gateway's order-form visibility (an admin can
  *      re-tick the checkbox; the gateway must never be offered at checkout).
  *   4. Ops digest: parked/failed purchases and failed events mailed to the
@@ -34,7 +34,6 @@ add_hook('DailyCronJob', 1, function () {
     require_once $moduleDir . '/lib/IapRepository.php';
     require_once $moduleDir . '/lib/Auth/IdentityProviderInterface.php';
     require_once $moduleDir . '/lib/Auth/GoogleIdentityProvider.php';
-    require_once $moduleDir . '/lib/Auth/SessionService.php';
     require_once $moduleDir . '/lib/Stores/Dto/PurchaseRecord.php';
     require_once $moduleDir . '/lib/Stores/Dto/StoreNotification.php';
     require_once $moduleDir . '/lib/Stores/StoreAdapterInterface.php';
@@ -173,8 +172,15 @@ add_hook('DailyCronJob', 1, function () {
     } catch (\Throwable $e) {
         logModuleCall('vpnhoodiap', 'cron.gateway-visibility', '', $e->getMessage(), '');
     }
+    // the same for WHMCS's invoice snapshots: an admin can untick "Store Client Data
+    // Snapshot", and a deleted person's invoices then read "Deleted Account"
     try {
-        (new \WHMCS\Module\Addon\VpnHoodIap\Auth\SessionService())->purgeStale();
+        require_once __DIR__ . '/../../modules/addons/vpnhoodiap/lib/Provisioning/AccountDeletionService.php';
+        \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService::keepInvoiceSnapshotsOn();
+    } catch (\Throwable $e) {
+        logModuleCall('vpnhoodiap', 'cron.invoice-snapshots', '', $e->getMessage(), '');
+    }
+    try {
         $retentionDays = max(1, (int) ($repo->setting('RawPayloadRetentionDays') ?: 90));
         $cutoff = date('Y-m-d H:i:s', time() - $retentionDays * 86400);
         Capsule::table('mod_vpnhood_iap_purchases')
@@ -183,16 +189,7 @@ add_hook('DailyCronJob', 1, function () {
         Capsule::table('mod_vpnhood_iap_events')
             ->where('created_at', '<', $cutoff)->whereNotNull('raw')
             ->update(['raw' => null]);
-        // The request log is the rate limiter's window (seconds) and the audit trail. HTTP
-        // traffic rows (route actions, and the empty action of a refused verb) past the
-        // retention go, a bounded batch a night; the module's own audit rows (alerts,
-        // handovers, renewals…) stay — LegacyStoreHandover's removal condition counts them.
-        Capsule::table('mod_vpnhood_iap_log')
-            ->where('created_at', '<', $cutoff)
-            ->where(function ($query) {
-                $query->where('action', 'like', '% /v1/%')->orWhere('action', '')->orWhereNull('action');
-            })
-            ->limit(50000)->delete();
+        $repo->pruneRequestLog();
     } catch (\Throwable $e) {
         logModuleCall('vpnhoodiap', 'cron.hygiene', '', $e->getMessage(), '');
     }

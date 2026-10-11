@@ -59,15 +59,7 @@ if (!iapModuleActive($db)) {
     finish();
 }
 if (!tableExists($db, 'mod_vpnhood_iap_claims')) {
-    bad('mod_vpnhood_iap_claims missing — WHMCS has not run the module upgrade yet');
-    finish();
-}
-if (!columnExists($db, 'mod_vpnhood_iap_claims', 'client_id')) {
-    bad('server-chosen-code columns missing — WHMCS has not run the 1.0.14 upgrade yet');
-    finish();
-}
-if (columnExists($db, 'mod_vpnhood_iap_users', 'default_cleared_at')) {
-    bad('users.default_cleared_at still present — WHMCS has not run the 1.0.16 upgrade yet');
+    bad('mod_vpnhood_iap_claims missing — run the activation test first');
     finish();
 }
 

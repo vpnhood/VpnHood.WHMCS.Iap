@@ -67,8 +67,8 @@ for additive changes too.
 
 `POST /v1/auth/sessions` exchanges an identity provider's id token for a **portal session
 token**: 64 hex characters, stored only as a SHA-256 hash, revocable at any time. It has
-no time limit (`expiresAt` is null): it ends at sign-out, at account deletion, or when
-revoked. An app calls the portal only when something it holds expires, a month or a year
+no time limit (`expiresAt` is null): it ends at sign-out or at account deletion, and a
+sign-out deletes it on the server. An app calls the portal only when something it holds expires, a month or a year
 apart, and its users often reach the portal only through the VPN, so a lifetime would sign
 people out at renewal and make them type a password again. It is deliberately *not* a
 JWT — there are no signing keys to manage and a sign-out is real, not just a client-side
@@ -450,7 +450,10 @@ the only thing that leaves is the upload slot's previous occupant.
 
 `DELETE /v1/account` is the account deletion the app stores and GDPR require: sessions on
 every device, sign-in identities and the account row are erased in one call, and the
-customer record behind the retained invoices is anonymized and closed. Signing in
+customer record behind the retained invoices is anonymized and closed, with WHMCS's own
+traces of the person: its mail log, its activity log, the addresses of the last
+sign-ins and of the orders, the person's support tickets, and the links to their
+sign-in providers. Signing in
 again later creates a brand-new empty account — there is no account restore, and no
 identifier of the deleted person is kept (the purchase ledger and the deletion
 journal retain only numeric row ids).
@@ -468,7 +471,7 @@ access code is an open gate with no personal data, and the paid period keeps wor
 until its own clock ends it. And it **never touches a store subscription**, not even
 where the store would let us: signing in again brings the subscription back by
 itself, so cancelling it on the way out would destroy the very asset a return
-depends on — the person cancels in their own store, and the farewell mail says so.
+depends on — the person cancels in their own store, and the confirmation says so.
 Paid invoices are retained under legal duty; unpaid ones are cancelled so nothing
 can ever bill the deleted person.
 
@@ -479,12 +482,12 @@ stored payment methods are dropped, and the deletion journal keeps the gateway
 agreement references so a stray charge can always be traced to an agreement an
 administrator can cancel.
 
-**The screen warns, the mail delivers.** There is no deletion-preview endpoint,
+**The screen warns; nothing is mailed.** There is no deletion-preview endpoint,
 deliberately (lifecycle §5/§10): the confirmation a device shows lists no codes and
 no counts — a list read once under pressure saves nobody, and fetching it would drag
-the whole inventory question into the app. Instead, before anything is erased, one
-final message goes to the address carrying every code the person paid for, one last
-time — an inbox is searchable a year later, which is when the code is wanted. The
+the whole inventory question into the app. Nothing goes to the address on the way out
+either: the codes are forfeited with the account, and the order email that delivered
+a code, or a copy from the client area, is the way back. The
 same deletion is available on the web at
 `index.php?m=vpnhoodiap&action=delete-account`, so it works without the app
 installed (Play policy) — and that page carries the reseller warning the app is not

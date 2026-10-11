@@ -22,10 +22,6 @@ if (!iapModuleActive($db)) {
     bad('addon not active — run the activation test first');
     finish();
 }
-if (!columnExists($db, 'mod_vpnhood_iap_products', 'sellable')) {
-    bad('sellable column missing — WHMCS has not run the module upgrade yet');
-    finish();
-}
 
 $marker = 'itest-' . bin2hex(random_bytes(4));
 $now = date('Y-m-d H:i:s');

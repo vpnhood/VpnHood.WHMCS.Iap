@@ -35,8 +35,9 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
  * TODO REMOVE the whole legacy-store carve-out, in a versioned release, once drained: no
  * `legacy.handover` or `purchase.legacy-adopted` logged for one release cycle, and no imported
  * row still live at the store. Goes together: this class and its call in api.php's sign-in,
- * EntitlementService::adoptLegacyPurchase and its call in redeem(), the table and
- * vpnhoodiap_migrateToLegacyStoreHandover() (drop it in _upgrade), and their tests. A row's
+ * EntitlementService::adoptLegacyPurchase and its call in redeem(), the table (its create in
+ * vpnhoodiap_activate(); dropped by hand), the email blanking in
+ * AccountDeletionService::eraseModuleRows, and their tests. A row's
  * 'pending' status is not the measure: a restore adopts without claiming it.
  */
 final class LegacyStoreHandover

@@ -836,14 +836,15 @@ function vpnhoodiap_bearerToken(): ?string
 
 /**
  * Strip secrets from anything headed for the audit log: id tokens, purchase
- * proofs and session tokens must never be stored.
+ * proofs and session tokens must never be stored. Nor the email address: the log
+ * keeps its rows for days after an account is deleted, which erases the address.
  */
 function vpnhoodiap_redact(mixed $value): mixed
 {
     if (!is_array($value)) {
         return $value;
     }
-    static $secretKeys = ['idtoken', 'proof', 'accesstoken', 'accesscode', 'token', 'password', 'code', 'challengetoken', 'newbackupcode', 'requestjson', 'responsejson', 'assertionresponsejson'];
+    static $secretKeys = ['idtoken', 'proof', 'accesstoken', 'accesscode', 'token', 'password', 'code', 'challengetoken', 'newbackupcode', 'requestjson', 'responsejson', 'assertionresponsejson', 'email'];
     $redacted = [];
     foreach ($value as $key => $item) {
         $redacted[$key] = is_string($key) && in_array(strtolower($key), $secretKeys, true)

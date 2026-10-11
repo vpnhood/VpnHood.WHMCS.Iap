@@ -1,7 +1,7 @@
 <?php
 /**
  * sessions.test.php — SessionService against the real module tables inside
- * the deployed dev WHMCS: issue/resolve/revoke semantics, no time limit,
+ * the deployed dev WHMCS: issue/resolve/sign-out semantics, no time limit,
  * tokens hashed at rest. All writes stay in mod_vpnhood_iap_* (the capsule rule).
  */
 
@@ -89,64 +89,25 @@ try {
         }
     }
 
-    // -- revoke ---------------------------------------------------------------
+    // -- sign-out ---------------------------------------------------------------
     $sessions->revoke($issued['token']);
     try {
         $sessions->resolve($issued['token']);
-        bad('revoked token still resolves');
+        bad('a signed-out token still resolves');
     } catch (ApiException $e) {
-        ok('revoked token no longer resolves');
+        ok('a signed-out token no longer resolves');
     }
+    Capsule::table('mod_vpnhood_iap_sessions')->where('token_hash', hash('sha256', $issued['token']))->doesntExist()
+        ? ok('sign-out deletes the session: nothing of it is kept')
+        : bad('the signed-out session is still stored');
     $sessions->revoke($issued['token']); // idempotent
-    ok('double revoke is harmless');
+    ok('a second sign-out is harmless');
 
-    // -- no time limit: only sign-out, deletion or revocation ends a session ---
+    // -- no time limit: only sign-out or deletion ends a session -----------------
     $lasting = $sessions->issue($userId);
-    $lastingHash = hash('sha256', $lasting['token']);
-    $storedExpiry = Capsule::table('mod_vpnhood_iap_sessions')->where('token_hash', $lastingHash)->value('expires_at');
-    $lasting['expiresAt'] === null && $storedExpiry === null
-        ? ok('a session is issued with no expiry, on the wire and at rest')
-        : bad('a session carries an expiry: ' . var_export([$lasting['expiresAt'], $storedExpiry], true));
-
-    // a row written while sessions lasted 30 days: its date is long past, and nothing reads it
-    Capsule::table('mod_vpnhood_iap_sessions')->where('token_hash', $lastingHash)
-        ->update(['expires_at' => date('Y-m-d H:i:s', time() - 30 * 86400)]);
-    try {
-        $sessions->resolve($lasting['token']);
-        ok('an older row past its former expiry still resolves');
-    } catch (ApiException $e) {
-        bad('an older row past its former expiry was refused');
-    }
-
-    // the cron purge keeps that row, and drops a session revoked over a week ago
-    $old = $sessions->issue($userId);
-    $oldHash = hash('sha256', $old['token']);
-    $sessions->revoke($old['token']);
-    Capsule::table('mod_vpnhood_iap_sessions')->where('token_hash', $oldHash)
-        ->update(['revoked_at' => date('Y-m-d H:i:s', time() - 8 * 86400)]);
-    $sessions->purgeStale();
-    $kept = Capsule::table('mod_vpnhood_iap_sessions')->where('token_hash', $lastingHash)->exists();
-    $purged = !Capsule::table('mod_vpnhood_iap_sessions')->where('token_hash', $oldHash)->exists();
-    $kept && $purged
-        ? ok('the purge keeps an unrevoked session whatever its date, and drops one revoked a week ago')
-        : bad('purge: kept=' . var_export($kept, true) . ', revoked one dropped=' . var_export($purged, true));
-
-    // -- revokeAllForUser -----------------------------------------------------
-    $a = $sessions->issue($userId);
-    $b = $sessions->issue($userId);
-    $sessions->revokeAllForUser($userId);
-    $stillValid = 0;
-    foreach ([$a, $b] as $s) {
-        try {
-            $sessions->resolve($s['token']);
-            $stillValid++;
-        } catch (ApiException $e) {
-            // expected
-        }
-    }
-    $stillValid === 0
-        ? ok('revokeAllForUser kills every session')
-        : bad("revokeAllForUser left $stillValid sessions alive");
+    $lasting['expiresAt'] === null
+        ? ok('a session is issued with no expiry')
+        : bad('a session carries an expiry: ' . var_export($lasting['expiresAt'], true));
 } finally {
     // -- cleanup (module tables only) ----------------------------------------
     Capsule::table('mod_vpnhood_iap_sessions')->where('user_id', $userId)->delete();

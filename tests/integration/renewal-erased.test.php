@@ -258,8 +258,10 @@ try {
     Capsule::table('mod_vpnhood_iap_apps')->where('id', $appId)->delete();
     if ($clientId > 0) {
         Capsule::table('mod_vpnhood_iap_deletions')->where('client_id', $clientId)->delete();
-        Capsule::table('mod_vpnhood_iap_frozen_invoices')->where('client_id', $clientId)->delete();
+        // DeleteClient takes the invoices but leaves WHMCS's snapshots of them
+        $invoiceIds = Capsule::table('tblinvoices')->where('userid', $clientId)->pluck('id')->all();
         localAPI('DeleteClient', ['clientid' => $clientId, 'deleteusers' => true]);
+        Capsule::table('mod_invoicedata')->whereIn('invoiceid', $invoiceIds ?: [0])->delete();
     }
     ok('fixtures removed (order + dedicated client deleted)');
 }

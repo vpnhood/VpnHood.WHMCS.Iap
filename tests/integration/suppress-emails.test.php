@@ -156,13 +156,14 @@ if ($erasedClientId <= 0) {
         'user_id'   => $erasedUserId,
         'firstname' => 'Deleted',
         'lastname'  => 'Account',
-        'email'     => $anonymizedEmail,
+        'email'     => "deleted-user-$erasedUserId@anonymized.invalid",
     ]) : ['result' => 'no login'];
 
     if (($anonymized['result'] ?? '') !== 'success' || ($anonymizedLogin['result'] ?? '') !== 'success') {
         bad('could not anonymize the fixture: ' . json_encode([$anonymized, $anonymizedLogin]));
     } else {
         ok("erased fixture anonymized (client #$erasedClientId, login #$erasedUserId)");
+        $lastLogIdBefore = (int) \WHMCS\Database\Capsule::table('tblactivitylog')->max('id');
 
         // account-level mail: type 'user', relid is the LOGIN id. This is the family the
         // live bounce came from — WHMCS re-verifies an address the moment it changes.
@@ -192,6 +193,15 @@ if ($erasedClientId <= 0) {
         } else {
             bad("invoice mail NOT aborted for the erased client's invoice #$erasedInvoiceId");
         }
+
+        // each note names the client, so a deletion still running erases it with the client's
+        // traces: the note carries the caller's IP
+        $noteClientIds = array_map('intval', \WHMCS\Database\Capsule::table('tblactivitylog')
+            ->where('id', '>', $lastLogIdBefore)->where('description', 'like', 'vpnhoodiap: suppressed %')
+            ->pluck('userid')->all());
+        ($noteClientIds !== [] && array_unique($noteClientIds) === [$erasedClientId])
+            ? ok('every suppression note is filed under the erased client, the login\'s mail included')
+            : bad('suppression notes not filed under the client: ' . json_encode($noteClientIds));
 
         // the merge fields alone are enough, even with a relid we cannot resolve
         $mergeOnly = run_hook('EmailPreSend', [

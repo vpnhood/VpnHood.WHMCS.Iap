@@ -2,19 +2,25 @@
 /**
  * delete-account.test.php — account deletion inside the deployed dev WHMCS.
  *
- * Covers the whole contract: the person is erased everywhere, the paid service
- * and the invoice history are NOT, an active web service no longer blocks —
- * its billing is cancelled at the END of the paid period and journalled with
- * the agreement reference — every invoice is FROZEN with the buyer's real
- * identity before the client row is anonymized, the action is re-runnable,
+ * Covers the whole contract: the person is erased everywhere, WHMCS's own traces
+ * of them included (mail log, activity log, sign-in and order addresses, custom
+ * fields, tickets, sign-in provider links, every login, the one without a link to
+ * the client too), the
+ * paid service and the invoice history are NOT, an active web service no longer
+ * blocks — its billing is cancelled at the END of the paid period and journalled
+ * with the agreement reference — every invoice keeps the buyer's real name and
+ * address in WHMCS's own snapshot, taken before the client row is anonymized when
+ * the invoice had none, and stripped of what no invoice shows, a
+ * re-run finishes a close a failed run left undone,
  * and the real DELETE /account endpoint does all of it over HTTP with a
  * session token. There is deliberately NO deletion-preview endpoint: the
  * confirmation screen warns without listing; nothing is mailed on the way out.
  *
- * Writes go through localAPI (clients, orders, services) or the module's own
- * mod_vpnhood_iap_* tables — never a raw INSERT/UPDATE on WHMCS core (the one
- * exception: cleanup deletes this test's own cancellation-request rows, which
- * no localAPI command can remove).
+ * Writes go through localAPI (clients, logins, orders, services, tickets) or the
+ * module's own mod_vpnhood_iap_* tables. The fixtures no localAPI command can make
+ * are written raw — a login's last IP and its link to the client, a client custom
+ * field, a mail-log row, activity rows, a sign-in provider link — and cleanup
+ * removes them, with this test's own cancellation-request rows. No mail leaves it.
  */
 
 require __DIR__ . '/lib/common.php';
@@ -31,11 +37,7 @@ if (!iapModuleActive($db)) {
     finish();
 }
 if (!tableExists($db, 'mod_vpnhood_iap_deletions')) {
-    bad('mod_vpnhood_iap_deletions missing — WHMCS has not run the module upgrade yet');
-    finish();
-}
-if (!tableExists($db, 'mod_vpnhood_iap_frozen_invoices')) {
-    bad('mod_vpnhood_iap_frozen_invoices missing — open the addon page so _upgrade() runs (1.0.13)');
+    bad('mod_vpnhood_iap_deletions missing — run the activation test first');
     finish();
 }
 
@@ -45,6 +47,9 @@ $marker = 'deltest-' . bin2hex(random_bytes(4));
 $clientIds = [];
 $userIds = [];
 $orderIds = [];
+$loginIds = [];
+$customFieldId = 0;
+$legacyTable = tableExists($db, 'mod_vpnhood_iap_legacy_subs');
 
 /** A throwaway WHMCS client. */
 function makeClient(string $email): int
@@ -54,7 +59,13 @@ function makeClient(string $email): int
         'lastname'       => 'Test',
         'email'          => $email,
         'password2'      => bin2hex(random_bytes(12)),
+        'companyname'    => 'Delete Test Co',
+        'address2'       => 'Suite 7',
         'country'        => 'US',
+        'tax_id'         => 'TAX-7',
+        'notes'          => 'a note about the person',
+        'phonenumber'    => '5550100',
+        'clientip'       => '203.0.113.7',
         'skipvalidation' => true,
         'noemail'        => true,
     ]);
@@ -84,6 +95,154 @@ function userRow(int $userId): ?array
     $row = Capsule::table('mod_vpnhood_iap_users')->where('id', $userId)->first();
     return $row === null ? null : (array) $row;
 }
+
+/** A row's column. A missing one fails the run: read as empty, it would pass for erased. */
+function column(array $row, string $name): string
+{
+    if (!array_key_exists($name, $row)) {
+        throw new RuntimeException("column $name is missing: WHMCS renamed it, and the deletion no longer erases it");
+    }
+    return (string) $row[$name];
+}
+
+/**
+ * What WHMCS keeps of a person, on top of what AddClient leaves: a sign-in address on each
+ * login, a custom field value, a mail-log row, an activity row filed under the first login
+ * alone and one filed under nobody that quotes an address, a ticket with a reply, a ticket
+ * sent from the address without signing in, and a link to a sign-in provider.
+ *
+ * @param int[] $loginIds
+ * @return int[] the ticket ids
+ */
+function addTraces(string $marker, int $clientId, array $loginIds, string $email, string $quotedEmail,
+    int $customFieldId): array
+{
+    $now = date('Y-m-d H:i:s');
+    Capsule::table('tblusers')->whereIn('id', $loginIds)
+        ->update(['last_ip' => '203.0.113.8', 'last_hostname' => 'deltest.example']);
+    localAPI('UpdateClient', [
+        'clientid'       => $clientId,
+        'customfields'   => base64_encode(serialize([$customFieldId => 'something about the person'])),
+        'skipvalidation' => true,
+    ]);
+    if ((string) Capsule::table('tblcustomfieldsvalues')->where('fieldid', $customFieldId)->where('relid', $clientId)->value('value') === '') {
+        throw new RuntimeException('the custom field fixture did not take');
+    }
+    Capsule::table('tblemails')->insert([
+        'userid'     => $clientId,
+        'subject'    => "mail to $marker",
+        'message'    => 'a message to the person',
+        'date'       => $now,
+        'to'         => $email,
+        'created_at' => $now,
+        'updated_at' => $now,
+    ]);
+    Capsule::table('tblactivitylog')->insert([
+        ['date' => $now, 'description' => "$marker: a sign-in", 'user' => 'Client', 'userid' => 0,
+            'user_id' => $loginIds[0], 'admin_id' => 0, 'ipaddr' => '203.0.113.8'],
+        ['date' => $now, 'description' => "Email changed from $quotedEmail.", 'user' => 'System', 'userid' => 0,
+            'user_id' => 0, 'admin_id' => 0, 'ipaddr' => '203.0.113.8'],
+    ]);
+
+    $departmentId = (int) Capsule::table('tblticketdepartments')->orderBy('id')->value('id');
+    $ticket = localAPI('OpenTicket', [
+        'deptid'   => $departmentId,
+        'clientid' => $clientId,
+        'subject'  => "help $marker",
+        'message'  => 'a question from the person',
+        'noemail'  => true,
+    ]);
+    $sentWithoutSigningIn = localAPI('OpenTicket', [
+        'deptid'  => $departmentId,
+        'name'    => 'Delete Test',
+        'email'   => $email,
+        'subject' => "guest $marker",
+        'message' => 'a question sent without signing in',
+        'noemail' => true,
+    ]);
+    $ticketIds = [(int) ($ticket['id'] ?? 0), (int) ($sentWithoutSigningIn['id'] ?? 0)];
+    $reply = localAPI('AddTicketReply', [
+        'ticketid' => $ticketIds[0],
+        'clientid' => $clientId,
+        'message'  => 'more about it',
+        'noemail'  => true,
+    ]);
+    if (in_array(0, $ticketIds, true) || ($reply['result'] ?? '') !== 'success') {
+        throw new RuntimeException('ticket fixtures failed: ' . json_encode([$ticket, $sentWithoutSigningIn, $reply]));
+    }
+
+    Capsule::table('tblauthn_account_links')->insert([
+        'provider'       => 'google',
+        'remote_user_id' => "$marker-remote",
+        'user_id'        => $loginIds[0],
+        'client_id'      => $clientId,
+        'metadata'       => json_encode(['email' => $email]),
+        'created_at'     => $now,
+        'updated_at'     => $now,
+    ]);
+    return $ticketIds;
+}
+
+/**
+ * Nothing addTraces() left survives, nor the person's details on the client record.
+ *
+ * @param int[] $loginIds
+ * @param string[] $addresses the person's real addresses
+ * @param int[] $ticketIds
+ */
+function assertTracesErased(string $by, int $clientId, array $loginIds, array $addresses, int $customFieldId, array $ticketIds): void
+{
+    foreach ($loginIds as $id) {
+        $login = (array) Capsule::table('tblusers')->where('id', $id)->first();
+        ($login !== [] && str_ends_with(column($login, 'email'), '@anonymized.invalid')
+            && column($login, 'last_ip') === '' && column($login, 'last_hostname') === '')
+            ? ok("$by: login #$id is anonymized, its last sign-in address cleared")
+            : bad("$by: login #$id survived: " . json_encode(['email' => $login['email'] ?? null, 'lastIp' => $login['last_ip'] ?? null]));
+    }
+    (Capsule::table('tblactivitylog')->whereIn('user_id', $loginIds)->count() === 0
+        && Capsule::table('tblactivitylog')->where('userid', $clientId)->count() === 0)
+        ? ok("$by: the activity log holds nothing for the client or its logins, the one without a link included")
+        : bad("$by: activity-log rows of the client or a login survived");
+    $quoting = Capsule::table('tblactivitylog')->where(function ($query) use ($addresses) {
+        foreach ($addresses as $address) {
+            $query->orWhereRaw('INSTR(description, ?) > 0', [$address]);
+        }
+    })->get(['id', 'userid', 'user_id', 'description'])
+        // whole addresses only: one inside a longer address is someone else's
+        ->filter(fn ($row) => array_filter($addresses, fn (string $address) => preg_match(
+            '/(?<![\w.%+-])' . preg_quote($address, '/') . '(?![\w%+-]|\.\w)/iu', (string) $row->description) === 1) !== [])
+        ->values()->all();
+    $quoting === []
+        ? ok("$by: no activity row quotes the person's addresses, whoever it is filed under")
+        : bad("$by: activity rows still quote the person's addresses: " . json_encode($quoting));
+    Capsule::table('tblemails')->where('userid', $clientId)->count() === 0
+        ? ok("$by: the mail log holds nothing for the client")
+        : bad("$by: mail-log rows survived");
+    $customValue = (string) Capsule::table('tblcustomfieldsvalues')
+        ->where('fieldid', $customFieldId)->where('relid', $clientId)->value('value');
+    $customValue === ''
+        ? ok("$by: the client custom field value is blanked")
+        : bad("$by: the client custom field value survived: $customValue");
+    (Capsule::table('tbltickets')->whereIn('id', $ticketIds)->count() === 0
+        && Capsule::table('tblticketreplies')->whereIn('tid', $ticketIds)->count() === 0)
+        ? ok("$by: the person's tickets are gone with their replies (#" . implode(', #', $ticketIds) . ')')
+        : bad("$by: a ticket or a reply survived");
+    Capsule::table('tblauthn_account_links')->where('client_id', $clientId)->orWhereIn('user_id', $loginIds)->count() === 0
+        ? ok("$by: no sign-in provider link is left")
+        : bad("$by: a sign-in provider link survived");
+
+    $client = (array) Capsule::table('tblclients')->where('id', $clientId)->first();
+    $clearedFields = ['companyname', 'address2', 'tax_id', 'notes', 'ip', 'host'];
+    $leftovers = array_filter(
+        array_combine($clearedFields, array_map(fn (string $field) => column($client, $field), $clearedFields)),
+        fn (string $value) => $value !== '');
+    $leftovers === []
+        ? ok("$by: company, address line 2, tax id, notes and the sign-in address are cleared")
+        : bad("$by: the customer record keeps: " . json_encode($leftovers));
+}
+
+// no mail leaves this test: a new ticket would notify the department's admins
+add_hook('EmailPreSend', 0, fn () => ['abortsend' => true]);
 
 try {
     // == 1. the full erasure ==================================================
@@ -116,7 +275,95 @@ try {
         'updated_at'   => date('Y-m-d H:i:s'),
     ]);
 
+    $email = "$marker@vpnhood.test";
+    $secondEmail = "$marker-second@vpnhood.test";
+    $now = date('Y-m-d H:i:s');
+
+    // the owner login loses its link, so only its address finds it, and the address is
+    // what the deletion rewrites; a second login holds the client through its link
+    $loginId = (int) Capsule::table('tblusers')->where('email', $email)->value('id');
+    $second = localAPI('AddUser', [
+        'firstname' => 'Second',
+        'lastname'  => 'Login',
+        'email'     => $secondEmail,
+        'password2' => bin2hex(random_bytes(12)),
+    ]);
+    $secondLoginId = (int) ($second['user_id'] ?? 0);
+    if ($loginId <= 0 || $secondLoginId <= 0) {
+        throw new RuntimeException('login fixtures failed: ' . json_encode(['owner' => $loginId, 'second' => $second]));
+    }
+    $loginIds = [$loginId, $secondLoginId];
+    Capsule::table('tblusers_clients')->where('auth_user_id', $loginId)->delete();
+    Capsule::table('tblusers_clients')->insert([
+        'auth_user_id' => $secondLoginId,
+        'client_id'    => $clientIds['main'],
+        'owner'        => 0,
+        'permissions'  => '',
+        'created_at'   => $now,
+        'updated_at'   => $now,
+    ]);
+
+    // a client custom field holding something about the person; admin-only, so no form shows it
+    $customFieldId = (int) Capsule::table('tblcustomfields')->insertGetId([
+        'type'         => 'client',
+        'relid'        => 0,
+        'fieldname'    => $marker,
+        'fieldtype'    => 'text',
+        'description'  => '',
+        'fieldoptions' => '',
+        'regexpr'      => '',
+        'adminonly'    => 'on',
+        'required'     => '',
+        'showorder'    => '',
+        'showinvoice'  => '',
+        'sortorder'    => 0,
+        'created_at'   => $now,
+        'updated_at'   => $now,
+    ]);
+    // the row filed under nobody quotes the second login's address, which only that login gives away
+    $ticketIds = addTraces($marker, $clientIds['main'], $loginIds, $email, $secondEmail, $customFieldId);
+    if ($legacyTable) {
+        // an old-store subscription this account claimed at sign-in
+        Capsule::table('mod_vpnhood_iap_legacy_subs')->insert([
+            'package_name'     => 'deltest',
+            'store_product_id' => 'deltest',
+            'purchase_key'     => "$marker-legacy",
+            'email'            => $email,
+            'status'           => 'claimed',
+            'claimed_user_id'  => $userIds['main'],
+            'claimed_at'       => $now,
+        ]);
+    }
+
+    // someone else's address, with the person's inside it: not the person's, so it stays
+    $longerAddressRowId = (int) Capsule::table('tblactivitylog')->insertGetId(['date' => $now,
+        'description' => "Email changed from jo$email", 'user' => 'System', 'userid' => 0, 'user_id' => 0,
+        'admin_id' => 0, 'ipaddr' => '203.0.113.10']);
+
+    $mailLogBefore = Capsule::table('tblemails')->where('userid', $clientIds['main'])->count();
+    $activityBefore = Capsule::table('tblactivitylog')->where('userid', $clientIds['main'])->count();
+    ok("before deletion: logins #$loginId (no link) and #$secondLoginId, $mailLogBefore mail-log row(s), "
+        . "$activityBefore activity-log row(s), tickets #" . implode(', #', $ticketIds));
+    $lastLogIdBefore = (int) Capsule::table('tblactivitylog')->max('id');
+
     (new AccountDeletionService())->deleteUser(userRow($userIds['main']));
+
+    assertTracesErased('the deletion', $clientIds['main'], $loginIds, [$email, $secondEmail], $customFieldId, $ticketIds);
+    Capsule::table('tblactivitylog')->where('id', $longerAddressRowId)->exists()
+        ? ok('a row quoting a longer address with the person\'s inside it is not theirs, and stays')
+        : bad('the deletion erased a row quoting someone else\'s longer address');
+    $written = Capsule::table('tblactivitylog')->where('id', '>', $lastLogIdBefore)
+        ->get(['id', 'userid', 'user_id', 'description'])->all();
+    $written === []
+        ? ok('no activity row written during the deletion outlives it')
+        : bad('activity rows written during the deletion outlive it: ' . json_encode($written));
+    if ($legacyTable) {
+        (string) Capsule::table('mod_vpnhood_iap_legacy_subs')->where('purchase_key', "$marker-legacy")->value('email') === ''
+            ? ok('the old store\'s hand-over row the account claimed keeps no address')
+            : bad('the claimed hand-over row keeps the address');
+    } else {
+        ok('no old-store hand-over table on this install');
+    }
 
     userRow($userIds['main']) === null
         ? ok('the account row is gone')
@@ -160,9 +407,14 @@ try {
         ? ok('the deletion is journalled (numeric ids only)')
         : bad('no journal row was written');
 
-    // == 2. re-running is harmless ============================================
+    // == 2. a re-run finishes what a failed run left =========================
+    // a close that failed after the record was anonymized leaves it open
+    $reopened = localAPI('UpdateClient', ['clientid' => $clientIds['main'], 'status' => 'Active', 'skipvalidation' => true]);
     (new AccountDeletionService())->deleteClient($clientIds['main'], null);
-    ok('a second deletion of the same client does not throw');
+    $status = (string) Capsule::table('tblclients')->where('id', $clientIds['main'])->value('status');
+    (($reopened['result'] ?? '') === 'success' && $status === 'Closed')
+        ? ok('a re-run closes a record a failed run left open')
+        : bad("after a re-run the record is $status, expected Closed: " . json_encode($reopened));
 
     // == 3. an active web service NO LONGER blocks — billing stops instead ====
     // (lifecycle §8: cancel at the END of the paid period, keep the key running,
@@ -186,6 +438,13 @@ try {
             $orderIds['web'] = (int) $order['orderid'];
             $webServiceId = (int) (one($db, 'SELECT id FROM tblhosting WHERE orderid = ? LIMIT 1', [$orderIds['web']])['id'] ?? 0);
             localAPI('UpdateClientProduct', ['serviceid' => $webServiceId, 'status' => 'Active']);
+            // the order's invoice as if made before "Store Client Data Snapshot" was on
+            $webInvoiceIds = Capsule::table('tblinvoices')->where('userid', $clientIds['web'])->pluck('id')->all();
+            Capsule::table('mod_invoicedata')->whereIn('invoiceid', $webInvoiceIds ?: [0])->delete();
+            \WHMCS\Config\Setting::setValue('StoreClientDataSnapshotOnInvoiceCreation', '');
+            $webInvoiceIds !== []
+                ? ok('the web order has invoice #' . implode(', #', $webInvoiceIds) . ', with no snapshot, the setting off')
+                : bad('the web order made no invoice: the snapshot path goes untested');
 
             (new AccountDeletionService())->deleteClient($clientIds['web'], null);
             ok('deletion proceeded despite an active web service — nothing blocks it');
@@ -213,26 +472,30 @@ try {
                 ? ok('the journal keeps the cancelled service + agreement reference (details)')
                 : bad('journal details missing the agreement reference: ' . json_encode($journal));
 
-            // == 3b. the invoices are frozen with the buyer's real identity =====
-            // The order above generated an invoice; the client row is placeholders
-            // by now, so the artifact is the only place the buyer's name survives.
-            $frozen = one($db, 'SELECT invoice_id, artifact, sha256 FROM mod_vpnhood_iap_frozen_invoices
-                WHERE client_id = ? ORDER BY id LIMIT 1', [$clientIds['web']]);
-            if ($frozen === null) {
-                bad('no frozen invoice artifact was written for the web client');
-            } else {
-                $artifact = json_decode((string) $frozen['artifact'], true);
-                (($artifact['client']['email'] ?? '') === "$marker-web@vpnhood.test"
-                    && ($artifact['client']['firstName'] ?? '') === 'Delete')
-                    ? ok('the frozen artifact keeps the buyer\'s real name and address — anonymization never reached it')
-                    : bad('frozen artifact lost the buyer identity: ' . substr((string) $frozen['artifact'], 0, 200));
-                hash('sha256', (string) $frozen['artifact']) === (string) $frozen['sha256']
-                    ? ok('the artifact hash verifies (tamper-evidence)')
-                    : bad('artifact sha256 mismatch');
-                (is_array($details) && !empty($details['frozenInvoices'])
-                    && (int) ($details['frozenInvoices'][0]['id'] ?? 0) === (int) $frozen['invoice_id'])
-                    ? ok('the journal carries the frozen-invoice refs')
-                    : bad('journal details missing frozenInvoices: ' . json_encode($details));
+            // == 3b. the invoices keep the buyer as issued, in WHMCS's own snapshot =====
+            // The order's invoice was made as if before "Store Client Data Snapshot" was
+            // on: no snapshot, and the setting off. The deletion turned it on and took one
+            // before the client row became placeholders.
+            \WHMCS\Config\Setting::getValue('StoreClientDataSnapshotOnInvoiceCreation') === 'on'
+                ? ok('the deletion keeps "Store Client Data Snapshot" on')
+                : bad('the deletion left "Store Client Data Snapshot" off');
+            $erasedDetails = ['email', 'phonenumber', 'phonenumberformatted', 'telephoneNumber', 'notes', 'lastlogin',
+                'cctype', 'cclastfour', 'gatewayid', 'billingcid'];
+            // (dev keeps no tax id: WHMCS drops the fixture's, so the snapshot's goes unchecked)
+            $issuedTo = ['firstname' => 'Delete', 'lastname' => 'Test', 'companyname' => 'Delete Test Co', 'address2' => 'Suite 7'];
+            foreach ($webInvoiceIds as $invoiceId) {
+                $shown = (array) ((new \WHMCS\Invoice((int) $invoiceId))->getOutput()['clientsdetails'] ?? []);
+                $buyer = array_intersect_key($shown, $issuedTo);
+                $buyer == $issuedTo
+                    ? ok("invoice #$invoiceId still shows the buyer as issued: name, company and address")
+                    : bad("invoice #$invoiceId lost the buyer: " . json_encode($buyer));
+                $snapshot = json_decode((string) Capsule::table('mod_invoicedata')->where('invoiceid', $invoiceId)
+                    ->value('clientsdetails'), true) ?: [];
+                $kept = array_filter(array_intersect_key($snapshot, array_flip($erasedDetails)),
+                    fn ($value) => $value !== '' && $value !== []);
+                ($snapshot !== [] && $kept === [])
+                    ? ok("invoice #$invoiceId's snapshot keeps no email, phone, notes, last login or card details")
+                    : bad("invoice #$invoiceId's snapshot keeps: " . json_encode(array_keys($kept)));
             }
         }
     }
@@ -294,18 +557,39 @@ try {
     Capsule::table('mod_vpnhood_iap_purchases')->where('purchase_key', "$marker-purchase")->delete();
     foreach ($clientIds as $clientId) {
         Capsule::table('mod_vpnhood_iap_deletions')->where('client_id', $clientId)->delete();
-        Capsule::table('mod_vpnhood_iap_frozen_invoices')->where('client_id', $clientId)->delete();
     }
+    // DeleteClient takes the invoices but leaves WHMCS's snapshots of them
+    $fixtureInvoiceIds = Capsule::table('tblinvoices')->whereIn('userid', $clientIds ?: [0])->pluck('id')->all();
     foreach ($orderIds as $orderId) {
         localAPI('DeleteOrder', ['orderid' => $orderId]);
     }
     foreach ($clientIds as $clientId) {
         localAPI('DeleteClient', ['clientid' => $clientId, 'deleteusers' => true]);
     }
+    Capsule::table('mod_invoicedata')->whereIn('invoiceid', $fixtureInvoiceIds ?: [0])->delete();
+    // the snapshot test turns the setting off; the install keeps it on
+    AccountDeletionService::keepInvoiceSnapshotsOn();
     if (!empty($webServiceId)) {
         // no localAPI command removes cancellation requests — cleanup-only raw delete
         $db->prepare('DELETE FROM tblcancelrequests WHERE relid = ?')->execute([$webServiceId]);
     }
+    // what DeleteClient leaves: the login without a link, and the raw fixtures
+    if ($loginIds !== []) {
+        Capsule::table('tblusers_clients')->whereIn('auth_user_id', $loginIds)->delete();
+        Capsule::table('tblusers')->whereIn('id', $loginIds)->delete();
+    }
+    if ($customFieldId > 0) {
+        Capsule::table('tblcustomfieldsvalues')->where('fieldid', $customFieldId)->delete();
+        Capsule::table('tblcustomfields')->where('id', $customFieldId)->delete();
+    }
+    if ($legacyTable) {
+        Capsule::table('mod_vpnhood_iap_legacy_subs')->where('purchase_key', "$marker-legacy")->delete();
+    }
+    foreach (Capsule::table('tbltickets')->where('title', 'like', "%$marker%")->pluck('id') as $ticketId) {
+        localAPI('DeleteTicket', ['ticketid' => (int) $ticketId]);
+    }
+    Capsule::table('tblauthn_account_links')->where('remote_user_id', 'like', "$marker%")->delete();
+    Capsule::table('tblactivitylog')->where('description', 'like', "%$marker%")->delete();
     ok('fixtures removed');
 }
 

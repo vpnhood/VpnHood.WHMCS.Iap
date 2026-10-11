@@ -35,7 +35,7 @@ if (!iapModuleActive($db)) {
     finish();
 }
 if (!tableExists($db, 'mod_vpnhood_iap_login_challenges') || !tableExists($db, 'mod_vpnhood_iap_login_attempts')) {
-    bad('login tables missing — open the addon admin page so _upgrade() (1.0.15) runs');
+    bad('login tables missing — run the activation test first');
     finish();
 }
 ok('1.0.15 login tables exist');

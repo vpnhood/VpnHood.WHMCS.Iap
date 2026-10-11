@@ -290,7 +290,7 @@
         ],
         "operationId": "deleteAccount",
         "summary": "Delete the signed-in account",
-        "description": "Permanent account deletion. Erases sessions on every device, sign-in identities and the account row; anonymizes and closes the customer record behind the retained invoices. Nothing blocks it: recurring web billing is cancelled at the end of its paid period, stored payment methods are dropped, and one final message carries the person's premium codes to the address before it is erased — the confirmation screen warns, the mail delivers. A store subscription is deliberately left exactly as it is: signing in again brings it back by itself, and only the person can cancel it, in their own store.",
+        "description": "Permanent account deletion. Erases sessions on every device, sign-in identities and the account row; anonymizes and closes the customer record behind the retained invoices. Nothing blocks it: recurring web billing is cancelled at the end of its paid period, stored payment methods are dropped, and nothing is mailed on the way out — the confirmation screen's warning is the whole story. A store subscription is deliberately left exactly as it is: signing in again brings it back by itself, and only the person can cancel it, in their own store.",
         "responses": {
           "204": {
             "description": "The account is deleted. The presented session token is dead."
@@ -871,7 +871,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "The opaque session token from `POST /v1/auth/sessions`, as `Authorization: Bearer <token>`. It is 64 hex characters, valid for 30 days, stored only as a hash, and revocable — deliberately not a JWT.\n\nThe same token is also accepted in an `X-Portal-Token` header, for proxies that strip `Authorization`."
+        "description": "The opaque session token from `POST /v1/auth/sessions`, as `Authorization: Bearer <token>`. It is 64 hex characters, with no time limit, stored only as a hash, and revocable — deliberately not a JWT.\n\nThe same token is also accepted in an `X-Portal-Token` header, for proxies that strip `Authorization`."
       },
       "portalToken": {
         "type": "apiKey",

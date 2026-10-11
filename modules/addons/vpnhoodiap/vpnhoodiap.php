@@ -52,6 +52,13 @@ function vpnhoodiap_config(): array
                 'Description'  => 'Raw store payloads on purchase records are cleared after this many days (privacy/retention).',
                 'Default'      => '90',
             ],
+            'RequestLogRetentionDays' => [
+                'FriendlyName' => 'Request Log Retention (days)',
+                'Type'         => 'text',
+                'Size'         => '6',
+                'Description'  => 'The API request log holds each caller\'s IP address. Enter the days your privacy policy promises: the daily cleanup deletes rows a day early, so none outlives them.',
+                'Default'      => '30',
+            ],
             'TerminateGraceDays' => [
                 'FriendlyName' => 'Expiry Grace (days)',
                 'Type'         => 'text',
@@ -71,8 +78,8 @@ function vpnhoodiap_config(): array
 }
 
 /**
- * Create database tables on activation. Only creates tables that do not exist,
- * so deactivate/reactivate cycles are harmless.
+ * Create database tables on activation, each in its current shape. Only creates tables
+ * that do not exist, so deactivate/reactivate cycles are harmless.
  */
 function vpnhoodiap_activate(): array
 {
@@ -141,6 +148,9 @@ function vpnhoodiap_activate(): array
                 $table->string('external_uid', 36)->unique(); // UUID: GooglePlay obfuscatedAccountId AND Apple appAccountToken
                 $table->timestamp('created_at')->nullable();
                 $table->timestamp('updated_at')->nullable();
+                // the one code the person typed in, kept as typed: whether it works is the access
+                // server's answer at use, never decided when it is saved
+                $table->string('uploaded_access_code', 64)->nullable();
                 $table->index('email'); // plain index: a contact snapshot may legitimately collide
                 $table->index(['provider', 'provider_subject']);
             });
@@ -163,16 +173,14 @@ function vpnhoodiap_activate(): array
             });
         }
 
-        // opaque app session tokens, hashed at rest.
+        // opaque app session tokens, hashed at rest; no time limit, and a sign-out deletes one
         if (!$schema->hasTable('mod_vpnhood_iap_sessions')) {
             $schema->create('mod_vpnhood_iap_sessions', function ($table) {
                 $table->increments('id');
                 $table->integer('user_id')->unsigned()->index();
                 $table->string('token_hash', 64)->unique();
                 $table->timestamp('created_at')->nullable();
-                $table->timestamp('expires_at')->nullable()->index();
                 $table->timestamp('last_used_at')->nullable();
-                $table->timestamp('revoked_at')->nullable();
                 // the store this device belongs to, from the package name it signed in with:
                 // its subscription is the one that serves this device (lifecycle §8)
                 $table->string('store', 16)->nullable();
@@ -252,23 +260,137 @@ function vpnhoodiap_activate(): array
                 $table->integer('client_id')->unsigned()->nullable()->index();
                 $table->string('outcome', 32);
                 $table->timestamp('created_at')->nullable();
+                // gateway agreement references and other non-personal breadcrumbs the deletion must keep
+                $table->text('details')->nullable();
             });
         }
 
-        vpnhoodiap_migrateToAccountKeys(); // claims + journal details on fresh installs too
-        vpnhoodiap_migrateOffRefundMarks();
-        vpnhoodiap_migrateToInvoiceFreeze();
-        vpnhoodiap_migrateToServerChosenCode();
-        vpnhoodiap_migrateOffRemovedCodePark();
-        vpnhoodiap_migrateToPasswordSignIn();
-        vpnhoodiap_migrateToRestoreCredentials();
-        vpnhoodiap_migrateToOneImportSlot();
-        vpnhoodiap_migrateToKeyring();
-        vpnhoodiap_migrateToSellableFlag();
-        vpnhoodiap_migrateToLegacyStoreHandover();
+        // an account's hold on a key it proved by pasting the code (lifecycle §7/§8); nothing
+        // about billing moves. A pure web customer has no module account, so a claim is keyed
+        // by the module user or by the WHMCS client. is_auto_selectable off: the ranking never
+        // picks that code (one bought to give away).
+        if (!$schema->hasTable('mod_vpnhood_iap_claims')) {
+            $schema->create('mod_vpnhood_iap_claims', function ($table) {
+                $table->increments('id');
+                $table->integer('user_id')->unsigned()->nullable()->index();
+                $table->integer('client_id')->unsigned()->nullable()->index();
+                $table->integer('service_id')->unsigned()->index();
+                $table->boolean('is_default')->default(false);
+                $table->timestamp('created_at')->nullable();
+                $table->boolean('is_auto_selectable')->default(true);
+                $table->unique(['user_id', 'service_id'], 'iap_claims_user_service');
+                $table->unique(['client_id', 'service_id'], 'iap_claims_client_service');
+            });
+        }
+
+        // a device met the access server's refusal of this code. Identical codes are the same
+        // credential, so a row is keyed by (account, code fingerprint), and only the fingerprint
+        // is stored. A repeat refusal re-inserts the row: the id orders the refusals, so once
+        // every code of an account is refused they take turns, least recently refused first.
+        if (!$schema->hasTable('mod_vpnhood_iap_code_rejections')) {
+            $schema->create('mod_vpnhood_iap_code_rejections', function ($table) {
+                $table->increments('id');
+                $table->integer('user_id')->unsigned()->index();
+                $table->string('code_hash', 64);
+                $table->timestamp('refused_at')->nullable();
+                $table->unique(['user_id', 'code_hash'], 'iap_code_rejections_user_code');
+            });
+        }
+
+        // the password grant: the second-factor tokens the password form hands out
+        // (single-use, minutes-long, an attempt budget; never sessions)
+        if (!$schema->hasTable('mod_vpnhood_iap_login_challenges')) {
+            $schema->create('mod_vpnhood_iap_login_challenges', function ($table) {
+                $table->increments('id');
+                $table->char('token_hash', 64)->unique();
+                $table->integer('whmcs_user_id')->unsigned()->index();
+                $table->string('package_name', 191);
+                $table->smallInteger('attempts')->unsigned()->default(0);
+                $table->timestamp('expires_at')->nullable()->index();
+                $table->timestamp('used_at')->nullable();
+                $table->timestamp('created_at')->nullable();
+            });
+        }
+
+        // failed password sign-ins per address, for the cooldown. Only a sha256 of the normalized
+        // address: a nonexistent one cools down exactly like a real one, or the cooldown would
+        // betray which addresses exist.
+        if (!$schema->hasTable('mod_vpnhood_iap_login_attempts')) {
+            $schema->create('mod_vpnhood_iap_login_attempts', function ($table) {
+                $table->increments('id');
+                $table->char('email_hash', 64)->index();
+                $table->timestamp('created_at')->nullable()->index();
+            });
+        }
+
+        // zero-tap sign-in restoration: one row per device-held WebAuthn key, with the client
+        // origin captured at registration (an assertion from a differently-signed app is refused)
+        // and the sign count (stored, never enforced: restores reset it)
+        if (!$schema->hasTable('mod_vpnhood_iap_restore_credentials')) {
+            $schema->create('mod_vpnhood_iap_restore_credentials', function ($table) {
+                $table->increments('id');
+                $table->integer('user_id')->unsigned()->index();
+                $table->string('credential_id', 191)->unique(); // base64url, the device's handle
+                $table->text('public_key_pem');
+                $table->string('origin', 191);
+                $table->integer('sign_count')->unsigned()->default(0);
+                $table->timestamp('created_at')->nullable();
+                $table->timestamp('last_used_at')->nullable();
+            });
+        }
+
+        // the single-use nonces both restore ceremonies answer: hashed, minutes-long, and bound
+        // to a purpose, so a registration challenge can never sign anybody in
+        if (!$schema->hasTable('mod_vpnhood_iap_restore_challenges')) {
+            $schema->create('mod_vpnhood_iap_restore_challenges', function ($table) {
+                $table->increments('id');
+                $table->string('purpose', 16); // register | assert
+                $table->char('challenge_hash', 64)->index();
+                $table->integer('user_id')->unsigned()->nullable();
+                $table->timestamp('expires_at')->nullable()->index();
+                $table->timestamp('used_at')->nullable();
+                $table->timestamp('created_at')->nullable();
+            });
+        }
+
+        // TEMPORARY, removed with LegacyStoreHandover: a previous store's Play subscriptions still
+        // auto-renewing, loaded by a one-shot import and read once per sign-in, so a returning
+        // customer gets their code without asking. Keyed on the address: the old store never
+        // stored a Google OIDC subject (LegacyStoreHandover says why that is safe).
+        if (!$schema->hasTable('mod_vpnhood_iap_legacy_subs')) {
+            $schema->create('mod_vpnhood_iap_legacy_subs', function ($table) {
+                $table->increments('id');
+                $table->string('store', 32)->default('googleplay');
+                $table->string('package_name');
+                $table->string('store_product_id');
+                $table->string('store_base_plan_id')->default('');
+                // the store's own purchase token: what gets re-verified at claim time
+                $table->string('purchase_key', 255);
+                $table->string('provider_order_id')->nullable();
+                // the OLD store's obfuscated uid - kept for tracing, never matched on
+                $table->string('obfuscated_uid', 64)->nullable();
+                $table->string('email')->index();      // normalized lower-case
+                $table->timestamp('expires_at')->nullable();
+                $table->boolean('is_auto_renew')->default(true);
+                $table->decimal('price_amount', 12, 2)->nullable();
+                $table->string('price_currency', 8)->nullable();
+                // pending -> claimed (handed over) | inactive (the store closed it out)
+                $table->string('status', 16)->default('pending')->index();
+                $table->integer('claimed_user_id')->unsigned()->nullable();
+                $table->timestamp('claimed_at')->nullable();
+                $table->integer('attempts')->unsigned()->default(0);
+                $table->timestamp('last_attempt_at')->nullable();
+                $table->string('last_error', 500)->nullable();
+                $table->timestamp('imported_at')->nullable();
+                // re-importing a refreshed export must update, never duplicate
+                $table->unique(['store', 'purchase_key'], 'iap_legacy_store_purchase');
+            });
+        }
+
         vpnhoodiap_ensureAdminAccess();
         vpnhoodiap_ensureIapGateway();
         vpnhoodiap_hideGatewayFromCheckout();
+        vpnhoodiap_keepInvoiceSnapshotsOn();
 
         return [
             'status'      => 'success',
@@ -283,206 +405,16 @@ function vpnhoodiap_activate(): array
 }
 
 /**
- * The keyring. Three additive pieces, all idempotent:
- *
- *  - users.uploaded_access_code — THE one upload slot, as a STORED STRING. It used to be a
- *    claim pointing at a service, which forced the portal to recognise a code before it would
- *    accept one; validity is settled at use time by the access server, never at save time here,
- *    so the slot now holds whatever was typed and the 404 disappears with it;
- *  - claims.is_auto_selectable — DEFAULT TRUE, so an ordinary code needs no decision from
- *    anyone. Turning it off in the panel means the ranking never picks that code — how
- *    somebody protects a code they bought to give away — and it is reversible;
- *  - mod_vpnhood_iap_code_rejections — ELIGIBILITY, the one concept that replaced learned expiry.
- *    A code is eligible until a device reports the access server refusing it, and the row is
- *    keyed by (account, code fingerprint) because identical codes ARE the same credential: the
- *    upload slot and any service delivering that string are skipped together. A repeat refusal
- *    re-inserts the row, so its id is the ORDER of the refusals: once every code an account holds
- *    has been refused they take turns, least recently refused first, and whichever one comes back
- *    to life is tried again by itself. Only the fingerprint
- *    is stored — the credential must not gain a second home. mod_vpnhood_iap_code_expiry is DROPPED
- *    with the idea it served: predicting a clock cost a table, an endpoint and a trust argument to
- *    optimise consumption order, and the ranking never needed more than "skip this one?".
- *
- * The backfill moves each legacy imported claim into the slot it became, then drops the claim.
- * Nothing is trimmed silently: an identity holding several is left for vpnhoodiap_migrateToOneImportSlot
- * to report, and only the first is carried across.
- */
-function vpnhoodiap_migrateToKeyring(): void
-{
-    $schema = Capsule::schema();
-
-    if ($schema->hasTable('mod_vpnhood_iap_users') && !$schema->hasColumn('mod_vpnhood_iap_users', 'uploaded_access_code')) {
-        $schema->table('mod_vpnhood_iap_users', function ($table) {
-            $table->string('uploaded_access_code', 64)->nullable();
-        });
-    }
-
-    if ($schema->hasTable('mod_vpnhood_iap_claims') && !$schema->hasColumn('mod_vpnhood_iap_claims', 'is_auto_selectable')) {
-        $schema->table('mod_vpnhood_iap_claims', function ($table) {
-            $table->boolean('is_auto_selectable')->default(true);
-        });
-    }
-
-    // Eligibility replaces learned expiry. A row here means "a device met a refusal with this
-    // code"; no row is the default, so every existing code stays eligible through the migration.
-    // An unreleased 1.2.0 dev shape (created_at, updated in place). A rejection is transient
-    // state a device re-reports the instant it meets the refusal again, so there is nothing here
-    // worth migrating — and the row id has to order the refusals, which an updated row cannot do.
-    if ($schema->hasTable('mod_vpnhood_iap_code_rejections')
-        && !$schema->hasColumn('mod_vpnhood_iap_code_rejections', 'refused_at')) {
-        $schema->drop('mod_vpnhood_iap_code_rejections');
-    }
-    if (!$schema->hasTable('mod_vpnhood_iap_code_rejections')) {
-        $schema->create('mod_vpnhood_iap_code_rejections', function ($table) {
-            // the id is not decoration: a refusal is re-inserted, so the id is the ORDER of the
-            // refusals, which is what lets refused codes take turns without a clock
-            $table->increments('id');
-            $table->integer('user_id')->unsigned()->index();
-            // the code is never stored — a fingerprint recognises it again, and a bearer credential
-            // must not gain a second home just to record that it stopped working
-            $table->string('code_hash', 64);
-            $table->timestamp('refused_at')->nullable();
-            $table->unique(['user_id', 'code_hash'], 'iap_code_rejections_user_code');
-        });
-    }
-
-    // The learned-expiry table goes with the mechanism. Nothing reads it, and keeping a per-account
-    // record of when somebody's credential dies is not something to hold on to for sentiment.
-    if ($schema->hasTable('mod_vpnhood_iap_code_expiry')) {
-        $schema->drop('mod_vpnhood_iap_code_expiry');
-    }
-
-    vpnhoodiap_backfillUploadSlot();
-}
-
-/** Carry each legacy imported claim into users.uploaded_access_code, then drop the claim row. */
-function vpnhoodiap_backfillUploadSlot(): void
-{
-    $schema = Capsule::schema();
-    if (!$schema->hasTable('mod_vpnhood_iap_claims') || !$schema->hasColumn('mod_vpnhood_iap_users', 'uploaded_access_code')) {
-        return;
-    }
-    require_once __DIR__ . '/lib/Provisioning/DeliveryReader.php';
-
-    // claims on services the claimer's own client does NOT own = imported (the old slot)
-    $imported = Capsule::table('mod_vpnhood_iap_claims as c')
-        ->join('tblhosting as h', 'h.id', '=', 'c.service_id')
-        ->join('mod_vpnhood_iap_users as u', 'u.id', '=', 'c.user_id')
-        ->whereNull('u.uploaded_access_code')
-        ->whereRaw('h.userid <> COALESCE(u.client_id, -1)')
-        ->orderBy('c.id')
-        ->get(['c.id as claim_id', 'c.service_id', 'u.id as user_id']);
-
-    $reader = new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\DeliveryReader();
-    $filled = [];
-    foreach ($imported as $row) {
-        $userId = (int) $row->user_id;
-        if (isset($filled[$userId])) {
-            continue; // several imported claims: carry the first, leave the rest to the audit
-        }
-        $code = $reader->readAccessCode((int) $row->service_id);
-        if ($code === null) {
-            continue; // not provisioned (yet) — leave the claim alone rather than lose the pointer
-        }
-        Capsule::table('mod_vpnhood_iap_users')->where('id', $userId)->update(['uploaded_access_code' => $code]);
-        Capsule::table('mod_vpnhood_iap_claims')->where('id', (int) $row->claim_id)->delete();
-        $filled[$userId] = true;
-    }
-}
-
-/**
- * Sellable vs redeemable (legacy-store migration): a catalog row must keep MAPPING
- * a retired SKU's purchases (redeem + renewals) after the app stops OFFERING it.
- * `enabled` gates everything; `sellable` gates only the public products listing.
- */
-function vpnhoodiap_migrateToSellableFlag(): void
-{
-    $schema = Capsule::schema();
-
-    if ($schema->hasTable('mod_vpnhood_iap_products') && !$schema->hasColumn('mod_vpnhood_iap_products', 'sellable')) {
-        $schema->table('mod_vpnhood_iap_products', function ($table) {
-            $table->boolean('sellable')->default(true);
-        });
-    }
-}
-
-/**
- * A previous store's Play subscriptions that are still auto-renewing, loaded by a one-shot
- * import. This table is the copy of its record of who owns them, read once per sign-in by
- * LegacyStoreHandover so a returning customer gets their code without asking.
- *
- * Keyed on the address because the old store never stored a Google OIDC subject - see
- * LegacyStoreHandover for why that is safe and what it costs.
- *
- * TEMPORARY: removed with LegacyStoreHandover — the drain condition and the removal list are there.
- */
-function vpnhoodiap_migrateToLegacyStoreHandover(): void
-{
-    $schema = Capsule::schema();
-    if ($schema->hasTable('mod_vpnhood_iap_legacy_subs')) {
-        return;
-    }
-    $schema->create('mod_vpnhood_iap_legacy_subs', function ($table) {
-        $table->increments('id');
-        $table->string('store', 32)->default('googleplay');
-        $table->string('package_name');
-        $table->string('store_product_id');
-        $table->string('store_base_plan_id')->default('');
-        // the store's own purchase token: what gets re-verified at claim time
-        $table->string('purchase_key', 255);
-        $table->string('provider_order_id')->nullable();
-        // the OLD store's obfuscated uid - kept for tracing, never matched on
-        $table->string('obfuscated_uid', 64)->nullable();
-        $table->string('email')->index();      // normalized lower-case
-        $table->timestamp('expires_at')->nullable();
-        $table->boolean('is_auto_renew')->default(true);
-        $table->decimal('price_amount', 12, 2)->nullable();
-        $table->string('price_currency', 8)->nullable();
-        // pending -> claimed (handed over) | inactive (the store closed it out)
-        $table->string('status', 16)->default('pending')->index();
-        $table->integer('claimed_user_id')->unsigned()->nullable();
-        $table->timestamp('claimed_at')->nullable();
-        $table->integer('attempts')->unsigned()->default(0);
-        $table->timestamp('last_attempt_at')->nullable();
-        $table->string('last_error', 500)->nullable();
-        $table->timestamp('imported_at')->nullable();
-        // re-importing a refreshed export must update, never duplicate
-        $table->unique(['store', 'purchase_key'], 'iap_legacy_store_purchase');
-    });
-}
-
-/**
- * Migration point for future versions (invoked by WHMCS when the version in
- * vpnhoodiap_config() increases). Keep migrations additive and idempotent.
+ * Invoked by WHMCS when the version in vpnhoodiap_config() increases. No migrations: until a
+ * partner install runs this module, a change an existing install needs is made by hand, and
+ * vpnhoodiap_activate() creates every table in its current shape. An upgrade re-runs
+ * activation's idempotent self-heals.
  */
 function vpnhoodiap_upgrade(array $vars): void
 {
-    vpnhoodiap_migrateToKeyring();
-    vpnhoodiap_migrateToSellableFlag();
-    vpnhoodiap_migrateToLegacyStoreHandover();
-    // installs activated before this ran (API/automation) have no access row and
-    // are invisible in the Addons menu until someone notices
     vpnhoodiap_ensureAdminAccess();
-    vpnhoodiap_hideGatewayFromCheckout();
-
-    vpnhoodiap_migrateToEmailIdentity();
-    vpnhoodiap_migrateToIdentityResolution();
-    vpnhoodiap_migrateToAccountKeys();
-    vpnhoodiap_migrateOffRefundMarks();
-    vpnhoodiap_migrateToInvoiceFreeze();
-    vpnhoodiap_migrateToServerChosenCode();
-    vpnhoodiap_migrateOffRemovedCodePark();
-    vpnhoodiap_migrateToPasswordSignIn();
-    vpnhoodiap_migrateToRestoreCredentials();
-    vpnhoodiap_migrateToLinkedIdentities();
-    vpnhoodiap_migrateToDisplayName();
-    vpnhoodiap_migrateOffEmailVerificationParking();
-    vpnhoodiap_migrateToClientAreaVerificationGate();
-    vpnhoodiap_migrateToDeletionJournal();
-    vpnhoodiap_migrateToSessionStore();
-    vpnhoodiap_migrateToOneImportSlot();
     vpnhoodiap_ensureIapGateway();
-    vpnhoodiap_repairIapPaymentMethods();
+    vpnhoodiap_hideGatewayFromCheckout();
 }
 
 /**
@@ -496,14 +428,6 @@ function vpnhoodiap_ensureIapGateway(): void
     $existing = Capsule::table('tblpaymentgateways')
         ->where('gateway', \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner::GATEWAY)
         ->pluck('setting')->all();
-    // one name across installs — renamed from "In-App Purchase (billed by the app store)",
-    // which read as Apple-only; the update below carries the rename onto installs that
-    // already hold the old default
-    Capsule::table('tblpaymentgateways')
-        ->where('gateway', \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner::GATEWAY)
-        ->where('setting', 'name')
-        ->where('value', 'In-App Purchase (billed by the app store)')
-        ->update(['value' => 'In-App Purchase']);
     $wanted = [
         'name'      => 'In-App Purchase',
         'type'      => 'Invoices',
@@ -518,87 +442,6 @@ function vpnhoodiap_ensureIapGateway(): void
                 'value'   => $value,
                 'order'   => 0,
             ]);
-        }
-    }
-}
-
-/**
- * Put in-app orders back on their own gateway. AddOrder silently SUBSTITUTES the default visible
- * gateway when the requested one is hidden from checkout — once a checkout gateway is active
- * beside this module, store purchases read as the site's checkout gateway in the client area,
- * and the renewal-invoice cleanup, which filters on this module's gateway, stops matching them.
- * placeOrder() now stamps every new order; this repairs the rows written while WHMCS was
- * substituting. Only services this module provisioned are touched.
- */
-function vpnhoodiap_repairIapPaymentMethods(): void
-{
-    $gateway = \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner::GATEWAY;
-    $serviceIds = Capsule::table('mod_vpnhood_iap_purchases')
-        ->whereNotNull('service_id')->pluck('service_id')->all();
-    if ($serviceIds === []) {
-        return;
-    }
-    $orderIds = Capsule::table('tblhosting')->whereIn('id', $serviceIds)
-        ->where('paymentmethod', '!=', $gateway)->pluck('orderid')->all();
-    Capsule::table('tblhosting')->whereIn('id', $serviceIds)
-        ->where('paymentmethod', '!=', $gateway)->update(['paymentmethod' => $gateway]);
-    if ($orderIds !== []) {
-        Capsule::table('tblorders')->whereIn('id', $orderIds)->update(['paymentmethod' => $gateway]);
-        Capsule::table('tblinvoices')
-            ->whereIn('id', Capsule::table('tblorders')->whereIn('id', $orderIds)->pluck('invoiceid')->all())
-            ->update(['paymentmethod' => $gateway]);
-    }
-}
-
-/**
- * The session learns which store the device belongs to, so GET /account can prefer
- * the subscription that device's own store bills (lifecycle §8). Sessions issued
- * before this migration carry null, which reads as "no home store" and falls back
- * to the account-wide choice — the behaviour they already had. Idempotent.
- */
-function vpnhoodiap_migrateToSessionStore(): void
-{
-    $schema = Capsule::schema();
-    if ($schema->hasTable('mod_vpnhood_iap_sessions') &&
-        !$schema->hasColumn('mod_vpnhood_iap_sessions', 'store')) {
-        $schema->table('mod_vpnhood_iap_sessions', function ($table) {
-            $table->string('store', 16)->nullable();
-        });
-    }
-}
-
-/**
- * Audit the one-slot imported-code invariant. The one-slot limit itself is
- * transactional logic because a unique key on user_id would outlaw selection
- * markers on purchased services that share the claims table. Explicit PUT or
- * DELETE heals a legacy overfull identity; migration never silently trims one.
- */
-function vpnhoodiap_migrateToOneImportSlot(): void
-{
-    $schema = Capsule::schema();
-    if ($schema->hasTable('mod_vpnhood_iap_claims')) {
-        // claims on services the claimer's own client does NOT own = imported
-        $overfull = Capsule::table('mod_vpnhood_iap_claims as c')
-            ->join('tblhosting as h', 'h.id', '=', 'c.service_id')
-            ->leftJoin('mod_vpnhood_iap_users as u', 'u.id', '=', 'c.user_id')
-            ->whereRaw('h.userid <> COALESCE(u.client_id, c.client_id, -1)')
-            ->selectRaw('COALESCE(c.user_id, -c.client_id) as identity, COUNT(*) as n')
-            ->groupBy('identity')->havingRaw('COUNT(*) > 1')->get();
-        if ($overfull->isNotEmpty()) {
-            logModuleCall('vpnhoodiap', 'oneImportSlotAudit',
-                'accounts holding more than one imported claim (decide by hand, nothing was trimmed)',
-                $overfull->toJson());
-        }
-    }
-
-    // Retire the short-lived removal-stamp draft if a development install ran it.
-    if ($schema->hasTable('mod_vpnhood_iap_users')) {
-        foreach (['import_removed_at', 'import_removed_suffix'] as $retiredColumn) {
-            if ($schema->hasColumn('mod_vpnhood_iap_users', $retiredColumn)) {
-                $schema->table('mod_vpnhood_iap_users', function ($table) use ($retiredColumn) {
-                    $table->dropColumn($retiredColumn);
-                });
-            }
         }
     }
 }
@@ -625,403 +468,15 @@ function vpnhoodiap_hideGatewayFromCheckout(): void
 }
 
 /**
- * Installs that predate account deletion lack the journal table. Idempotent;
- * same definition as in vpnhoodiap_activate().
+ * Account deletion keeps each invoice's buyer as issued through WHMCS's own client data
+ * snapshot, which WHMCS honours only while "Store Client Data Snapshot" is on (lifecycle
+ * §5). Turned on at activation; the cron hook and every deletion keep it on.
  */
-function vpnhoodiap_migrateToDeletionJournal(): void
+function vpnhoodiap_keepInvoiceSnapshotsOn(): void
 {
-    $schema = Capsule::schema();
-    if (!$schema->hasTable('mod_vpnhood_iap_deletions')) {
-        $schema->create('mod_vpnhood_iap_deletions', function ($table) {
-            $table->increments('id');
-            $table->integer('user_id')->unsigned()->nullable();
-            $table->integer('client_id')->unsigned()->nullable()->index();
-            $table->string('outcome', 32);
-            $table->timestamp('created_at')->nullable();
-        });
-    }
-}
-
-/**
- * Installs that predate the client-area gate lack the column. It defaults to
- * false, which is the right answer for every account already on the install:
- * the gate only ever applies from the purchase that attached to a pre-existing
- * WHMCS client onward, never retroactively. Idempotent.
- */
-function vpnhoodiap_migrateToClientAreaVerificationGate(): void
-{
-    $schema = Capsule::schema();
-    if ($schema->hasTable('mod_vpnhood_iap_users')
-        && !$schema->hasColumn('mod_vpnhood_iap_users', 'requires_email_verification')) {
-        $schema->table('mod_vpnhood_iap_users', function ($table) {
-            $table->boolean('requires_email_verification')->default(false);
-        });
-    }
-}
-
-/**
- * The WHMCS-side email-verification gate is gone: the identity provider already
- * proves the mailbox, so a purchase never waits on a second confirmation. Rows
- * parked by the old gate are handed back to the pending lane, where the cron's
- * store refresh re-drives them into provisioning on its next pass. Narrowing the
- * enum afterwards is what actually removes the status; MySQL rejects the ALTER
- * while any row still holds the value, so the re-drive has to come first.
- * Idempotent: re-running finds no rows and re-applies the same column type.
- */
-function vpnhoodiap_migrateOffEmailVerificationParking(): void
-{
-    $schema = Capsule::schema();
-    if (!$schema->hasTable('mod_vpnhood_iap_purchases')) {
-        return;
-    }
-
-    Capsule::table('mod_vpnhood_iap_purchases')
-        ->where('status', 'awaiting_email_verification')
-        ->update(['status' => 'pending', 'last_error' => null]);
-
-    try {
-        Capsule::statement(
-            "ALTER TABLE `mod_vpnhood_iap_purchases` MODIFY COLUMN `status`"
-            . " ENUM('pending','provisioned','on_hold','canceled','expired','refunded','failed')"
-            . " NOT NULL DEFAULT 'pending'"
-        );
-    } catch (\Throwable $e) {
-        // the rows are already safe in the pending lane; a column still carrying
-        // the dead value only wastes a byte, so never fail an upgrade over it
-        logModuleCall('vpnhoodiap', 'upgrade.enumNarrow', '', $e->getMessage(), '');
-    }
-}
-
-/**
- * Installs that predate display-name capture lack the column; the value itself
- * back-fills naturally on each account's next sign-in. Idempotent.
- */
-function vpnhoodiap_migrateToDisplayName(): void
-{
-    $schema = Capsule::schema();
-    if ($schema->hasTable('mod_vpnhood_iap_users')
-        && !$schema->hasColumn('mod_vpnhood_iap_users', 'display_name')) {
-        $schema->table('mod_vpnhood_iap_users', function ($table) {
-            $table->string('display_name')->nullable();
-        });
-    }
-}
-
-/**
- * Installs that predate the identities table have each account's only known proof
- * in the users columns — copy it over so those users resolve by identity (rule 1)
- * instead of falling through to the email match on every sign-in. Idempotent.
- */
-function vpnhoodiap_migrateToLinkedIdentities(): void
-{
-    $schema = Capsule::schema();
-    if (!$schema->hasTable('mod_vpnhood_iap_users')) {
-        return;
-    }
-    if (!$schema->hasTable('mod_vpnhood_iap_identities')) {
-        $schema->create('mod_vpnhood_iap_identities', function ($table) {
-            $table->increments('id');
-            $table->integer('user_id')->unsigned()->index();
-            $table->string('provider', 16);
-            $table->string('provider_subject');
-            $table->string('email');
-            $table->timestamp('created_at')->nullable();
-            $table->timestamp('updated_at')->nullable();
-            $table->unique(['provider', 'provider_subject'], 'iap_identities_provider_subject');
-        });
-    }
-
-    $now = date('Y-m-d H:i:s');
-    foreach (Capsule::table('mod_vpnhood_iap_users')->get() as $user) {
-        if ((string) $user->provider === '' || (string) $user->provider_subject === '') {
-            continue;
-        }
-        $exists = Capsule::table('mod_vpnhood_iap_identities')
-            ->where('provider', $user->provider)
-            ->where('provider_subject', $user->provider_subject)
-            ->exists();
-        if (!$exists) {
-            Capsule::table('mod_vpnhood_iap_identities')->insert([
-                'user_id'          => (int) $user->id,
-                'provider'         => $user->provider,
-                'provider_subject' => $user->provider_subject,
-                'email'            => $user->email,
-                'created_at'       => $now,
-                'updated_at'       => $now,
-            ]);
-        }
-    }
-}
-
-/**
- * Normalize account emails for identity-era installs: lowercased/trimmed, and the
- * old (provider, subject) unique key dropped in favour of a plain index.
- *
- * Historically this also keyed accounts on a UNIQUE email. That key is gone —
- * vpnhoodiap_migrateToIdentityResolution() removes it — because resolution now
- * matches the sign-in methods' current addresses, and a stale contact snapshot may
- * legitimately collide with another account's live address. Duplicate addresses
- * are still reported: each is a split person whose purchases deserve a manual
- * merge, and rule 3 of the resolver refuses to guess between them.
- */
-function vpnhoodiap_migrateToEmailIdentity(): void
-{
-    $schema = Capsule::schema();
-    if (!$schema->hasTable('mod_vpnhood_iap_users')) {
-        return;
-    }
-
-    Capsule::statement('UPDATE mod_vpnhood_iap_users SET email = LOWER(TRIM(email)) WHERE email <> LOWER(TRIM(email))');
-
-    $duplicates = Capsule::table('mod_vpnhood_iap_users')
-        ->select('email')
-        ->groupBy('email')
-        ->havingRaw('COUNT(*) > 1')
-        ->pluck('email')
-        ->all();
-    if ($duplicates !== []) {
-        logActivity('vpnhoodiap: these addresses have more than one user row (split accounts — merge by hand): '
-            . implode(', ', array_slice($duplicates, 0, 20)));
-    }
-
-    // The old key has to go, not just stop being used: one provider account whose
-    // address changes now legitimately produces a second row, which that unique
-    // index would reject.
-    try {
-        $schema->table('mod_vpnhood_iap_users', function ($table) {
-            $table->dropUnique('mod_vpnhood_iap_users_provider_provider_subject_unique');
-        });
-        $schema->table('mod_vpnhood_iap_users', function ($table) {
-            $table->index(['provider', 'provider_subject']);
-        });
-    } catch (\Throwable $e) {
-        // never existed (fresh install) or already dropped
-    }
-}
-
-/**
- * Resolution moves from the account row's email to the sign-in methods' emails
- * (IapRepository::findOrCreateUser): the account row keeps only a CONTACT snapshot,
- * refreshed at each sign-in. The unique index on users.email has to go — a stale
- * snapshot may legitimately coexist with another account's current address (the
- * owner moved on; someone else now verifiably holds it) — and identities.email
- * gains an index because it is now the lookup. Fresh installs are created in this
- * shape already; each step tolerates re-runs and half-migrated states.
- */
-function vpnhoodiap_migrateToIdentityResolution(): void
-{
-    $schema = Capsule::schema();
-    if (!$schema->hasTable('mod_vpnhood_iap_users')) {
-        return;
-    }
-    try {
-        $schema->table('mod_vpnhood_iap_users', function ($table) {
-            $table->dropUnique('mod_vpnhood_iap_users_email_unique');
-        });
-    } catch (\Throwable $e) {
-        // fresh install or already migrated — the index is already gone
-    }
-    try {
-        $schema->table('mod_vpnhood_iap_users', function ($table) {
-            $table->index('email');
-        });
-    } catch (\Throwable $e) {
-        // already indexed
-    }
-    try {
-        $schema->table('mod_vpnhood_iap_identities', function ($table) {
-            $table->index('email');
-        });
-    } catch (\Throwable $e) {
-        // already indexed
-    }
-}
-
-/**
- * The account→key pointer layer (lifecycle §7/§8): claims record that an
- * account holds a key it proved by pasting the code — nothing about billing
- * moves. The deletions journal gains a details column for the gateway
- * agreement references and other non-personal breadcrumbs deletion must not
- * destroy.
- */
-function vpnhoodiap_migrateToAccountKeys(): void
-{
-    $schema = Capsule::schema();
-    if (!$schema->hasTable('mod_vpnhood_iap_claims')) {
-        $schema->create('mod_vpnhood_iap_claims', function ($table) {
-            $table->increments('id');
-            $table->integer('user_id')->unsigned()->index();
-            $table->integer('service_id')->unsigned()->index();
-            $table->boolean('is_default')->default(false);
-            $table->timestamp('created_at')->nullable();
-            $table->unique(['user_id', 'service_id'], 'iap_claims_user_service');
-        });
-    }
-    if ($schema->hasTable('mod_vpnhood_iap_deletions') && !$schema->hasColumn('mod_vpnhood_iap_deletions', 'details')) {
-        $schema->table('mod_vpnhood_iap_deletions', function ($table) {
-            $table->text('details')->nullable();
-        });
-    }
-}
-
-/**
- * Migration (2026-10): drop a few months after it ships. The refund marks were this
- * module's own list of refunded addresses, written on every refund. A store's refund is
- * the store's decision and leaves no record here any more, and a website refund is
- * remembered by the hub's own hook (vpnhood-refund-memory.php), so the table goes, with
- * the "repeat refund" rows it produced in the log.
- */
-function vpnhoodiap_migrateOffRefundMarks(): void
-{
-    $schema = Capsule::schema();
-    if ($schema->hasTable('mod_vpnhood_iap_refund_marks')) {
-        $schema->drop('mod_vpnhood_iap_refund_marks');
-    }
-    if ($schema->hasTable('mod_vpnhood_iap_log')) {
-        Capsule::table('mod_vpnhood_iap_log')->where('action', 'refund.repeat')->delete();
-    }
-}
-
-/**
- * The server-chosen code (lifecycle §8: the account always has exactly one
- * code, and the server chooses it — the app is handed one code or nothing):
- *
- *  - claims.client_id — the client area lets a pure web customer (no module
- *    account) import and name codes, so a claim may be keyed by the WHMCS
- *    client instead of a module user. user_id becomes nullable for those rows.
- */
-function vpnhoodiap_migrateToServerChosenCode(): void
-{
-    $schema = Capsule::schema();
-    if ($schema->hasTable('mod_vpnhood_iap_claims') && !$schema->hasColumn('mod_vpnhood_iap_claims', 'client_id')) {
-        $schema->table('mod_vpnhood_iap_claims', function ($table) {
-            $table->integer('client_id')->unsigned()->nullable()->index()->after('user_id');
-            $table->unique(['client_id', 'service_id'], 'iap_claims_client_service');
-        });
-        Capsule::statement('ALTER TABLE mod_vpnhood_iap_claims MODIFY user_id INT UNSIGNED NULL');
-    }
-}
-
-/**
- * Drop the removed-code park (lifecycle §8).
- *
- * users.default_cleared_at recorded a deliberate remove-code act in the app, so
- * promotion would not instantly re-elect another owned code — the escape from a
- * purchase refusal. Both the refusal and the app-side remove act are gone: the
- * app owns no remove for an account-applied code (it leaves with the account),
- * and a purchase is never refused after the money moved. Nothing reads or writes
- * the column any more, so it goes rather than lingering as a field that looks
- * meaningful. Dropping is safe and idempotent: no code path depends on it, and a
- * re-run finds it already absent.
- */
-function vpnhoodiap_migrateOffRemovedCodePark(): void
-{
-    $schema = Capsule::schema();
-    if ($schema->hasTable('mod_vpnhood_iap_users') && $schema->hasColumn('mod_vpnhood_iap_users', 'default_cleared_at')) {
-        $schema->table('mod_vpnhood_iap_users', function ($table) {
-            $table->dropColumn('default_cleared_at');
-        });
-    }
-}
-
-/**
- * Zero-tap sign-in restoration (Play policy, April 2027):
- *
- *  - restore_credentials — one row per device-held WebAuthn key: the public
- *    key (PEM), the client origin captured at registration (the app's signing
- *    key hash — an assertion from a differently-signed app is refused), and
- *    the authenticator sign count (stored, never enforced: restores reset it).
- *  - restore_challenges — the single-use nonces both ceremonies answer.
- *    Hashed at rest, minutes-long, purpose-bound: a registration challenge
- *    can never sign anybody in.
- */
-function vpnhoodiap_migrateToRestoreCredentials(): void
-{
-    $schema = Capsule::schema();
-    if (!$schema->hasTable('mod_vpnhood_iap_restore_credentials')) {
-        $schema->create('mod_vpnhood_iap_restore_credentials', function ($table) {
-            $table->increments('id');
-            $table->integer('user_id')->unsigned()->index();
-            $table->string('credential_id', 191)->unique(); // base64url, the device's handle
-            $table->text('public_key_pem');
-            $table->string('origin', 191);
-            $table->integer('sign_count')->unsigned()->default(0);
-            $table->timestamp('created_at')->nullable();
-            $table->timestamp('last_used_at')->nullable();
-        });
-    }
-    if (!$schema->hasTable('mod_vpnhood_iap_restore_challenges')) {
-        $schema->create('mod_vpnhood_iap_restore_challenges', function ($table) {
-            $table->increments('id');
-            $table->string('purpose', 16); // register | assert
-            $table->char('challenge_hash', 64)->index();
-            $table->integer('user_id')->unsigned()->nullable();
-            $table->timestamp('expires_at')->nullable()->index();
-            $table->timestamp('used_at')->nullable();
-            $table->timestamp('created_at')->nullable();
-        });
-    }
-}
-
-/**
- * The password grant (portal sign-in without a WHMCS page):
- *
- *  - login_challenges — the pending-second-factor tokens the password form
- *    hands out. Not sessions: single-use, minutes-long, an attempt budget,
- *    and they can do nothing but complete their own challenge.
- *  - login_attempts — per-address failure rows for the cooldown (after 5
- *    failures the address waits out PasswordCooldownMinutes, then works again
- *    by itself). Only a sha256 of the normalized address is stored; the
- *    address may not even exist here — nonexistent emails must cool down
- *    exactly like real ones, or the cooldown itself would betray which
- *    emails exist.
- */
-function vpnhoodiap_migrateToPasswordSignIn(): void
-{
-    $schema = Capsule::schema();
-    if (!$schema->hasTable('mod_vpnhood_iap_login_challenges')) {
-        $schema->create('mod_vpnhood_iap_login_challenges', function ($table) {
-            $table->increments('id');
-            $table->char('token_hash', 64)->unique();
-            $table->integer('whmcs_user_id')->unsigned()->index();
-            $table->string('package_name', 191);
-            $table->smallInteger('attempts')->unsigned()->default(0);
-            $table->timestamp('expires_at')->nullable()->index();
-            $table->timestamp('used_at')->nullable();
-            $table->timestamp('created_at')->nullable();
-        });
-    }
-    if (!$schema->hasTable('mod_vpnhood_iap_login_attempts')) {
-        $schema->create('mod_vpnhood_iap_login_attempts', function ($table) {
-            $table->increments('id');
-            $table->char('email_hash', 64)->index();
-            $table->timestamp('created_at')->nullable()->index();
-        });
-    }
-}
-
-/**
- * Frozen invoices (lifecycle §5): WHMCS renders invoices from the LIVE client
- * row, so anonymizing the customer would strip the buyer's name off every past
- * invoice — the exact thing tax-record rules forbid. Deletion therefore
- * archives each invoice exactly as issued, buyer identity included, before the
- * client row is touched. One row per invoice, written once and never updated;
- * nothing in the module reads this table back (restriction is the legal basis:
- * it exists for an auditor, not for support or search).
- */
-function vpnhoodiap_migrateToInvoiceFreeze(): void
-{
-    $schema = Capsule::schema();
-    if (!$schema->hasTable('mod_vpnhood_iap_frozen_invoices')) {
-        $schema->create('mod_vpnhood_iap_frozen_invoices', function ($table) {
-            $table->increments('id');
-            $table->integer('invoice_id')->unsigned()->unique();
-            $table->integer('client_id')->unsigned()->index();
-            $table->mediumText('artifact');
-            $table->char('sha256', 64);
-            $table->timestamp('created_at')->nullable();
-        });
-    }
+    require_once __DIR__ . '/lib/ApiException.php';
+    require_once __DIR__ . '/lib/Provisioning/AccountDeletionService.php';
+    \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService::keepInvoiceSnapshotsOn();
 }
 
 /**
@@ -1031,8 +486,8 @@ function vpnhoodiap_migrateToInvoiceFreeze(): void
  * is installed, fully working, and completely invisible, with nothing to indicate
  * why. Granting it here makes activation self-sufficient however it was triggered.
  *
- * This is the only place the module writes a WHMCS core table: `access` lives in
- * tbladdonmodules alongside the module's own settings, and no localAPI command
+ * One of the module's few writes to a WHMCS core table (CLAUDE.md lists them): `access`
+ * lives in tbladdonmodules alongside the module's own settings, and no localAPI command
  * grants it. An existing grant is never touched — widening access is the admin's
  * decision, not ours.
  */

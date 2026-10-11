@@ -751,9 +751,7 @@ class AccountKeyService
                 $out[$serviceId] = ['source' => 'claimed', 'autoSelectable' => true,
                     'bulk' => IapRepository::serviceProperty($serviceId, 'bulkDelivery') === 'yes'];
             }
-            // the column is absent on an install that has not migrated yet: absent = the default
-            $out[$serviceId]['autoSelectable'] = !property_exists($claim, 'is_auto_selectable')
-                || (bool) $claim->is_auto_selectable;
+            $out[$serviceId]['autoSelectable'] = (bool) $claim->is_auto_selectable;
         }
         return $out;
     }

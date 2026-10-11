@@ -47,8 +47,10 @@ if (!defined("WHMCS")) {
 }
 
 use WHMCS\Database\Capsule;
+use WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService;
 use WHMCS\Module\Addon\VpnHoodIap\Provisioning\ClientProvisioner;
 
+require_once __DIR__ . '/../../modules/addons/vpnhoodiap/lib/Provisioning/AccountDeletionService.php';
 require_once __DIR__ . '/../../modules/addons/vpnhoodiap/lib/Provisioning/ClientProvisioner.php';
 
 /**
@@ -72,7 +74,24 @@ function vpnhoodiap_mailRecipientAddress(string $templateType, int $relatedId): 
         return (string) Capsule::table('tblusers')->where('id', $relatedId)->value('email');
     }
 
-    $clientId = match ($templateType) {
+    $clientId = vpnhoodiap_mailClientId($templateType, $relatedId);
+    return $clientId > 0
+        ? (string) Capsule::table('tblclients')->where('id', $clientId)->value('email')
+        : '';
+}
+
+/**
+ * The client a template's `relid` belongs to, 0 when the type names none. Account-level
+ * mail is keyed on the login, so its client is the one the login holds: deletion
+ * anonymizes a login only when that client is all it holds.
+ */
+function vpnhoodiap_mailClientId(string $templateType, int $relatedId): int
+{
+    if ($relatedId <= 0) {
+        return 0;
+    }
+    return match ($templateType) {
+        'user'      => (int) Capsule::table('tblusers_clients')->where('auth_user_id', $relatedId)->value('client_id'),
         'general'   => $relatedId, // relid IS the client id
         'invoice'   => (int) Capsule::table('tblinvoices')->where('id', $relatedId)->value('userid'),
         'product'   => (int) Capsule::table('tblhosting')->where('id', $relatedId)->value('userid'),
@@ -81,9 +100,6 @@ function vpnhoodiap_mailRecipientAddress(string $templateType, int $relatedId): 
         'affiliate' => (int) Capsule::table('tblaffiliates')->where('id', $relatedId)->value('clientid'),
         default     => 0,
     };
-    return $clientId > 0
-        ? (string) Capsule::table('tblclients')->where('id', $clientId)->value('email')
-        : '';
 }
 
 /** Deletion's placeholder address: unroutable by construction, so mail to it can only bounce. */
@@ -152,11 +168,14 @@ add_hook('EmailPreSend', 1, function (array $vars) {
         return [];
     }
 
-    if ($erased) {
+    if ($erased && !AccountDeletionService::isRewritingRecords()) {
         try {
             // deletions are rare, so one line per suppressed mail is a trace, not noise —
-            // and it is the only place the offending template ever gets named
-            logActivity("vpnhoodiap: suppressed '$messageName' — its recipient is a deleted (anonymized) client");
+            // and it is the only place the offending template ever gets named, filed under
+            // the client it was for. The mail a deletion's own rewrites set off gets none:
+            // that note would only echo the deletion, and keep the caller's IP.
+            logActivity("vpnhoodiap: suppressed '$messageName' — its recipient is a deleted (anonymized) client",
+                vpnhoodiap_mailClientId($templateType, $relatedId));
         } catch (\Throwable $e) {
             // the note must never decide whether the mail is suppressed
         }

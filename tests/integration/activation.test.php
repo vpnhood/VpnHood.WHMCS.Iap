@@ -99,6 +99,14 @@ $tables = [
     'mod_vpnhood_iap_purchases',
     'mod_vpnhood_iap_events',
     'mod_vpnhood_iap_log',
+    'mod_vpnhood_iap_deletions',
+    'mod_vpnhood_iap_claims',
+    'mod_vpnhood_iap_code_rejections',
+    'mod_vpnhood_iap_login_challenges',
+    'mod_vpnhood_iap_login_attempts',
+    'mod_vpnhood_iap_restore_credentials',
+    'mod_vpnhood_iap_restore_challenges',
+    'mod_vpnhood_iap_legacy_subs',
 ];
 foreach ($tables as $t) {
     if (tableExists($db, $t)) {

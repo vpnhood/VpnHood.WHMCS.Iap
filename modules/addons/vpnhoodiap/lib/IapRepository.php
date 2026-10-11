@@ -664,25 +664,17 @@ class IapRepository
     /** Account row + first linked identity, with the concurrent-race handling both creators need. */
     private function createUserWithIdentity(string $provider, string $subject, string $email, bool $emailVerifiedClaim, ?string $displayName, ?int $clientId, string $now): array
     {
-        try {
-            $id = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
-                'provider'             => $provider,
-                'provider_subject'     => $subject,
-                'email'                => $email,
-                'display_name'         => $displayName,
-                'email_verified_claim' => $emailVerifiedClaim ? 1 : 0,
-                'client_id'            => $clientId,
-                'external_uid'         => self::uuidV4(),
-                'created_at'           => $now,
-                'updated_at'           => $now,
-            ]);
-        } catch (\Throwable $e) {
-            // only the pre-identity unique(email) index can reject this insert; it
-            // must be gone before resolution is safe, so fail loudly with the cure
-            throw new \RuntimeException(
-                'vpnhoodiap: users.email still carries the pre-identity unique index — open the addon page so _upgrade() runs.',
-                0, $e);
-        }
+        $id = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
+            'provider'             => $provider,
+            'provider_subject'     => $subject,
+            'email'                => $email,
+            'display_name'         => $displayName,
+            'email_verified_claim' => $emailVerifiedClaim ? 1 : 0,
+            'client_id'            => $clientId,
+            'external_uid'         => self::uuidV4(),
+            'created_at'           => $now,
+            'updated_at'           => $now,
+        ]);
         if (!$this->linkIdentity($id, $provider, $subject, $email, $now)) {
             // lost a concurrent race for this same identity: the winner's account is
             // the account. Drop the row just created for nothing and use theirs.
@@ -874,6 +866,34 @@ class IapRepository
         } catch (\Throwable $e) {
             // swallow: the log table must never break the API path
         }
+    }
+
+    /**
+     * The daily cleanup of the request log, which is the rate limiter's window (seconds) and the
+     * audit trail. HTTP traffic rows (route actions, and the empty action of a refused verb) carry
+     * the caller's IP, so they go by RequestLogRetentionDays, the days the install's privacy policy
+     * promises (30 while unset), not the payloads' retention: a day early, as a daily run keeps a
+     * row up to a day past its cutoff. Bounded batches, until none is left; the module's own
+     * audit rows (alerts, handovers, renewals…) stay — LegacyStoreHandover's removal condition
+     * counts them.
+     *
+     * @return int the rows deleted
+     */
+    public function pruneRequestLog(): int
+    {
+        $days = max(1, (int) ($this->setting('RequestLogRetentionDays') ?: 30));
+        $cutoff = date('Y-m-d H:i:s', time() - ($days - 1) * 86400);
+        $total = 0;
+        do {
+            $deleted = Capsule::table('mod_vpnhood_iap_log')
+                ->where('created_at', '<', $cutoff)
+                ->where(function ($query) {
+                    $query->where('action', 'like', '% /v1/%')->orWhere('action', '')->orWhereNull('action');
+                })
+                ->limit(50000)->delete();
+            $total += $deleted;
+        } while ($deleted === 50000);
+        return $total;
     }
 
     /** Sliding-window request count for one IP + action, for rate limiting. */

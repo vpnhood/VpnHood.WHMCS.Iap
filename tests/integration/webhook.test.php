@@ -185,7 +185,7 @@ try {
         // a store refund is the store's decision: it leaves no record of the account here
         !tableExists($db, 'mod_vpnhood_iap_refund_marks')
             ? ok('no refund mark table: the account is not remembered for a store refund')
-            : bad('mod_vpnhood_iap_refund_marks still exists — the upgrade did not run, or the marks are back');
+            : bad('mod_vpnhood_iap_refund_marks exists — the refund marks are back');
         (int) one($db, "SELECT COUNT(*) c FROM mod_vpnhood_iap_log WHERE action='refund.repeat'")['c'] === 0
             ? ok('and no "repeat refund" line in the log')
             : bad('refund.repeat rows in mod_vpnhood_iap_log');

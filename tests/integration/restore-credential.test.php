@@ -22,7 +22,7 @@ if (!iapModuleActive($db)) {
     finish();
 }
 if (!tableExists($db, 'mod_vpnhood_iap_restore_credentials') || !tableExists($db, 'mod_vpnhood_iap_restore_challenges')) {
-    bad('restore-credential tables missing — WHMCS has not run the module upgrade yet');
+    bad('restore-credential tables missing — run the activation test first');
     finish();
 }
 
