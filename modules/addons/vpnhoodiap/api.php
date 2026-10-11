@@ -115,6 +115,7 @@ const VPNHOODIAP_ROUTES = [
     '/v1/system/status'         => ['GET' => 'vpnhoodiap_getStatus'],
     '/v1/auth/sessions'         => ['POST' => 'vpnhoodiap_createSession'],
     '/v1/auth/sessions/current' => ['DELETE' => 'vpnhoodiap_deleteCurrentSession'],
+    '/v1/auth/password-reset'   => ['GET' => 'vpnhoodiap_getPasswordReset'],
     '/v1/auth/restore-credentials' => [
         'POST'   => 'vpnhoodiap_createRestoreCredential',
         'DELETE' => 'vpnhoodiap_deleteRestoreCredential',
@@ -191,6 +192,17 @@ function vpnhoodiap_getStatus(IapRepository $repo, array $request): array
 {
     vpnhoodiap_rateLimit($repo, $request, 30, 60);
     return [200, ['status' => 'ok', 'api' => 'v1', 'time' => gmdate('c')]];
+}
+
+/**
+ * GET /v1/auth/password-reset — the page where a person who forgot the password starts over,
+ * for the password form's "forgot password": WHMCS's own, as its routing builds it from the
+ * install's address and URL mode. Public, as the page itself is.
+ */
+function vpnhoodiap_getPasswordReset(IapRepository $repo, array $request): array
+{
+    vpnhoodiap_rateLimit($repo, $request, 30, 60);
+    return [200, ['url' => fqdnRoutePath('password-reset-begin')]];
 }
 
 /** GET /openapi.json — the machine-readable contract, served from the module. */

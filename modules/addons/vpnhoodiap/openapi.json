@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "VpnHood Portal API",
-    "version": "1.4",
+    "version": "1.5",
     "summary": "The API a VpnHood app uses to sign in, redeem an app-store purchase, and receive its access code.",
     "description": "The Portal API is the contract between a VpnHood client app and whatever backend runs the customer's account. It is deliberately backend-neutral: it speaks of sessions, accounts, products, purchases, subscriptions and access codes, and never of the billing system behind them. Today it is implemented by the `vpnhoodiap` WHMCS addon; a different backend can implement the same document without any client change.\n\n**Flow.** The app signs in with an identity token from Google or Apple (`POST /v1/auth/sessions`) and receives an opaque session token. It buys in the app store, then posts the store's proof (`POST /v1/billing/purchases`); the portal re-validates that proof directly with the store and provisions the subscription — one synchronous call, no polling loop. The app then refreshes `GET /v1/account`, the one snapshot that carries the delivered access code and the subscription. Store webhooks drive renewals, cancellations and refunds afterwards, so that snapshot is always the current truth.\n\n**Trust.** Proofs and identity tokens are pointers, never evidence: every one is re-verified against the issuing store or identity provider on arrival. A purchase must carry the signed-in user's own attribution id (`obfuscatedAccountId` on Google, `appAccountToken` on Apple), so a stolen store token cannot be redeemed into another account.",
     "license": {
@@ -238,6 +238,38 @@
         "responses": {
           "204": {
             "description": "The session is revoked."
+          }
+        }
+      }
+    },
+    "/v1/auth/password-reset": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "getPasswordReset",
+        "summary": "Password reset page",
+        "description": "The web page where a person who forgot the password starts over. An app asks when its password form opens, offers its forgot-password link only when this answers, and opens the page in a browser (or shows it as a code to scan); it never calls the page itself. Public, as the page is.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasswordReset"
+                },
+                "example": {
+                  "url": "https://whmcs.example.com/index.php?rp=/password/reset"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         }
       }
@@ -954,6 +986,19 @@
             "type": "string",
             "format": "date-time",
             "description": "Server time (UTC), for clock-skew checks."
+          }
+        }
+      },
+      "PasswordReset": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "The portal website's own page for a forgotten password, as that website builds its addresses."
           }
         }
       },

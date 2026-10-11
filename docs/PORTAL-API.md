@@ -29,6 +29,7 @@ this same document and the apps will not know the difference.
 | `GET` | `/v1/system/status` | — | Is the portal installed, active and healthy |
 | `POST` | `/v1/auth/sessions` | — | Sign in → session token. Four request forms: Google/Apple id token, the WHMCS client-area password, a second-factor challenge completion, or a restore-credential assertion |
 | `DELETE` | `/v1/auth/sessions/current` | ✔ | Sign out (revokes the token server-side) |
+| `GET` | `/v1/auth/password-reset` | — | The website's page for a forgotten password → `{url}`, for the password form's "forgot password" link |
 | `POST` | `/v1/auth/restore-credentials/registration-options` | ✔ | WebAuthn creation options for the device's restore key (zero-tap sign-in restoration) |
 | `POST` | `/v1/auth/restore-credentials` | ✔ | Store the restore key the device registered → `{credentialId}` |
 | `DELETE` | `/v1/auth/restore-credentials?credentialId=` | ✔ | Retire one restore key (a device signing out) |
@@ -139,7 +140,11 @@ two. Three rules govern this form:
   (`too_many_attempts`): it waits out the configured minutes (10 by default, addon
   setting *Password Cooldown*) and then works again by itself — no lock to lift, and
   nonexistent addresses cool down exactly like real ones. Setting or recovering the
-  password on the account website is the way in.
+  password on the account website is the way in: `GET /v1/auth/password-reset` answers
+  that page's address, `{url}`, as the website builds it (WHMCS's routing: the install's
+  address and URL mode). An app asks when its password form opens and offers the link only
+  when this answers, then opens the page in a browser, or shows it as a code to scan on a
+  TV.
 
 - **The second factor is honored, in the API.** When the account uses WHMCS two-factor
   auth, the password form answers **200** `{challenge: {token, type, expiresAt}}`

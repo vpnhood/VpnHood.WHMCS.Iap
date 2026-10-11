@@ -124,6 +124,8 @@ run_endpoints() {
   probe POST "$api/v1/auth/sessions" 'not json' 400 '"code":"bad_request"' 'non-JSON body is a clean 400'
   probe POST "$api/v1/auth/sessions" '{"provider":"nope","idToken":"x","packageName":"y"}' \
     400 '"code":"unsupported_provider"' 'an unknown sign-in provider names itself'
+  probe GET "$api/v1/auth/password-reset" - 200 '"url":"https:' 'the password-reset page is public'
+  probe POST "$api/v1/auth/password-reset" '{}' 405 '"code":"method_not_allowed"' 'the password-reset page is GET-only'
 
   probe POST "$hook?store=bogus&t=x" '{}' 404 '"success":false' 'webhook: unknown store is 404'
   probe POST "$hook?store=googleplay&t=wrong-token" '{}' 401 '"success":false' 'webhook: bad token is 401'
