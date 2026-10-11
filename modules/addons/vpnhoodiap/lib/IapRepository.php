@@ -387,16 +387,13 @@ class IapRepository
     }
 
     /**
-     * The account for an address. Ordered by id so that an install whose unique index
-     * could not be applied (pre-existing duplicates) still resolves to one stable row
-     * — the oldest, which is the one purchases were provisioned against.
+     * The app account bound to a WHMCS client, the oldest if several are. A client-area page
+     * finds the person's app account this way, never by the account row's email: that one is
+     * a contact snapshot, and an address a WHMCS login carries proves nothing until confirmed.
      */
-    public function findUserByEmail(string $email): ?array
+    public function findUserByClient(int $clientId): ?array
     {
-        $row = Capsule::table('mod_vpnhood_iap_users')
-            ->where('email', self::normalizeEmail($email))
-            ->orderBy('id')
-            ->first();
+        $row = Capsule::table('mod_vpnhood_iap_users')->where('client_id', $clientId)->orderBy('id')->first();
         return $row === null ? null : (array) $row;
     }
 

@@ -492,7 +492,12 @@ same deletion is available on the web at
 `index.php?m=vpnhoodiap&action=delete-account`, so it works without the app
 installed (Play policy) — and that page carries the reseller warning the app is not
 given: a bulk order's CSV is served by the client area, so it can never be downloaded
-again once the account is gone.
+again once the account is gone. It takes the app accounts bound to the client with it,
+never one that merely carries the client's address on its row: anyone may sign up on
+the website with any address. A person who can use neither (signed in only in the app,
+or with an address the website never saw) asks from an address the account signs in
+with, and an administrator deletes it in the addon's **Accounts** tab, which finds the
+account by that address.
 
 **No store is ever displayed.** One app ships on every platform and naming a
 competing store is itself a store violation (App Review 2.3.10). Where a

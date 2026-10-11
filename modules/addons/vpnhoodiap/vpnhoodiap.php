@@ -35,7 +35,7 @@ function vpnhoodiap_config(): array
     return [
         'name'        => 'VpnHood! In-App Purchase',
         'description' => 'Processes app-store purchases (Google Play / Apple / Microsoft) into WHMCS clients, orders and paid invoices, delivering VpnHood access codes through the install\'s provisioning module.',
-        'version'     => '1.8.9',
+        'version'     => '1.8.10',
         'author'      => 'VpnHood',
         'fields'      => [
             'AdminAlertEmail' => [
@@ -632,13 +632,9 @@ function vpnhoodiap_clientareaCodes(): array
     $notice = '';
 
     $repo = new IapRepository();
-    $moduleUser = $email !== '' ? $repo->findUserByEmail($email) : null;
     // a pure web customer has no module account; a stand-in row keys their
     // claims by client_id instead (the same pattern as the deletion page)
-    $keyUser = $moduleUser ?? ['id' => 0, 'client_id' => $clientId];
-    if ($moduleUser !== null && $moduleUser['client_id'] === null) {
-        $keyUser['client_id'] = $clientId; // signed-in area proves the client link the module may not have yet
-    }
+    $keyUser = ($clientId > 0 ? $repo->findUserByClient($clientId) : null) ?? ['id' => 0, 'client_id' => $clientId];
     $keyService = new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountKeyService($repo);
 
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && $clientId > 0) {
@@ -784,10 +780,7 @@ function vpnhoodiap_clientareaDeleteAccount(): array
             if (($_POST['confirm'] ?? '') !== 'yes') {
                 throw new \RuntimeException('Please tick the confirmation box first.');
             }
-            $repo = new IapRepository();
-            $moduleUser = $email !== '' ? $repo->findUserByEmail($email) : null;
-            (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService())
-                ->deleteClient($clientId, $moduleUser);
+            (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService())->deleteClient($clientId);
             header('Location: logout.php');
             exit;
         } catch (\Throwable $e) {
@@ -801,9 +794,8 @@ function vpnhoodiap_clientareaDeleteAccount(): array
     if ($clientId > 0) {
         try {
             $repo = new IapRepository();
-            $moduleUser = $email !== '' ? $repo->findUserByEmail($email) : null;
             $bulkOrders = (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountKeyService($repo))
-                ->bulkOrderCount($moduleUser ?? ['id' => 0, 'client_id' => $clientId]);
+                ->bulkOrderCount($repo->findUserByClient($clientId) ?? ['id' => 0, 'client_id' => $clientId]);
         } catch (\Throwable $e) {
             logModuleCall('vpnhoodiap', 'clientarea.deleteAccount.bulkCount', (string) $clientId, $e->getMessage(), '');
         }
@@ -825,7 +817,7 @@ function vpnhoodiap_clientareaDeleteAccount(): array
 
 /**
  * Admin area output: tabbed UI — Apps (store credentials), Catalog (SKU mappings),
- * Purchases / Events / Log (read-only monitors).
+ * Accounts (deletion on request), Purchases / Events / Log (read-only monitors).
  */
 function vpnhoodiap_output(array $vars): void
 {
@@ -901,6 +893,20 @@ function vpnhoodiap_output(array $vars): void
                 $notice = 'Catalog mapping updated.';
                 $noticeType = 'success';
                 $tab = 'catalog';
+            } elseif ($sub === 'account_delete') {
+                $tab = 'accounts';
+                if (($_POST['confirm'] ?? '') !== 'yes') {
+                    throw new \RuntimeException('Tick the confirmation box to delete the account.');
+                }
+                $user = $repo->getUser((int) ($_POST['id'] ?? 0));
+                if ($user === null) {
+                    throw new \RuntimeException('That account no longer exists.');
+                }
+                require_once __DIR__ . '/lib/ApiException.php';
+                require_once __DIR__ . '/lib/Provisioning/AccountDeletionService.php';
+                (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService())->deleteUser($user);
+                $notice = 'Account #' . (int) $user['id'] . ' is deleted.';
+                $noticeType = 'success';
             }
         } catch (\Throwable $e) {
             $notice = 'Error: ' . htmlspecialchars($e->getMessage());
@@ -913,7 +919,8 @@ function vpnhoodiap_output(array $vars): void
     }
 
     // -- Tabs ---------------------------------------------------------------
-    $tabs = ['apps' => 'Apps', 'catalog' => 'Catalog', 'purchases' => 'Purchases', 'events' => 'Events', 'log' => 'Log'];
+    $tabs = ['apps' => 'Apps', 'catalog' => 'Catalog', 'accounts' => 'Accounts', 'purchases' => 'Purchases',
+        'events' => 'Events', 'log' => 'Log'];
     echo '<ul class="nav nav-tabs" style="margin-bottom:15px">';
     foreach ($tabs as $key => $label) {
         $active = $key === $tab ? ' class="active"' : '';
@@ -924,6 +931,9 @@ function vpnhoodiap_output(array $vars): void
     switch ($tab) {
         case 'catalog':
             vpnhoodiap_renderCatalog($repo, $modulelink);
+            break;
+        case 'accounts':
+            vpnhoodiap_renderAccounts($repo, $modulelink);
             break;
         case 'purchases':
             vpnhoodiap_renderPurchases($repo);
@@ -1074,6 +1084,52 @@ function vpnhoodiap_renderCatalog(IapRepository $repo, string $modulelink): void
     echo '<button class="btn btn-success">Add</button>';
     echo '</form>';
     echo '<p class="help-block">Mapping unit is the plan: (store product id, base plan) → (WHMCS product, cycle). A plan without a mapping is simply not sellable in that app.</p>';
+}
+
+/**
+ * Accounts tab: deletion on request, for a person who can delete neither in the app nor on
+ * the website (signed in only in the app, or with an address WHMCS never saw). The request
+ * comes from an address the account signs in with, so that is what finds it: never the
+ * address on the account row, a snapshot that goes stale.
+ */
+function vpnhoodiap_renderAccounts(IapRepository $repo, string $modulelink): void
+{
+    $email = trim((string) ($_REQUEST['email'] ?? ''));
+    echo '<form method="get" action="addonmodules.php" class="form-inline" style="margin-bottom:12px">'
+        . '<input type="hidden" name="module" value="vpnhoodiap"><input type="hidden" name="tab" value="accounts">'
+        . '<input type="email" name="email" class="form-control" style="width:320px" required'
+        . ' placeholder="the address the request came from" value="' . htmlspecialchars($email) . '"> '
+        . '<button class="btn btn-default">Find</button></form>';
+    if ($email === '') {
+        echo '<p class="help-block">A person who cannot delete their account in the app or on the website asks for it '
+            . 'from the address they sign in with. Find the account by that address and delete it here: the same '
+            . 'deletion the app and the website run.</p>';
+        return;
+    }
+
+    $users = $repo->findUsersByIdentityEmail($email);
+    if ($users === []) {
+        echo '<p class="text-muted">No account signs in with that address.</p>';
+        return;
+    }
+    echo '<table class="table table-condensed table-striped"><thead><tr>'
+        . '<th>Account</th><th>Signs in with</th><th>Website client</th><th>Created</th><th></th></tr></thead><tbody>';
+    foreach ($users as $user) {
+        $methods = array_map(fn (array $identity) => htmlspecialchars($identity['provider'] . ' (' . $identity['email'] . ')'),
+            $repo->identitiesForUser((int) $user['id']));
+        $clientId = (int) ($user['client_id'] ?? 0);
+        echo '<tr><td>#' . (int) $user['id'] . '</td>'
+            . '<td>' . implode(', ', $methods) . '</td>'
+            . '<td>' . ($clientId > 0 ? '<a href="clientssummary.php?userid=' . $clientId . '">#' . $clientId . '</a>' : '—') . '</td>'
+            . '<td>' . htmlspecialchars((string) $user['created_at']) . '</td>'
+            . '<td><form method="post" action="' . $modulelink . '&tab=accounts" style="margin:0">'
+            . vpnhoodiap_csrfField()
+            . '<input type="hidden" name="do" value="account_delete">'
+            . '<input type="hidden" name="id" value="' . (int) $user['id'] . '">'
+            . '<label class="checkbox-inline"><input type="checkbox" name="confirm" value="yes"> permanently</label> '
+            . '<button class="btn btn-xs btn-danger">Delete</button></form></td></tr>';
+    }
+    echo '</tbody></table>';
 }
 
 /** Purchases tab (read-only, latest 50). */

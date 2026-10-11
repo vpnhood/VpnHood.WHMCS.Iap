@@ -54,8 +54,8 @@ client-area codes page, with reversible *keep for later* / *allow again* control
 device whose code the access server refuses reports one bit back and is served the next
 candidate; the system never deletes a code.
 
-Account deletion (`DELETE /v1/account`, or the client-area page so it works without the
-app installed) anonymizes the customer, cancels web billing at the end of its paid
+Account deletion (`DELETE /v1/account`, the client-area page so it works without the
+app installed, or the addon's **Accounts** tab for a person who asks by email) anonymizes the customer, cancels web billing at the end of its paid
 period, and **never touches a store subscription** — Restore Purchases from a new
 account re-attaches it. The full contract and reasoning live in
 [docs/PORTAL-API.md](docs/PORTAL-API.md).

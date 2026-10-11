@@ -85,16 +85,21 @@ class AccountDeletionService
 
     /**
      * Delete a WHMCS-client account from the client area (the web deletion path
-     * Play requires). Works for app buyers and pure web customers alike; when a
-     * module account hangs on the client's email it dies with it.
+     * Play requires). Works for app buyers and pure web customers alike; the app
+     * accounts bound to the client die with it, each journalled. One that only
+     * carries the client's address on its row is not shown to be the person's.
      */
-    public function deleteClient(int $clientId, ?array $moduleUser): void
+    public function deleteClient(int $clientId): void
     {
+        $userIds = array_map('intval', Capsule::table('mod_vpnhood_iap_users')
+            ->where('client_id', $clientId)->pluck('id')->all());
         $details = $this->deleteClientSide($clientId);
-        if ($moduleUser !== null) {
-            $this->eraseModuleRows((int) $moduleUser['id']);
+        foreach ($userIds as $userId) {
+            $this->eraseModuleRows($userId);
         }
-        $this->journal($moduleUser !== null ? (int) $moduleUser['id'] : null, $clientId, 'deleted', $details);
+        foreach ($userIds ?: [null] as $userId) {
+            $this->journal($userId, $clientId, 'deleted', $details);
+        }
     }
 
     // ------------------------------------------------------------------ steps --
@@ -510,11 +515,13 @@ class AccountDeletionService
     }
 
     /**
-     * WHMCS files a few notes of a login or a ticket under nobody, with the IP of the
-     * request that wrote them: "Email Verification Message Sending Aborted by Hook -
-     * UserID: <login>", with the "Email Sending Aborted by Hook" line the same request
-     * wrote just before it (at sign-up and at a deletion, when the hook suppresses that
-     * mail), and "Deleted Ticket - Ticket ID: <ticket>".
+     * WHMCS files a few notes of a login or a ticket under nobody, some with the IP of the
+     * request that wrote them. A login's end "- UserID: <login>": the mail sent to it, by
+     * name ("Email Sent to <First Last> (Email Address Verification)"), a password reset,
+     * and "Email Verification Message Sending Aborted by Hook", with the "Email Sending
+     * Aborted by Hook" line the same request wrote just before it (at sign-up and at a
+     * deletion, when the hook suppresses that mail). A ticket's: "Deleted Ticket - Ticket
+     * ID: <ticket>".
      *
      * @param int[] $loginIds
      * @param int[] $ticketIds
@@ -523,11 +530,13 @@ class AccountDeletionService
     {
         $unfiled = fn () => Capsule::table('tblactivitylog')->where('userid', 0)->where('user_id', 0);
         foreach ($loginIds as $loginId) {
-            $notes = $unfiled()->where('description', 'like', "%Aborted by Hook - UserID: $loginId")->get(['id', 'date', 'ipaddr']);
+            $notes = $unfiled()->where('description', 'like', "%- UserID: $loginId")->get(['id', 'date', 'ipaddr', 'description']);
             foreach ($notes as $note) {
-                $pairedId = (int) Capsule::table('tblactivitylog')->where('id', '<', (int) $note->id)->max('id');
-                $unfiled()->where('id', $pairedId)->where('description', 'like', 'Email Sending Aborted by Hook%')
-                    ->where('date', $note->date)->where('ipaddr', $note->ipaddr)->delete();
+                if (str_ends_with((string) $note->description, "Aborted by Hook - UserID: $loginId")) {
+                    $pairedId = (int) Capsule::table('tblactivitylog')->where('id', '<', (int) $note->id)->max('id');
+                    $unfiled()->where('id', $pairedId)->where('description', 'like', 'Email Sending Aborted by Hook%')
+                        ->where('date', $note->date)->where('ipaddr', $note->ipaddr)->delete();
+                }
                 Capsule::table('tblactivitylog')->where('id', (int) $note->id)->delete();
             }
         }

@@ -11,9 +11,10 @@
  * with the agreement reference — every invoice keeps the buyer's real name and
  * address in WHMCS's own snapshot, taken before the client row is anonymized when
  * the invoice had none, and stripped of what no invoice shows, a
- * re-run finishes a close a failed run left undone,
- * and the real DELETE /account endpoint does all of it over HTTP with a
- * session token. There is deliberately NO deletion-preview endpoint: the
+ * re-run finishes a close a failed run left undone, the web deletion takes the
+ * client's own app accounts and no other, the real DELETE /account endpoint does
+ * all of it over HTTP with a session token, and the admin's Accounts tab deletes
+ * on request an account it finds by the address it signs in with. There is deliberately NO deletion-preview endpoint: the
  * confirmation screen warns without listing; nothing is mailed on the way out.
  *
  * Writes go through localAPI (clients, logins, orders, services, tickets) or the
@@ -108,8 +109,9 @@ function column(array $row, string $name): string
 /**
  * What WHMCS keeps of a person, on top of what AddClient leaves: a sign-in address on each
  * login, a custom field value, a mail-log row, an activity row filed under the first login
- * alone and one filed under nobody that quotes an address, a ticket with a reply, a ticket
- * sent from the address without signing in, and a link to a sign-in provider.
+ * alone, one filed under nobody that quotes an address and one per login that names it by
+ * id and the person by name, a ticket with a reply, a ticket sent from the address without
+ * signing in, and a link to a sign-in provider.
  *
  * @param int[] $loginIds
  * @return int[] the ticket ids
@@ -143,6 +145,11 @@ function addTraces(string $marker, int $clientId, array $loginIds, string $email
         ['date' => $now, 'description' => "Email changed from $quotedEmail.", 'user' => 'System', 'userid' => 0,
             'user_id' => 0, 'admin_id' => 0, 'ipaddr' => '203.0.113.8'],
     ]);
+    foreach ($loginIds as $loginId) {
+        Capsule::table('tblactivitylog')->insert(['date' => $now,
+            'description' => "Email Sent to $marker Person (Email Address Verification) - UserID: $loginId",
+            'user' => 'System', 'userid' => 0, 'user_id' => 0, 'admin_id' => 0, 'ipaddr' => '']);
+    }
 
     $departmentId = (int) Capsule::table('tblticketdepartments')->orderBy('id')->value('id');
     $ticket = localAPI('OpenTicket', [
@@ -215,6 +222,12 @@ function assertTracesErased(string $by, int $clientId, array $loginIds, array $a
     $quoting === []
         ? ok("$by: no activity row quotes the person's addresses, whoever it is filed under")
         : bad("$by: activity rows still quote the person's addresses: " . json_encode($quoting));
+    $namingLogins = array_merge(...array_map(fn (int $id) => Capsule::table('tblactivitylog')
+        ->where('userid', 0)->where('user_id', 0)->where('description', 'like', "%- UserID: $id")
+        ->get(['id', 'description'])->all(), $loginIds));
+    $namingLogins === []
+        ? ok("$by: no row filed under nobody names one of the person's logins")
+        : bad("$by: rows filed under nobody still name the person's logins: " . json_encode($namingLogins));
     Capsule::table('tblemails')->where('userid', $clientId)->count() === 0
         ? ok("$by: the mail log holds nothing for the client")
         : bad("$by: mail-log rows survived");
@@ -339,6 +352,10 @@ try {
     $longerAddressRowId = (int) Capsule::table('tblactivitylog')->insertGetId(['date' => $now,
         'description' => "Email changed from jo$email", 'user' => 'System', 'userid' => 0, 'user_id' => 0,
         'admin_id' => 0, 'ipaddr' => '203.0.113.10']);
+    // another login, whose id ends in the person's
+    $longerLoginRowId = (int) Capsule::table('tblactivitylog')->insertGetId(['date' => $now,
+        'description' => "Email Sent to $marker Other (Email Address Verification) - UserID: 1$loginId",
+        'user' => 'System', 'userid' => 0, 'user_id' => 0, 'admin_id' => 0, 'ipaddr' => '']);
 
     $mailLogBefore = Capsule::table('tblemails')->where('userid', $clientIds['main'])->count();
     $activityBefore = Capsule::table('tblactivitylog')->where('userid', $clientIds['main'])->count();
@@ -352,6 +369,9 @@ try {
     Capsule::table('tblactivitylog')->where('id', $longerAddressRowId)->exists()
         ? ok('a row quoting a longer address with the person\'s inside it is not theirs, and stays')
         : bad('the deletion erased a row quoting someone else\'s longer address');
+    Capsule::table('tblactivitylog')->where('id', $longerLoginRowId)->exists()
+        ? ok('a row naming a login whose id ends in the person\'s is not theirs, and stays')
+        : bad('the deletion erased a row naming someone else\'s login');
     $written = Capsule::table('tblactivitylog')->where('id', '>', $lastLogIdBefore)
         ->get(['id', 'userid', 'user_id', 'description'])->all();
     $written === []
@@ -410,7 +430,7 @@ try {
     // == 2. a re-run finishes what a failed run left =========================
     // a close that failed after the record was anonymized leaves it open
     $reopened = localAPI('UpdateClient', ['clientid' => $clientIds['main'], 'status' => 'Active', 'skipvalidation' => true]);
-    (new AccountDeletionService())->deleteClient($clientIds['main'], null);
+    (new AccountDeletionService())->deleteClient($clientIds['main']);
     $status = (string) Capsule::table('tblclients')->where('id', $clientIds['main'])->value('status');
     (($reopened['result'] ?? '') === 'success' && $status === 'Closed')
         ? ok('a re-run closes a record a failed run left open')
@@ -446,8 +466,21 @@ try {
                 ? ok('the web order has invoice #' . implode(', #', $webInvoiceIds) . ', with no snapshot, the setting off')
                 : bad('the web order made no invoice: the snapshot path goes untested');
 
-            (new AccountDeletionService())->deleteClient($clientIds['web'], null);
+            // the client's app account dies with it; one that only carries the client's address
+            // on its row is not shown to be the person's (anyone may sign up with any address)
+            $userIds['webBound'] = makeUser("$marker-webbound", $clientIds['web']);
+            $userIds['webNamesake'] = makeUser("$marker-web", null);
+
+            (new AccountDeletionService())->deleteClient($clientIds['web']);
             ok('deletion proceeded despite an active web service — nothing blocks it');
+
+            (userRow($userIds['webBound']) === null && Capsule::table('mod_vpnhood_iap_deletions')
+                ->where('client_id', $clientIds['web'])->where('user_id', $userIds['webBound'])->exists())
+                ? ok('the app account bound to the client is gone with it, and journalled')
+                : bad('the app account bound to the client survived the web deletion, or went unjournalled');
+            userRow($userIds['webNamesake']) !== null
+                ? ok('an app account that only carries the client\'s address on its row stays')
+                : bad('the web deletion erased an app account it found by the address on its row');
 
             $cancelRow = one($db, 'SELECT id, type FROM tblcancelrequests WHERE relid = ? ORDER BY id DESC', [$webServiceId]);
             ($cancelRow !== null && stripos((string) $cancelRow['type'], 'End of Billing') !== false)
@@ -547,6 +580,45 @@ try {
     } catch (ApiException $e) {
         ok('the session that performed the deletion is dead');
     }
+
+    // == 5. deletion on request, from the admin's Accounts tab ================
+    // an app-only account, found by the address it signs in with; another whose row
+    // carries that address while its sign-in method reports a different one is not it
+    $askedAddress = "$marker-asked@vpnhood.test";
+    $userIds['asked'] = makeUser("$marker-asked", null);
+    $userIds['askedNamesake'] = makeUser("$marker-namesake", null);
+    Capsule::table('mod_vpnhood_iap_users')->where('id', $userIds['askedNamesake'])->update(['email' => $askedAddress]);
+    foreach (['asked' => $askedAddress, 'askedNamesake' => "$marker-moved@vpnhood.test"] as $key => $address) {
+        Capsule::table('mod_vpnhood_iap_identities')->insert(['user_id' => $userIds[$key], 'provider' => 'google',
+            'provider_subject' => "$marker-$key", 'email' => $address,
+            'created_at' => date('Y-m-d H:i:s'), 'updated_at' => date('Y-m-d H:i:s')]);
+    }
+    require_once WEBROOT . '/modules/addons/vpnhoodiap/vpnhoodiap.php';
+    if (!isset($_SESSION)) {
+        $_SESSION = []; // no session in the CLI; the tab's CSRF token lives in it
+    }
+    $adminPage = function (string $method, array $request, array $post = []): string {
+        $_SERVER['REQUEST_METHOD'] = $method;
+        $_REQUEST = $request + $post;
+        $_POST = $post + ['token' => vpnhoodiap_csrfToken()];
+        ob_start();
+        vpnhoodiap_output(['modulelink' => 'addonmodules.php?module=vpnhoodiap']);
+        return (string) ob_get_clean();
+    };
+    $found = $adminPage('GET', ['tab' => 'accounts', 'email' => $askedAddress]);
+    (str_contains($found, '<td>#' . $userIds['asked'] . '</td>') && !str_contains($found, '<td>#' . $userIds['askedNamesake'] . '</td>'))
+        ? ok('the Accounts tab finds the account by the address it signs in with, not by the one on its row')
+        : bad('the Accounts tab listed the wrong accounts for the address');
+    $refused = $adminPage('POST', ['tab' => 'accounts'], ['do' => 'account_delete', 'id' => $userIds['asked']]);
+    (str_contains($refused, 'Tick the confirmation box') && userRow($userIds['asked']) !== null)
+        ? ok('without the confirmation box ticked, nothing is deleted')
+        : bad('the Accounts tab deleted without its confirmation');
+    $deleted = $adminPage('POST', ['tab' => 'accounts'], ['do' => 'account_delete', 'id' => $userIds['asked'], 'confirm' => 'yes']);
+    (str_contains($deleted, 'is deleted') && userRow($userIds['asked']) === null
+        && Capsule::table('mod_vpnhood_iap_deletions')->where('user_id', $userIds['asked'])->exists()
+        && userRow($userIds['askedNamesake']) !== null)
+        ? ok('the Accounts tab deletes the account it found, journalled, and leaves the other')
+        : bad('the Accounts tab did not delete as asked: ' . strip_tags(substr($deleted, 0, 300)));
 } finally {
     // == cleanup — test fixtures never linger ================================
     foreach ($userIds as $userId) {
