@@ -12,6 +12,7 @@ page is the narrative version: what the endpoints are for, and why they behave a
 Base URL   https://<whmcs>/modules/addons/vpnhoodiap/api.php
 Resource   /v1/<controller>/<resource> (the path after api.php — PHP PATH_INFO)
 Auth       Authorization: Bearer <session token>
+Language   Accept-Language: <the app's language> (optional)
 Success    the resource itself, as JSON — no envelope
 Failure    RFC 9457 application/problem+json, with a stable `code`
 ```
@@ -20,6 +21,13 @@ The vocabulary is deliberately backend-neutral — sessions, accounts, products,
 subscriptions, access codes. **No WHMCS concept ever appears on the wire**: no client,
 order, invoice or service id, and no WHMCS error text. A different backend can implement
 this same document and the apps will not know the difference.
+
+Any call may name the app's language in `Accept-Language`; the official client sends the
+language it shows (`fa`, `pt-BR`). The portal keeps it for what it writes to the person: the
+website account a sign-in or a purchase creates takes it, and so does one that has none yet,
+so the website's mail follows the app. A web plan's `purchaseUrl` names it too, so the
+checkout opens in it and the account the checkout creates keeps it. A language chosen on the
+website stands, and one the website does not have is ignored.
 
 ## Endpoints
 

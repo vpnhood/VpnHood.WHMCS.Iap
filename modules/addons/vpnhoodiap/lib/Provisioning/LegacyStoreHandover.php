@@ -57,7 +57,7 @@ final class LegacyStoreHandover
      * the customer would be locked out of the app over a migration they never asked
      * for. Failures are recorded on the row and retried at the next sign-in.
      */
-    public function claimFor(array $user, string $verifiedEmail): void
+    public function claimFor(array $user, string $verifiedEmail, ?string $clientLanguage): void
     {
         try {
             $email = strtolower(trim($verifiedEmail));
@@ -104,7 +104,7 @@ final class LegacyStoreHandover
                 return;
             }
 
-            (new EntitlementService($this->repo))->redeem($app, $record, $user, $adapter);
+            (new EntitlementService($this->repo))->redeem($app, $record, $user, $adapter, $clientLanguage);
             $this->finish($row, 'claimed', $user, $now, null);
             $this->repo->log((int) $user['id'], 'legacy.handover', '', 201,
                 ['store' => $row['store'], 'order' => $row['provider_order_id'], 'plan' => $row['store_base_plan_id']],

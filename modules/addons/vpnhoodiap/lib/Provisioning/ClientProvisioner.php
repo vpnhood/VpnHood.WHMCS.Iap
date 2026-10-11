@@ -37,23 +37,81 @@ class ClientProvisioner
     }
 
     /**
+     * The website language for an app's Accept-Language, or null when this install has none for
+     * it. Matched against WHMCS's own list of the installed languages, so an install with more of
+     * them simply matches more.
+     */
+    public static function languageFor(string $acceptLanguage): ?string
+    {
+        if (trim($acceptLanguage) === '') {
+            return null;
+        }
+        try {
+            $locales = \WHMCS\Language\ClientLanguage::getLocales();
+        } catch (\Throwable $e) {
+            // a language is cosmetic: it must never fail a sign-in or a purchase
+            logModuleCall('vpnhoodiap', 'clientLanguage', $acceptLanguage, $e->getMessage(), '');
+            return null;
+        }
+        return self::matchLanguage($acceptLanguage, $locales);
+    }
+
+    /**
+     * The WHMCS language of the first Accept-Language tag an installed locale serves: the locale
+     * itself (pt-BR → pt_BR), else its language alone (en-US → en_001, zh-Hans → zh_TW).
+     *
+     * @param array[] $locales WHMCS's: [{locale: 'pt_BR', language: 'portuguese-br', languageCode: 'pt', ...}]
+     */
+    public static function matchLanguage(string $acceptLanguage, array $locales): ?string
+    {
+        foreach (explode(',', $acceptLanguage) as $range) {
+            $parts = explode(';', $range);
+            $tag = strtolower(str_replace('_', '-', trim($parts[0])));
+            // q=0 says "not this one"
+            if ($tag === '' || $tag === '*' || preg_match('/^\s*q\s*=\s*0(\.0*)?\s*$/i', $parts[1] ?? '') === 1) {
+                continue;
+            }
+            $languageCode = explode('-', $tag)[0];
+            $sameLanguage = null;
+            foreach ($locales as $locale) {
+                if (strtolower(str_replace('_', '-', (string) $locale['locale'])) === $tag) {
+                    return (string) $locale['language'];
+                }
+                if ($sameLanguage === null && strtolower((string) $locale['languageCode']) === $languageCode) {
+                    $sameLanguage = (string) $locale['language'];
+                }
+            }
+            if ($sameLanguage !== null) {
+                return $sameLanguage;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @param ?string $language the website language of the app the person uses (languageFor), which
+     *                          the mail WHMCS sends them follows; null leaves the install's default
      * @return int the new client id
      * @throws ApiException
      */
-    public function createClient(string $email, ?string $displayName): int
+    public function createClient(string $email, ?string $displayName, ?string $language): int
     {
         [$firstName, $lastName] = self::splitName($displayName);
+        $client = [
+            'firstname'       => $firstName,
+            'lastname'        => $lastName,
+            'email'           => $email,
+            'password2'       => bin2hex(random_bytes(16)),
+            'country'         => 'US',
+            'skipvalidation'  => true,
+            'noemail'         => true,
+        ];
+        if ($language !== null) {
+            $client['language'] = $language;
+        }
         self::$mailboxProvenByIdp = trim($email);
         try {
-            $result = localAPI('AddClient', [
-                'firstname'       => $firstName,
-                'lastname'        => $lastName,
-                'email'           => $email,
-                'password2'       => bin2hex(random_bytes(16)),
-                'country'         => 'US',
-                'skipvalidation'  => true,
-                'noemail'         => true,
-            ]);
+            $result = localAPI('AddClient', $client);
         } finally {
             self::$mailboxProvenByIdp = null;
         }
@@ -83,30 +141,38 @@ class ClientProvisioner
     }
 
     /**
-     * Keep the WHMCS client's name in step with the identity provider's — the
-     * IdP is the source of truth for who the person is, and every sign-in or
-     * purchase carries the freshest value. No-op without a name (Apple sends it
-     * only once) or when the client already matches. Best-effort: a name is
-     * cosmetic and must never fail a sign-in or a purchase.
+     * Keep the WHMCS client in step with what a sign-in or purchase just carried: the identity
+     * provider's name — the IdP is the source of truth for who the person is, and every sign-in
+     * or purchase carries the freshest value — and the app's language, only where the client has
+     * none, so a choice made on the website stands. No-op without either (Apple sends a name only
+     * once) or when the client already matches. Best-effort: both are cosmetic and must never
+     * fail a sign-in or a purchase.
      */
-    public function syncClient(int $clientId, ?string $displayName): void
+    public function syncClient(int $clientId, ?string $displayName, ?string $language): void
     {
-        if (trim((string) $displayName) === '') {
+        $hasName = trim((string) $displayName) !== '';
+        if (!$hasName && $language === null) {
             return;
         }
-        [$firstName, $lastName] = self::splitName($displayName);
         try {
             $client = \WHMCS\Database\Capsule::table('tblclients')
-                ->where('id', $clientId)->first(['firstname', 'lastname']);
-            if ($client === null || ((string) $client->firstname === $firstName && (string) $client->lastname === $lastName)) {
+                ->where('id', $clientId)->first(['firstname', 'lastname', 'language']);
+            if ($client === null) {
                 return;
             }
-            localAPI('UpdateClient', [
-                'clientid'       => $clientId,
-                'firstname'      => $firstName,
-                'lastname'       => $lastName,
-                'skipvalidation' => true,
-            ]);
+            $changes = [];
+            if ($hasName) {
+                [$firstName, $lastName] = self::splitName($displayName);
+                if ((string) $client->firstname !== $firstName || (string) $client->lastname !== $lastName) {
+                    $changes = ['firstname' => $firstName, 'lastname' => $lastName];
+                }
+            }
+            if ($language !== null && (string) $client->language === '') {
+                $changes['language'] = $language;
+            }
+            if ($changes !== []) {
+                localAPI('UpdateClient', ['clientid' => $clientId, 'skipvalidation' => true] + $changes);
+            }
         } catch (\Throwable $e) {
             // tolerated — see above
         }

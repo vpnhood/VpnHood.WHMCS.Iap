@@ -68,7 +68,7 @@ ok("fixtures created (web app #$webAppId, play app #$playAppId, pricing pid $fak
 
 try {
     $webApp = $repo->getApp($webAppId);
-    $plans = $service->plansForApp($webApp, null);
+    $plans = $service->plansForApp($webApp, null, null);
 
     (count($plans) === 2)
         ? ok('exactly the two priced, sellable, recurring plans are served')
@@ -90,6 +90,11 @@ try {
     (str_contains($monthly['purchaseUrl'], $expectedUrl) && str_starts_with($monthly['purchaseUrl'], 'http'))
         ? ok('purchase URL pins plan, cycle and the SAME currency as the shown price')
         : bad('purchase URL wrong: ' . $monthly['purchaseUrl']);
+    // the app's language rides along: the checkout opens in it, and the account it creates keeps it
+    $farsiUrl = $service->plansForApp($webApp, null, 'farsi')[0]['purchaseUrl'] ?? '';
+    ($farsiUrl === $monthly['purchaseUrl'] . '&language=farsi')
+        ? ok("purchase URL names the app's language when there is one")
+        : bad('purchase URL with a language wrong: ' . $farsiUrl);
     ($plans[1]['billingPeriod'] === 'P1Y' && $plans[1]['priceAmount'] === '46.80')
         ? ok('yearly plan priced from the annually column')
         : bad('yearly plan wrong: ' . json_encode($plans[1]));
@@ -104,7 +109,7 @@ try {
 
     // the store gate: a store-distributed app must not get prices from the portal
     try {
-        $service->plansForApp($repo->getApp($playAppId), null);
+        $service->plansForApp($repo->getApp($playAppId), null, null);
         bad('a store-distributed app was served priced plans');
     } catch (ApiException $e) {
         ($e->getHttpStatus() === 403 && $e->getErrorCode() === 'store_not_supported')

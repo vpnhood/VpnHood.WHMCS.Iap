@@ -249,7 +249,7 @@ add_hook('EmailPreSend', 99, function (array $vars) use (&$armedWhenVerification
 
 $probeClientId = 0;
 try {
-    $probeClientId = (new ClientProvisioner())->createClient($probeEmail, 'Probe Client');
+    $probeClientId = (new ClientProvisioner())->createClient($probeEmail, 'Probe Client', null);
     ok("module-created client #$probeClientId");
 } catch (\Throwable $e) {
     bad('createClient threw: ' . $e->getMessage());

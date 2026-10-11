@@ -290,9 +290,10 @@ function vpnhoodiap_createSession(IapRepository $repo, array $request): array
             $repo->linkUserClient((int) $user['id'], $clientId);
         }
     }
+    $clientLanguage = vpnhoodiap_clientLanguage();
     if ($clientId !== null) {
         // the IdP just gave us fresh data — mirror it onto the WHMCS client
-        (new ClientProvisioner())->syncClient($clientId, $identity['name'] ?? null);
+        (new ClientProvisioner())->syncClient($clientId, $identity['name'] ?? null, $clientLanguage);
     }
 
     // A subscription imported from a previous store is handed over here, on the address
@@ -300,7 +301,7 @@ function vpnhoodiap_createSession(IapRepository $repo, array $request): array
     // Provider sign-in only: the safety of matching by address rests on the IdP having
     // verified the mailbox, which a WHMCS password does not establish.
     // Never throws: a sign-in must not fail over an entitlement they could also restore.
-    (new LegacyStoreHandover($repo))->claimFor($user, $identity['email']);
+    (new LegacyStoreHandover($repo))->claimFor($user, $identity['email'], $clientLanguage);
 
     return [201, vpnhoodiap_sessionBody($user, (string) $app['store'])];
 }
@@ -336,6 +337,7 @@ function vpnhoodiap_passwordForm(IapRepository $repo, array $request): array
     }
 
     $user = $service->signInToModuleAccount($outcome['whmcsUser']);
+    vpnhoodiap_syncClientLanguage($user);
     return [201, vpnhoodiap_sessionBody($user, (string) $app['store'])];
 }
 
@@ -362,12 +364,24 @@ function vpnhoodiap_passwordChallengeForm(IapRepository $repo, array $request): 
     $service = new \WHMCS\Module\Addon\VpnHoodIap\Auth\PasswordSignInService($repo);
     $outcome = $service->completeChallenge($challengeToken, $code, $packageName);
     $user = $service->signInToModuleAccount($outcome['whmcsUser']);
+    vpnhoodiap_syncClientLanguage($user);
 
     $result = vpnhoodiap_sessionBody($user, (string) $app['store']);
     if ($outcome['newBackupCode'] !== null) {
         $result['newBackupCode'] = $outcome['newBackupCode'];
     }
     return [201, $result];
+}
+
+/**
+ * A password sign-in's website account takes the app's language if it has none: its own choice
+ * on the website stands (ClientProvisioner::syncClient).
+ */
+function vpnhoodiap_syncClientLanguage(array $user): void
+{
+    if ($user['client_id'] !== null) {
+        (new ClientProvisioner())->syncClient((int) $user['client_id'], null, vpnhoodiap_clientLanguage());
+    }
 }
 
 /**
@@ -717,7 +731,7 @@ function vpnhoodiap_createPurchase(IapRepository $repo, array $request): array
         throw new ApiException('The purchase could not be validated with the store.', 400, 'purchase_invalid');
     }
 
-    $entitlement = (new EntitlementService($repo))->redeem($app, $record, $user, $adapter);
+    $entitlement = (new EntitlementService($repo))->redeem($app, $record, $user, $adapter, vpnhoodiap_clientLanguage());
     return [201, $entitlement['state']];
 }
 
@@ -790,10 +804,20 @@ function vpnhoodiap_listPlans(IapRepository $repo, array $request): array
         $request['logUserId'] = (int) $user['id'];
     }
 
-    return [200, (new PlanService($repo))->plansForApp($app, $user)];
+    return [200, (new PlanService($repo))->plansForApp($app, $user, vpnhoodiap_clientLanguage())];
 }
 
 // ---------------------------------------------------------------- helpers --
+
+/**
+ * The website language of the app making this request (its Accept-Language), or null when the
+ * install has none for it: a WHMCS client the request creates, or finds without one, takes it, so
+ * the mail WHMCS sends the person follows the app.
+ */
+function vpnhoodiap_clientLanguage(): ?string
+{
+    return ClientProvisioner::languageFor((string) ($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? ''));
+}
 
 /**
  * The resource path, e.g. "/v1/account". PATH_INFO is the normal source; ?path=

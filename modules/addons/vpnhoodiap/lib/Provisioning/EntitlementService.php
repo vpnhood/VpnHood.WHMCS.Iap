@@ -35,12 +35,16 @@ class EntitlementService
      * @param array $app the mod_vpnhood_iap_apps row
      * @param PurchaseRecord $record freshly fetched from the store API
      * @param ?array $sessionUser the module user on the client path; null on the webhook path
+     * @param ?string $clientLanguage the website language of the app asking (ClientProvisioner::languageFor),
+     *                                which a client this purchase creates, or finds without one, takes;
+     *                                null off the app's requests
      * @return array{state:string, accessCode:?string, expiresAt:?string, planId:?string,
      *               purchasedAt:?string, autoRenewing:?bool, priceAmount:?string,
      *               priceCurrency:?string, billingPeriod:?string}
      * @throws ApiException
      */
-    public function redeem(array $app, PurchaseRecord $record, ?array $sessionUser, StoreAdapterInterface $adapter): array
+    public function redeem(array $app, PurchaseRecord $record, ?array $sessionUser, StoreAdapterInterface $adapter,
+        ?string $clientLanguage = null): array
     {
         // ---- binding guard (client path): the purchase must carry the session
         // user's own external uid, or someone is replaying a stolen token. Two
@@ -202,7 +206,7 @@ class EntitlementService
             if ($clientId === null) {
                 $resolution = (new AccountService())->resolveClientForEmail((string) $user['email']);
                 $clientId = $resolution['clientId']
-                    ?? $clients->createClient((string) $user['email'], $user['display_name'] ?? null);
+                    ?? $clients->createClient((string) $user['email'], $user['display_name'] ?? null, $clientLanguage);
                 $this->repo->linkUserClient((int) $user['id'], $clientId);
 
                 // A client that already existed was not born from a proven mailbox the
@@ -217,8 +221,8 @@ class EntitlementService
                     }
                 }
             }
-            // keep the client in step with the account's latest known name
-            $clients->syncClient($clientId, $user['display_name'] ?? null);
+            // keep the client in step with the account's latest known name; the app's language if it has none
+            $clients->syncClient($clientId, $user['display_name'] ?? null, $clientLanguage);
 
             // A live service the ledger still points at while a NEW order is placed is this
             // same purchase's previous life (an expired lineage that resubscribed, a termination

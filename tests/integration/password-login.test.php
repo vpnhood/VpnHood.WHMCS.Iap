@@ -107,10 +107,10 @@ function waitOutWindowEdge(): void
     }
 }
 
-function httpJson(string $method, string $path, ?array $body, ?string $token = null): array
+function httpJson(string $method, string $path, ?array $body, ?string $token = null, array $moreHeaders = []): array
 {
     $curl = curl_init(API_URL . $path);
-    $headers = ['Content-Type: application/json'];
+    $headers = ['Content-Type: application/json', ...$moreHeaders];
     if ($token !== null) {
         $headers[] = 'Authorization: Bearer ' . $token;
     }
@@ -413,13 +413,19 @@ try {
     ]);
 
     [$status, $body] = httpJson('POST', '/auth/sessions',
-        ['email' => $pwEmail, 'password' => $pwPassword, 'packageName' => "com.vpnhood.$marker"]);
+        ['email' => $pwEmail, 'password' => $pwPassword, 'packageName' => "com.vpnhood.$marker"], null,
+        ['Accept-Language: fa']);
     // the session answers what this device may do, never who the person is: no email here,
     // GET /account below is the one place an address comes from
     ($status === 201 && isset($body['accessToken'], $body['userId']) && !isset($body['email']))
         ? ok('wire: password form → 201 with the same session shape as the provider form')
         : bad("wire password → $status: " . json_encode($body));
     $wireToken = $body['accessToken'] ?? '';
+    // the fixture client was made without a language: it takes the app's
+    $pwLanguage = (string) Capsule::table('tblclients')->where('id', $pwClientId)->value('language');
+    $pwLanguage === 'farsi'
+        ? ok("wire: the app's language (Accept-Language: fa) went to the client, which had none")
+        : bad("wire: the client's language is '$pwLanguage', expected farsi");
 
     [$status, $body] = httpJson('GET', '/account', null, $wireToken);
     ($status === 200 && ($body['email'] ?? '') === $pwEmail)

@@ -22,7 +22,8 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
  * currency when there is one, the install's default otherwise. Each plan
  * carries a ready-made cart URL pinned to that same currency, so the price on
  * the card and the price at checkout agree by construction; a promise the
- * checkout could break is never made.
+ * checkout could break is never made. It names the app's language too, so the
+ * checkout opens in it and the account it creates keeps it for its mail.
  */
 class PlanService
 {
@@ -43,10 +44,11 @@ class PlanService
     /**
      * @param array $app the mod_vpnhood_iap_apps row
      * @param ?array $sessionUser the signed-in module user, when there is one
+     * @param ?string $language the website language of the app asking (ClientProvisioner::languageFor)
      * @return array[] [{planId, billingPeriod, priceAmount, priceCurrency, priceCurrencySymbol, purchaseUrl}]
      * @throws ApiException 403 for a store-distributed app
      */
-    public function plansForApp(array $app, ?array $sessionUser): array
+    public function plansForApp(array $app, ?array $sessionUser, ?string $language): array
     {
         if (($app['store'] ?? '') !== 'web') {
             throw new ApiException(
@@ -62,6 +64,7 @@ class PlanService
 
         // the exact prefix the cart renders; a prefix-less currency falls back to "CODE 9.99"
         $currencySymbol = $currency['prefix'] !== '' ? $currency['prefix'] : $currency['code'] . ' ';
+        $languageQuery = $language !== null ? '&language=' . rawurlencode($language) : '';
 
         $plans = [];
         foreach ($this->repo->findSellableMappings((int) $app['id']) as $mapping) {
@@ -82,7 +85,7 @@ class PlanService
                 'priceCurrencySymbol' => $currencySymbol,
                 'purchaseUrl'         => $this->repo->portalBaseUrl()
                     . '/cart.php?a=add&pid=' . (int) $mapping['whmcs_product_id']
-                    . "&billingcycle=$cycleName&currency=" . (int) $currency['id'],
+                    . "&billingcycle=$cycleName&currency=" . (int) $currency['id'] . $languageQuery,
             ];
         }
         return $plans;
