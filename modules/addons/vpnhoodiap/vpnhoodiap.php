@@ -35,7 +35,7 @@ function vpnhoodiap_config(): array
     return [
         'name'        => 'VpnHood! In-App Purchase',
         'description' => 'Processes app-store purchases (Google Play / Apple / Microsoft) into WHMCS clients, orders and paid invoices, delivering VpnHood access codes through the install\'s provisioning module.',
-        'version'     => '1.8.12',
+        'version'     => '1.8.13',
         'author'      => 'VpnHood',
         'fields'      => [
             'AdminAlertEmail' => [
@@ -415,6 +415,33 @@ function vpnhoodiap_upgrade(array $vars): void
     vpnhoodiap_ensureAdminAccess();
     vpnhoodiap_ensureIapGateway();
     vpnhoodiap_hideGatewayFromCheckout();
+}
+
+/**
+ * The upgrade WHMCS has not run yet. WHMCS runs an addon's _upgrade() and records its new version
+ * only when an admin opens Addon Modules, so an update made by extracting files did neither until
+ * someone did; the cron hook (hooks.php) calls this, so an update takes effect within one cron run.
+ * WHMCS's own contract: _upgrade() gets the version that was installed, and runs only for a newer
+ * one; a rollback's older files are recorded as they are. An inactive addon has no version row.
+ *
+ * One of the module's writes to a WHMCS core table (CLAUDE.md lists them): its own version row.
+ */
+function vpnhoodiap_runPendingUpgrade(): void
+{
+    $installed = Capsule::table('tbladdonmodules')
+        ->where('module', IapRepository::MODULE)->where('setting', 'version')->value('value');
+    $config = vpnhoodiap_config();
+    if ($installed === null || (string) $installed === $config['version']) {
+        return;
+    }
+
+    if (version_compare($config['version'], (string) $installed, '>')) {
+        vpnhoodiap_upgrade(['version' => (string) $installed]);
+    }
+    Capsule::table('tbladdonmodules')
+        ->where('module', IapRepository::MODULE)->where('setting', 'version')
+        ->update(['value' => $config['version']]);
+    logActivity("{$config['name']} updated from $installed to {$config['version']}.");
 }
 
 /**

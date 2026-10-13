@@ -24,7 +24,8 @@ update on their own schedule.
   comes from re-fetching the purchase from the store API.
 - **Capsule writes only to `mod_vpnhood_iap_*` tables**, but for four writes no localAPI
   command makes: the bookkeeping gateway's rows in `tblpaymentgateways`, the module's own
-  rows in `tbladdonmodules` (its access setting, the updates widget's cache), that gateway
+  rows in `tbladdonmodules` (its access setting, the updates widget's cache, its version once
+  the cron has run a pending upgrade), that gateway
   stamped as the payment method of a store order, its service and its invoice, and the
   account deletion's erasures (`AccountDeletionService::eraseClientTraces`, WHMCS's invoice
   snapshots included). Clients, orders, invoices and services are otherwise only ever
@@ -43,7 +44,8 @@ update on their own schedule.
 - **No migrations until a partner install runs the module.** `vpnhoodiap_activate()` creates
   every table in its current shape; a change an existing install needs is made by hand, never
   as an `_upgrade()` step or a one-off cleanup in the module. `_upgrade()` re-runs only
-  activation's self-heals.
+  activation's self-heals, and the cron runs it within one run of an update (hooks.php →
+  `vpnhoodiap_runPendingUpgrade`), as an admin opening Addon Modules would.
 - Secrets are stored via WHMCS `EncryptPassword` and are write-only in the admin UI.
   No secrets in this repo, ever.
 
