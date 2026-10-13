@@ -49,7 +49,7 @@ if (!iapModuleActive($db)) {
 $hookList = explode(',', (string) Capsule::table('tblconfiguration')->where('setting', 'AddonModulesHooks')->value('value'));
 in_array('vpnhoodiap', $hookList, true)
     ? ok('vpnhoodiap is in AddonModulesHooks, so WHMCS loads its cron hook')
-    : bad('vpnhoodiap is active but not in AddonModulesHooks: WHMCS never loads its hooks.php, so add it to the list');
+    : bad('vpnhoodiap is active but not in AddonModulesHooks: WHMCS never loads its hooks.php; Save Changes on any addon in Addon Modules rebuilds the list');
 
 if (!Capsule::table('tblpaymentgateways')->where('gateway', 'vpnhoodiappay')->where('setting', 'visible')->exists()) {
     bad('the vpnhoodiappay gateway is not activated: run the activation test first');
