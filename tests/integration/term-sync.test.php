@@ -97,6 +97,11 @@ if ($pid === 0) {
     }
     $pid = (int) $product['id'];
 }
+if (one($db, "SELECT 1 x FROM tblproducts WHERE id=? AND servertype='vpnhoodpartner'", [$pid]) !== null) {
+    // a reseller's key follows the Hub's cycle, not the store's clock to the day: partner-renewal.test.php
+    ok("skipped: product #$pid is a connector product, and this test needs a hub install");
+    finish();
+}
 
 // -- fixtures: app + mapping + a DEDICATED user (fresh mailbox → fresh client) -
 $marker = 'ttest-' . bin2hex(random_bytes(4));

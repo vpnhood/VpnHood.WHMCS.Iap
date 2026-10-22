@@ -119,6 +119,10 @@ Everything extracts at the WHMCS root.
 ## Requirements
 
 - WHMCS 8.x / 9.x, PHP 8.1+.
+- On WHMCS 9.1 and later, **Invoice Immutability** (General Settings → Invoices) set to
+  *Immutability disabled (billing notes still enabled)*. The module writes the store's real
+  charge onto a paid invoice and cancels leftover renewal invoices; 9.1's default (*Full
+  compliance*) refuses both, so store renewals and account deletions fail.
 - The addon activated (until then the public endpoints answer 404).
 - WHMCS **email verification enabled** (`EnableEmailVerification`) — the module refuses
   to attach purchases to unverified existing emails.
