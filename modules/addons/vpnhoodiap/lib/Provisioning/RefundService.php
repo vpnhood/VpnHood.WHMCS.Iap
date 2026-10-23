@@ -75,21 +75,15 @@ class RefundService
     }
 
     /**
-     * A refund revokes the key by default (lifecycle §8): the money and the
-     * service go back together. *Refund and keep* is the deliberate merchant
-     * choice — the keepOnRefund service property — never an accident of nobody
-     * acting. Best-effort: the refund is already booked, so a failure here is
-     * alerted rather than rethrown.
+     * A store refund revokes the key (lifecycle §8): the store has taken the
+     * entitlement back, so the money and the service go back together. *Refund
+     * and keep* is a website-side choice only. Best-effort: the refund is already
+     * booked, so a failure here is alerted rather than rethrown.
      */
     private function revokeKey(array $purchase): void
     {
         $serviceId = isset($purchase['service_id']) ? (int) $purchase['service_id'] : 0;
         if ($serviceId <= 0) {
-            return;
-        }
-        if (IapRepository::serviceProperty($serviceId, 'keepOnRefund') === 'yes') {
-            $this->repo->log(null, 'refund.keep', '', 0, ['service' => $serviceId],
-                'refund-and-keep set on the service — key deliberately left running');
             return;
         }
         $status = (string) Capsule::table('tblhosting')->where('id', $serviceId)->value('domainstatus');
