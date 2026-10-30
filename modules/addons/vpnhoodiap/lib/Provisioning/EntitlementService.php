@@ -46,6 +46,8 @@ class EntitlementService
     public function redeem(array $app, PurchaseRecord $record, ?array $sessionUser, StoreAdapterInterface $adapter,
         ?string $clientLanguage = null): array
     {
+        $record = $this->withLedgerOwnerUid($record);
+
         // ---- binding guard (client path): the purchase must carry the session
         // user's own external uid, or someone is replaying a stolen token. Two
         // carve-outs: a uid whose owner deleted their account — restore after
@@ -378,6 +380,30 @@ class EntitlementService
             'priceCurrency' => $record->currency,
             'billingPeriod' => IapRepository::billingPeriodForService($serviceId),
         ];
+    }
+
+    /**
+     * A purchase without a uid of ours is bound to its owner on the ledger: its own row once
+     * attributed, else the lapsed purchase it resubscribes. Google Play's subscription center sends
+     * no uid, only that lapsed purchase, and drops even that at acknowledgement; without this the
+     * purchase parks unattributed and the store refunds it.
+     */
+    private function withLedgerOwnerUid(PurchaseRecord $record): PurchaseRecord
+    {
+        if ($record->obfuscatedUid !== null) {
+            return $record;
+        }
+        foreach (array_filter([$record->purchaseKey, $record->expiredPurchaseKey]) as $purchaseKey) {
+            $ownerId = Capsule::table('mod_vpnhood_iap_purchases')
+                ->where('store', $record->store)
+                ->where('purchase_key', $purchaseKey)
+                ->value('user_id');
+            $owner = $ownerId !== null ? $this->repo->getUser((int) $ownerId) : null;
+            if ($owner !== null) {
+                return $record->with(obfuscatedUid: (string) $owner['external_uid']);
+            }
+        }
+        return $record;
     }
 
     /** Insert the ledger row if it does not exist yet (unique (store, purchase_key)). */

@@ -210,7 +210,9 @@ Three properties worth knowing before integrating:
 - **The buyer must be the signed-in user.** The purchase's store attribution
   (`obfuscatedAccountId` / `appAccountToken`) must equal the session's `userId`, or the
   call fails with `purchase_account_mismatch`. A stolen purchase token cannot be
-  redeemed into another account.
+  redeemed into another account. A Google Play resubscription made in the store's
+  subscription center after a lapse carries no attribution of its own: it belongs to the
+  account that held the lapsed subscription.
 - **Redeeming twice is safe.** The store purchase key is the idempotency anchor: a
   retry answers `provisioned` for the same order and never creates a second one.
   Retry freely after a network failure.

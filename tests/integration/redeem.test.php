@@ -5,7 +5,8 @@
  * legacy-purchase adoption (temporary migration), unverified-email parking,
  * happy-path provisioning through a real
  * vpnhoodstore product (AddOrder → AddInvoicePayment → AcceptOrder →
- * DeliveryReader), idempotent replay, finalize-after-success.
+ * DeliveryReader), idempotent replay, finalize-after-success, and a Play
+ * subscription-center resubscription attributed through the lapsed purchase.
  *
  * ⚠ Places ONE real order on a vpnhoodstore product for the test buyer —
  * a real access token is created on the access manager, then terminated and
@@ -645,6 +646,73 @@ try {
         $e->getHttpStatus() === 422
             ? ok('a uid-less legacy purchase clears the binding guard (parks at the catalog gate, not 403)')
             : bad('uid-less legacy purchase hit status ' . $e->getHttpStatus() . ', expected 422');
+    }
+
+    // ---- 11. a resubscription made in Google Play's subscription center after a lapse carries
+    // no uid, only the lapsed purchase, whose owner on the ledger owns it: the webhook provisions
+    // it for that owner, another account is refused, and after acknowledgement (when Google drops
+    // the lapsed purchase too) the owner's restore still finds it
+    $lapsedOwnerId = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
+        'provider' => 'google', 'provider_subject' => "$marker-lapsed",
+        'email' => BUYER_EMAIL, 'email_verified_claim' => 1,
+        'client_id' => (int) $buyer['id'], 'external_uid' => IapRepository::uuidV4(),
+        'created_at' => $now, 'updated_at' => $now,
+    ]);
+    $strangerUserId = (int) Capsule::table('mod_vpnhood_iap_users')->insertGetId([
+        'provider' => 'google', 'provider_subject' => "$marker-stranger",
+        'email' => "stranger-$marker@vpnhood.itest", 'email_verified_claim' => 1,
+        'client_id' => null, 'external_uid' => IapRepository::uuidV4(),
+        'created_at' => $now, 'updated_at' => $now,
+    ]);
+    Capsule::table('mod_vpnhood_iap_purchases')->insert([
+        'app_id' => $appId, 'store' => 'googleplay', 'purchase_key' => "itest-lapsed-$marker",
+        'user_id' => $lapsedOwnerId, 'status' => 'expired',
+        'expiry_time' => date('Y-m-d H:i:s', time() - 3600),
+        'created_at' => $now, 'updated_at' => $now,
+    ]);
+    $resubscribed = makeRecord([
+        'purchaseKey'        => "itest-resubscribed-$marker",
+        'storeOrderId'       => 'ITEST.RESUB-' . strtoupper(bin2hex(random_bytes(4))),
+        'expiredPurchaseKey' => "itest-lapsed-$marker",
+    ]);
+    $resubscribedAdapter = new FakeStoreAdapter($resubscribed);
+    try {
+        $service->redeem($app, $resubscribed, $repo->getUser($strangerUserId), $resubscribedAdapter);
+        bad('another account took a resubscription that belongs to the lapsed purchase\'s owner');
+    } catch (ApiException $e) {
+        $e->getHttpStatus() === 403
+            ? ok('another account presenting the resubscription is refused (403)')
+            : bad('foreign resubscription refused with wrong status ' . $e->getHttpStatus());
+    }
+    $resubscribedResult = $service->redeem($app, $resubscribed, null, $resubscribedAdapter);
+    ($resubscribedResult['state'] === 'provisioned' && is_string($resubscribedResult['accessCode'])
+        && $resubscribedResult['accessCode'] !== '')
+        ? ok('the webhook provisions the resubscription')
+        : bad('resubscription not provisioned: ' . json_encode($resubscribedResult));
+    $resubscribedRow = one($db, 'SELECT user_id, whmcs_order_id FROM mod_vpnhood_iap_purchases WHERE purchase_key=?',
+        ["itest-resubscribed-$marker"]);
+    if ((int) ($resubscribedRow['whmcs_order_id'] ?? 0) > 0) {
+        $createdOrderIds[] = (int) $resubscribedRow['whmcs_order_id'];
+    }
+    ((int) ($resubscribedRow['user_id'] ?? 0) === $lapsedOwnerId)
+        ? ok('…for the lapsed purchase\'s owner')
+        : bad('resubscription attributed wrong: ' . json_encode($resubscribedRow));
+    $resubscribedAdapter->finalizeCalls === 1
+        ? ok('…and acknowledged, so the store does not refund it')
+        : bad("resubscription finalize called {$resubscribedAdapter->finalizeCalls} times");
+
+    $acknowledged = $resubscribed->with(expiredPurchaseKey: null, acknowledged: true);
+    $ownerRestore = $service->redeem($app, $acknowledged, $repo->getUser($lapsedOwnerId), new FakeStoreAdapter($acknowledged));
+    ($ownerRestore['state'] === 'provisioned' && $ownerRestore['accessCode'] === $resubscribedResult['accessCode'])
+        ? ok('after acknowledgement the owner\'s restore returns the same entitlement')
+        : bad('owner restore after acknowledgement diverged: ' . json_encode($ownerRestore));
+    try {
+        $service->redeem($app, $acknowledged, $repo->getUser($strangerUserId), new FakeStoreAdapter($acknowledged));
+        bad('another account took the acknowledged resubscription');
+    } catch (ApiException $e) {
+        $e->getHttpStatus() === 403
+            ? ok('…while another account is still refused (403)')
+            : bad('foreign restore refused with wrong status ' . $e->getHttpStatus());
     }
 } finally {
     // -- cleanup -------------------------------------------------------------

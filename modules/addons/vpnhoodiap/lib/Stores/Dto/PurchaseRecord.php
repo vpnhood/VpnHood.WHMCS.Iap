@@ -38,7 +38,14 @@ final class PurchaseRecord
         public readonly ?string $amount,           // store gross, reconciliation only
         public readonly ?string $currency,
         public readonly array $raw,
+        public readonly ?string $expiredPurchaseKey = null, // googleplay: the lapsed purchase a store-side resubscription continues
     ) {
+    }
+
+    /** A copy with the named fields replaced, rebuilt from every field so a new one is never dropped. */
+    public function with(mixed ...$changes): self
+    {
+        return new self(...array_merge(get_object_vars($this), $changes));
     }
 
     /** Whether this purchase currently grants the entitlement. */

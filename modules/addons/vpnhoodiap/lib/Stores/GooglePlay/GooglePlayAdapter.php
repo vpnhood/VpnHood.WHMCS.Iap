@@ -216,23 +216,7 @@ class GooglePlayAdapter implements StoreAdapterInterface
         if ($paid === null) {
             return $record;
         }
-        return new PurchaseRecord(
-            store: $record->store,
-            purchaseKey: $record->purchaseKey,
-            storeOrderId: $record->storeOrderId,
-            storeProductId: $record->storeProductId,
-            basePlanId: $record->basePlanId,
-            obfuscatedUid: $record->obfuscatedUid,
-            state: $record->state,
-            expiryTimeUnix: $record->expiryTimeUnix,
-            autoRenewing: $record->autoRenewing,
-            acknowledged: $record->acknowledged,
-            linkedPurchaseKey: $record->linkedPurchaseKey,
-            isTest: $record->isTest,
-            amount: $paid['amount'],
-            currency: $paid['currency'],
-            raw: $record->raw,
-        );
+        return $record->with(amount: $paid['amount'], currency: $paid['currency']);
     }
 
     private function mapSubscription(string $purchaseToken, array $subscription): PurchaseRecord
@@ -280,6 +264,9 @@ class GooglePlayAdapter implements StoreAdapterInterface
             amount: null, // subscriptionsv2 carries no price; store gross comes from reconciliation later
             currency: null,
             raw: $subscription,
+            // a resubscription from Play's subscription center after a lapse carries no uid of ours, only this
+            expiredPurchaseKey: isset($subscription['outOfAppPurchaseContext']['expiredPurchaseToken'])
+                ? (string) $subscription['outOfAppPurchaseContext']['expiredPurchaseToken'] : null,
         );
     }
 

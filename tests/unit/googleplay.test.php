@@ -204,6 +204,28 @@ test('verifyPurchase enriches the record with the real charge from orders.get', 
     assertSame('TRY', $record->currency);
 });
 
+test('a subscription-center resubscription carries the lapsed purchase through the charge lookup', function () use ($saPrivatePem) {
+    $doc = activeSubscriptionDoc();
+    unset($doc['externalAccountIdentifiers']);
+    $doc['outOfAppPurchaseContext'] = [
+        'expiredExternalAccountIdentifiers' => ['obfuscatedExternalAccountId' => 'c0ffee00-0000-4000-8000-000000000001'],
+        'expiredPurchaseToken'              => 'tok-lapsed',
+    ];
+    $log = [];
+    $http = fakeHttp($log, [
+        ['match' => 'subscriptionsv2', 'response' => ['status' => 200, 'body' => '', 'json' => $doc]],
+        ['match' => '/orders/GPA.3333-4444-5555-66666', 'response' => ['status' => 200, 'body' => '', 'json' => [
+            'total' => ['currencyCode' => 'BRL', 'units' => '41', 'nanos' => 990000000],
+        ]]],
+    ]);
+    $factory = fn (array $app) => new GooglePlayApiClient(serviceAccount($saPrivatePem), PACKAGE, $http);
+    $record = (new GooglePlayAdapter($factory))->verifyPurchase(['id' => 1], ['purchaseToken' => 'tok-B']);
+
+    assertSame('tok-lapsed', $record->expiredPurchaseKey);
+    assertSame(null, $record->obfuscatedUid, 'the owner comes from the ledger, not from the lapsed uid');
+    assertSame('41.99', $record->amount);
+});
+
 test('a failing orders.get never fails verification (missing financial permission)', function () use ($saPrivatePem) {
     $log = [];
     $http = fakeHttp($log, [
