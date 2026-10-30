@@ -406,7 +406,6 @@ class EntitlementService
         return $record;
     }
 
-    /** Insert the ledger row if it does not exist yet (unique (store, purchase_key)). */
     /**
      * Restore after account deletion: may THIS session take over a purchase whose uid
      * does not match? Only when every one of these holds:
@@ -550,6 +549,7 @@ class EntitlementService
         return true;
     }
 
+    /** Insert the ledger row if it does not exist yet (unique (store, purchase_key)). */
     private function ensurePurchaseRow(array $app, PurchaseRecord $record, ?array $user): void
     {
         $exists = Capsule::table('mod_vpnhood_iap_purchases')
