@@ -12,8 +12,8 @@
  * re-fetching the purchase from the store API, never from the notification body.
  *
  * FAILS CLOSED: 404 while the addon is not activated; 401 without a matching app token.
- * Processing failures answer 200 (recorded + cron-replayed) — stores retry on 5xx and
- * must never be given a reason to loop.
+ * Processing failures answer 200 and are recorded for the nightly digest — stores retry on
+ * 5xx and must never be given a reason to loop.
  */
 
 use WHMCS\Module\Addon\VpnHoodIap\Controllers\NotificationController;

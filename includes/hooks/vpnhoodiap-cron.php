@@ -4,7 +4,8 @@
  * VpnHood! IAP — daily maintenance (DailyCronJob):
  *
  *   1. Reconciliation: re-fetch every open purchase from its store — the
- *      self-healing net under dropped/failed webhooks.
+ *      self-healing net under dropped/failed webhooks for a provisioned
+ *      purchase. A parked one is only refreshed, never redeemed here.
  *   2. Voided-purchases sweep: store-side refunds terminate the service even
  *      when the webhook never arrived.
  *   3. Hygiene: clear raw payloads and the request log past their retention, and

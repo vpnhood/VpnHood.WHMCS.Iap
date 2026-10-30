@@ -18,9 +18,11 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
 
 /**
  * Webhook processing: authenticate (adapter), dedup (event inbox), dispatch
- * by normalized type. Google/Apple retry on 5xx, so processing failures are
- * recorded and answered 200 — the reconciliation cron is the retry, never
- * the store's redelivery loop.
+ * by normalized type. Google/Apple retry on 5xx, so a processing failure is
+ * recorded and answered 200, never left to the store's redelivery loop.
+ * Nothing replays it: the nightly reconciliation re-drives only purchases
+ * already provisioned, so one that failed before provisioning waits for the
+ * app's own redeem, and the digest reports it.
  */
 class NotificationController
 {
@@ -56,7 +58,7 @@ class NotificationController
             $this->finishEvent($notification, 'processed', null);
             return ['status' => 200, 'body' => ['success' => true, 'data' => ['handled' => $handled]]];
         } catch (\Throwable $e) {
-            // recorded as failed; cron replays. NEVER 5xx — the store would loop.
+            // recorded as failed for the digest. NEVER 5xx — the store would loop.
             $this->finishEvent($notification, 'failed', $e->getMessage());
             logModuleCall('vpnhoodiap', 'webhook', $notification->eventType, $e->getMessage(), $e->getTraceAsString());
             return ['status' => 200, 'body' => ['success' => true, 'data' => ['handled' => 'failed-recorded']]];
