@@ -41,7 +41,7 @@ FAIL=0
 
 # All integration tests, in dependency order (activation first: it activates
 # the addon the others rely on).
-INTEGRATION_TESTS=(activation pending-upgrade identity secrets sessions request-log password-login restore-credential suppress-emails client-language webhook redeem half-made-order plans renewal-erased term-sync partner-renewal claims delete-account)
+INTEGRATION_TESTS=(activation pending-upgrade identity secrets sessions request-log password-login restore-credential suppress-emails client-language webhook redeem half-made-order provisioning-failure plans renewal-erased term-sync partner-renewal claims delete-account)
 
 upload() {
   echo "== Uploading tests + module lib to the dev box"

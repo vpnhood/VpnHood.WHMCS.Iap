@@ -100,7 +100,7 @@ class RenewalService
             if (($payment['result'] ?? '') === 'success') {
                 $orders->annotateInvoice($invoiceId, $adapter->storeId(), $record->amount, $record->currency);
                 $orders->applyStoreValue($invoiceId, $paymentTransactionId,
-                    $record->amount, $record->currency, $clientId, isPrimary: true);
+                    $record->amount, $record->currency, $clientId);
                 $outcome = 'renewed';
             } else {
                 // the store has the money and the customer keeps their code (synced below);

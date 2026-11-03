@@ -105,8 +105,8 @@ function vpnhoodiap_activate(): array
         }
 
         // catalog: plan-granularity mapping, store identifiers -> (whmcs product, cycle).
-        // Several rows may share one whmcs_product_id (its different cycles); a bundle SKU
-        // may map to several rows and yields several orders/codes.
+        // Several rows may share one whmcs_product_id (its different cycles); a store SKU maps
+        // to one row, and a purchase places one order.
         if (!$schema->hasTable('mod_vpnhood_iap_products')) {
             $schema->create('mod_vpnhood_iap_products', function ($table) {
                 $table->increments('id');

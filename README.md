@@ -22,8 +22,9 @@ sequenceDiagram
     App->>Store: buy subscription
     App->>Iap: POST /billing/purchases {store, proof}
     Iap->>Store: re-validate against the store API
-    Iap->>WHMCS: AddOrder → AddInvoicePayment → AcceptOrder(autosetup)
+    Iap->>WHMCS: AddOrder → AcceptOrder(autosetup)
     WHMCS->>Prov: provision (vpnhoodstore / vpnhoodpartner)
+    Iap->>WHMCS: AddInvoicePayment (the store's payment)
     Iap-->>App: {entitlement, accessCode} — one call, no polling
     Store-->>Iap: webhooks: renew / cancel / refund / expire
 ```
@@ -34,9 +35,11 @@ sequenceDiagram
    opaque session token.
 2. **Purchase** — the app buys in the store and posts its proof (`POST /billing/purchases`); the
    module re-validates against the store API, then uses **only WHMCS-native machinery**:
-   `AddOrder` on the mapped product → `AddInvoicePayment` (transid = store order id) →
-   `AcceptOrder(autosetup)`. WHMCS itself runs whatever provisioning module the product
-   uses; the access code is read back from the service and returned synchronously.
+   `AddOrder` on the mapped product → `AcceptOrder(autosetup)` → `AddInvoicePayment`
+   (transid = store order id). WHMCS itself runs whatever provisioning module the product
+   uses; the store's payment is recorded once the code exists, so a failed provisioning
+   leaves no paid order behind. The access code is read back from the service and
+   returned synchronously.
 3. **Lifecycle** — store webhooks (`webhook.php`) drive renewals, cancellations and
    refunds through the same WHMCS-native paths (pay renewal invoice / `ModuleSuspend` /
    `ModuleTerminate`).

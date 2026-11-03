@@ -155,8 +155,8 @@ class EntitlementService
             }
 
             // ---- catalog gate: unmapped SKUs park loudly, never provision, never ack
-            $mappings = $this->repo->findMappings((int) $app['id'], $record->storeProductId, $record->basePlanId);
-            if ($mappings === []) {
+            $mapping = $this->repo->findMapping((int) $app['id'], $record->storeProductId, $record->basePlanId);
+            if ($mapping === null) {
                 $this->updateRow($row, [
                     'status'     => 'pending',
                     'last_error' => "no catalog mapping for {$record->storeProductId}/{$record->basePlanId}",
@@ -228,8 +228,9 @@ class EntitlementService
 
             // A live service the ledger still points at while a NEW order is placed is this
             // same purchase's previous life (an expired lineage that resubscribed, a termination
-            // that failed): it is retired once the new one is delivered, so one purchase never
-            // runs two codes — and the replacement is said out loud, never silent.
+            // that failed, a delivery cut short before the ledger said provisioned): it is retired
+            // once the new one is delivered, so one purchase never runs two codes — and the
+            // replacement is said out loud, never silent.
             $supersededServiceId = null;
             if ($row['service_id'] !== null) {
                 $previousStatus = (string) Capsule::table('tblhosting')
@@ -239,59 +240,35 @@ class EntitlementService
                 }
             }
 
-            // ---- order + provision (one order per mapping row; bundles = several)
+            // ---- order + provision: one order, as the catalog maps a SKU to one product. The ledger
+            // learns it as soon as its code exists, unless it still points at the service to retire:
+            // that pointer is what retires it.
             $orders = new OrderProvisioner($this->repo);
-            $placed = [];
+            $transactionId = $record->storeOrderId ?? $record->purchaseKey;
             try {
-                foreach (array_values($mappings) as $index => $mapping) {
-                    $transactionId = ($record->storeOrderId ?? $record->purchaseKey)
-                        . ($index > 0 ? '-' . ($index + 1) : '');
-                    $order = $orders->placeOrder(
-                        $clientId,
-                        (int) $mapping['whmcs_product_id'],
-                        (int) $mapping['billing_cycle_months'],
-                        $transactionId,
-                        TermSync::dueDateFor($record)
-                    );
-                    $order['transactionId'] = $transactionId;
-                    $placed[] = $order;
-                }
+                $order = $orders->placeOrder(
+                    $clientId,
+                    (int) $mapping['whmcs_product_id'],
+                    (int) $mapping['billing_cycle_months'],
+                    $transactionId,
+                    TermSync::dueDateFor($record),
+                    $supersededServiceId === null ? (int) $row['id'] : null
+                );
             } catch (\Throwable $e) {
-                foreach ($placed as $order) {
-                    $orders->safeDeleteOrder($order['orderId']);
-                }
                 $this->updateRow($row, ['status' => 'failed', 'last_error' => substr($e->getMessage(), 0, 500)], $record);
                 throw $e instanceof ApiException ? $e : new ApiException('Provisioning failed.', 502, 'provisioning_failed');
             }
 
-            // the real charge belongs to the purchase, not to each invoice: the
-            // primary invoice carries it; bundle-secondary invoices get the
-            // generic wording so amounts are never double-stated
-            foreach ($placed as $index => $order) {
-                $orders->annotateInvoice(
-                    (int) $order['invoiceId'],
-                    $record->store,
-                    $index === 0 ? $record->amount : null,
-                    $index === 0 ? $record->currency : null
-                );
-                $orders->applyStoreValue(
-                    (int) $order['invoiceId'],
-                    (string) $order['transactionId'],
-                    $record->amount,
-                    $record->currency,
-                    $clientId,
-                    isPrimary: $index === 0
-                );
-                $orders->tagServiceStore((int) $order['serviceId'], $record->store);
-            }
+            $orders->annotateInvoice((int) $order['invoiceId'], $record->store, $record->amount, $record->currency);
+            $orders->applyStoreValue((int) $order['invoiceId'], $transactionId, $record->amount, $record->currency, $clientId);
+            $orders->tagServiceStore((int) $order['serviceId'], $record->store);
 
-            $primary = $placed[0];
             $this->updateRow($row, [
                 'status'         => 'provisioned',
                 'user_id'        => (int) $user['id'],
                 'client_id'      => $clientId,
-                'service_id'     => $primary['serviceId'],
-                'whmcs_order_id' => $primary['orderId'],
+                'service_id'     => $order['serviceId'],
+                'whmcs_order_id' => $order['orderId'],
                 'last_error'     => null,
             ], $record);
 
@@ -301,7 +278,7 @@ class EntitlementService
             if ($supersededServiceId !== null) {
                 $ended = $orders->terminateService($supersededServiceId, 'replaced by a new service of the same purchase');
                 $this->repo->alert("vpnhoodiap: service #$supersededServiceId (ledger status '{$row['status']}') was still live "
-                    . "when its purchase was provisioned anew as service #{$primary['serviceId']} — "
+                    . "when its purchase was provisioned anew as service #{$order['serviceId']} — "
                     . ($ended ? 'terminated.' : 'and could NOT be terminated; two codes are live.'));
             }
 
@@ -312,7 +289,7 @@ class EntitlementService
                 $this->notifyDoubleSubscription($clientId, $record->store, $doubledWith);
             }
 
-            return $this->entitlementFor($record, $primary['serviceId'], $row['created_at'] ?? null);
+            return $this->entitlementFor($record, $order['serviceId'], $row['created_at'] ?? null);
     }
 
     /**

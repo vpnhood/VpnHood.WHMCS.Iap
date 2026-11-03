@@ -199,7 +199,7 @@ $offered = $repo->sellableProductIds($appId);
 ($offered === ['vh_itest'])
     ? ok('products listing offers only the sellable SKU (retired one hidden)')
     : bad('sellable listing wrong: ' . json_encode($offered));
-(count($repo->findMappings($appId, 'vh_itest_retired', 'legacy-plan')) === 1)
+($repo->findMapping($appId, 'vh_itest_retired', 'legacy-plan') !== null)
     ? ok('the redemption path still maps the retired SKU (sellable=0 is listing-only)')
     : bad('retired SKU lost its redemption mapping');
 

@@ -255,7 +255,7 @@ class IapRepository
     /**
      * The distinct product ids one app OFFERS for sale: enabled AND sellable rows.
      * A redemption-only row (sellable=0, e.g. a retired legacy SKU whose buyers
-     * still renew) keeps mapping purchases via findMappings but never appears here.
+     * still renew) keeps mapping purchases via findMapping but never appears here.
      */
     public function sellableProductIds(int $appId): array
     {
@@ -322,15 +322,30 @@ class IapRepository
         return number_format((float) $value, 2, '.', '');
     }
 
-    /** Enabled mappings for one app + store SKU (a bundle SKU may return several rows). */
-    public function findMappings(int $appId, string $storeProductId, string $basePlanId): array
+    /**
+     * The order a purchase's code was just delivered on, recorded before anything else can fail: a
+     * retry after a crash finds the live service and retires it once its own delivery succeeds
+     * (EntitlementService), so one purchase never keeps two codes. The status stays the caller's.
+     */
+    public function recordPurchaseDelivery(int $purchaseId, int $orderId, int $serviceId): void
     {
-        return Capsule::table('mod_vpnhood_iap_products')
+        Capsule::table('mod_vpnhood_iap_purchases')->where('id', $purchaseId)->update([
+            'service_id'     => $serviceId,
+            'whmcs_order_id' => $orderId,
+            'updated_at'     => date('Y-m-d H:i:s'),
+        ]);
+    }
+
+    /** The enabled mapping of one app + store SKU, if any (the catalog's unique key allows one row per SKU). */
+    public function findMapping(int $appId, string $storeProductId, string $basePlanId): ?array
+    {
+        $row = Capsule::table('mod_vpnhood_iap_products')
             ->where('app_id', $appId)
             ->where('store_product_id', $storeProductId)
             ->where('store_base_plan_id', $basePlanId)
             ->where('enabled', 1)
-            ->get()->map(fn ($row) => (array) $row)->all();
+            ->first();
+        return $row === null ? null : (array) $row;
     }
 
     /** WHMCS products for the admin dropdown (read-only core access). */

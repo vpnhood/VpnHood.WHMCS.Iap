@@ -6,19 +6,20 @@ use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\VpnHoodIap\ApiException;
 use WHMCS\Module\Addon\VpnHoodIap\IapRepository;
 
+require_once __DIR__ . '/DeliveryReader.php'; // a failed create's code is seen by the one provisioning-aware reader
+
 if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
     die('This file cannot be accessed directly');
 }
 
 /**
  * Places one WHMCS order for a store purchase, WHMCS-native end to end:
- * AddOrder → AddInvoicePayment (transid = store order id, gateway =
- * vpnhoodiappay) → assert Paid → AcceptOrder(autosetup) → WHMCS runs the
- * product's own provisioning module. Failure rolls the order back
- * (CancelOrder + DeleteOrder) so nothing half-provisioned survives.
- *
- * (Mirrors vpnhoodpartnerhub PartnerApiController::placeSingleOrder, with
- * the store payment replacing the credit settle.)
+ * AddOrder → AcceptOrder(autosetup), where WHMCS runs the product's own
+ * provisioning module → AddInvoicePayment (transid = store order id, gateway =
+ * vpnhoodiappay) → assert Paid. The store collected the money already, so its
+ * payment is recorded last, once the code exists: a provisioning failure removes
+ * the order while it is still unpaid (no API removes a recorded payment, and
+ * DeleteOrder leaves one behind), and a delivered code is never rolled back.
  */
 class OrderProvisioner
 {
@@ -37,10 +38,13 @@ class OrderProvisioner
      * @param ?string $dueDate the term the store's paid time calls for (TermSync::dueDateFor),
      *                         set before provisioning so the module creates the code with it;
      *                         null keeps WHMCS's own order date + cycle
+     * @param ?int $purchaseId the ledger row the order delivers, which learns the order as soon as
+     *                         the code exists; null outside a purchase
      * @return array{orderId:int, invoiceId:int, serviceId:int}
      * @throws ApiException
      */
-    public function placeOrder(int $clientId, int $whmcsProductId, int $billingCycleMonths, string $transactionId, ?string $dueDate): array
+    public function placeOrder(int $clientId, int $whmcsProductId, int $billingCycleMonths, string $transactionId,
+        ?string $dueDate, ?int $purchaseId = null): array
     {
         $add = $this->localApi('AddOrder', [
             'clientid'       => $clientId,
@@ -68,42 +72,43 @@ class OrderProvisioner
         }
 
         try {
-            // the store already collected the money — record it and require Paid
-            if ($invoiceId > 0) {
-                $this->localApi('AddInvoicePayment', [
-                    'invoiceid' => $invoiceId,
-                    'transid'   => $transactionId,
-                    'gateway'   => self::GATEWAY,
-                    'noemail'   => true,
-                ]);
-                $status = (string) Capsule::table('tblinvoices')->where('id', $invoiceId)->value('status');
-                if ($status !== 'Paid') {
-                    throw new ApiException("Order invoice #$invoiceId is not Paid after payment (status: $status).", 502);
-                }
-            }
-
             // the term is the STORE's, not the order date's: a migrated or restored subscription
-            // is weeks into its cycle, and the code is created from this date
+            // is weeks into its cycle, and the module creates the code from the service's due date
             if ($dueDate !== null) {
                 $this->localApi('UpdateClientProduct', ['serviceid' => $serviceId, 'nextduedate' => $dueDate]);
             }
 
-            // provision through the product's own module
+            // provision through the product's own module; the payment is not recorded yet
             $this->localApi('AcceptOrder', [
                 'orderid'   => $orderId,
                 'autosetup' => true,
                 'sendemail' => false,
             ]);
         } catch (\Throwable $e) {
-            $this->safeDeleteOrder($orderId);
+            $this->removeUnpaidOrder($orderId);
             throw $e instanceof ApiException ? $e : new ApiException('Provisioning failed.', 502, 'provisioning_failed');
         }
 
-        // AcceptOrder provisions from the order's own dates, not from the term just written
-        // (WHMCS 9.0.7: the code came out with order date + cycle while the service already
-        // carried the store's term), so the code is re-synced from the term — loud on failure,
-        // never fatal: the order is paid and delivered, and the code's date is only later.
+        // the code exists: the ledger learns its order before anything else can fail, so a retry
+        // after a crash retires this code once it delivers another (EntitlementService)
+        if ($purchaseId !== null) {
+            $this->repo->recordPurchaseDelivery($purchaseId, $orderId, $serviceId);
+        }
+
+        $paid = $this->recordStorePayment($orderId, $serviceId, $invoiceId, $transactionId, $dueDate, $billingCycleMonths);
+
+        // Paying the invoice of an active service moves its due date a cycle on (WHMCS books it as
+        // a renewal) and leaves the code as it is: the store's term is written back. Without a store
+        // term the code was created from the order date, and is renewed to the first term the
+        // payment just set. Loud on failure, never fatal: the order is delivered.
         if ($dueDate !== null) {
+            $moved = localAPI('UpdateClientProduct', ['serviceid' => $serviceId, 'nextduedate' => $dueDate]);
+            if (($moved['result'] ?? '') !== 'success') {
+                $this->repo->alert("vpnhoodiap: service #$serviceId could not be set back to $dueDate (the store's paid time)"
+                    . ' after its payment: ' . json_encode($moved) . ' — set its next due date by hand, or the nightly code'
+                    . ' repair extends its code a cycle past what the store sold.');
+            }
+        } elseif ($billingCycleMonths > 0 && $paid) {
             (new TermSync($this->repo))->renewCode($serviceId);
         }
 
@@ -111,21 +116,88 @@ class OrderProvisioner
     }
 
     /**
-     * Fully remove a failed order (order + invoice + service). DeleteOrder
-     * refuses unless the order is Cancelled/Fraud, so cancel first. Both calls
-     * are best-effort and logged — an incomplete rollback is never silent.
+     * Record the store's payment on the delivered order's invoice and require Paid. A failure is
+     * loud and never fatal: the store holds the money and the code is delivered, so only the
+     * bookkeeping waits for a person, told what the payment would have set.
+     *
+     * @return bool whether the invoice is Paid (true for a free order, which bills nothing)
      */
-    public function safeDeleteOrder(int $orderId): void
+    private function recordStorePayment(int $orderId, int $serviceId, int $invoiceId, string $transactionId,
+        ?string $dueDate, int $billingCycleMonths): bool
     {
-        if ($orderId <= 0) {
-            return;
+        if ($invoiceId <= 0) {
+            return true;
+        }
+        $error = null;
+        try {
+            $this->localApi('AddInvoicePayment', [
+                'invoiceid' => $invoiceId,
+                'transid'   => $transactionId,
+                'gateway'   => self::GATEWAY,
+                'noemail'   => true,
+            ]);
+        } catch (\Throwable $e) {
+            $error = $e->getMessage();
+        }
+        $status = (string) Capsule::table('tblinvoices')->where('id', $invoiceId)->value('status');
+        if ($status !== 'Paid') {
+            $this->repo->alert("vpnhoodiap: order #$orderId is delivered, but the store's payment could not be recorded on"
+                . " invoice #$invoiceId (status $status" . ($error !== null ? ": $error" : '') . '). Record it by hand: set'
+                . " the invoice back to Unpaid if WHMCS cancelled it, add the payment (transaction id $transactionId, gateway "
+                . self::GATEWAY . ')' . match (true) {
+                    $dueDate !== null => ", then set service #$serviceId's next due date back to $dueDate, as the payment moves it a cycle on.",
+                    $billingCycleMonths > 0 => ", then run Renew on service #$serviceId: its code was created from the order"
+                        . ' date and follows the first term only once renewed.',
+                    default => '.',
+                });
+            return false;
+        }
+        if ($error !== null) {
+            // the payment is recorded; what failed ran after it (a hook)
+            $this->repo->log(null, 'order.payment', '', 0, ['orderid' => $orderId, 'invoiceid' => $invoiceId], $error);
+        }
+        return true;
+    }
+
+    /**
+     * Remove an order whose provisioning failed before its payment was recorded. A code the module
+     * made before failing (recorded on a service WHMCS still calls Pending) is ended first; CancelOrder
+     * then cancels the unpaid invoice and ends an active service's code (WHMCS runs Module Terminate),
+     * and DeleteOrder removes order, service and invoice. A service whose code could not be ended
+     * keeps its records, as deleting them would leave the code live with nothing pointing at it, and
+     * whatever survives is said out loud. A code whose creation never reached the service (an answer
+     * lost on the way back) cannot be seen from here.
+     */
+    private function removeUnpaidOrder(int $orderId): void
+    {
+        $reader = new DeliveryReader();
+        $unended = [];
+        foreach (Capsule::table('tblhosting')->where('orderid', $orderId)->where('domainstatus', 'Pending')->pluck('id') as $serviceId) {
+            if ($reader->holdsCode((int) $serviceId)) {
+                $ended = localAPI('ModuleTerminate', ['serviceid' => (int) $serviceId]);
+                if (($ended['result'] ?? '') !== 'success') {
+                    $unended[(int) $serviceId] = (string) ($ended['message'] ?? $ended['result'] ?? '?');
+                }
+            }
         }
         $cancel = localAPI('CancelOrder', ['orderid' => $orderId, 'cancelsub' => false]);
-        $delete = localAPI('DeleteOrder', ['orderid' => $orderId]);
+        foreach (Capsule::table('tblhosting')->where('orderid', $orderId)->whereIn('domainstatus', ['Active', 'Suspended'])
+            ->pluck('id') as $serviceId) {
+            $unended[(int) $serviceId] ??= 'still ' . Capsule::table('tblhosting')->where('id', $serviceId)->value('domainstatus');
+        }
+        $delete = $unended === [] ? localAPI('DeleteOrder', ['orderid' => $orderId]) : null;
         $this->repo->log(null, 'order.rollback', '', 0, ['orderid' => $orderId], [
-            'cancel' => $cancel['result'] ?? '?',
-            'delete' => $delete['result'] ?? '?',
+            'cancel'  => $cancel['result'] ?? '?',
+            'delete'  => $delete['result'] ?? 'skipped',
+            'unended' => $unended,
         ]);
+        if ($unended !== [] || Capsule::table('tblorders')->where('id', $orderId)->exists()) {
+            $codes = implode('; ', array_map(fn ($id, $why) => "service #$id ($why)", array_keys($unended), $unended));
+            $this->repo->alert("vpnhoodiap: the failed order #$orderId could not be removed (cancel: "
+                . ($cancel['message'] ?? $cancel['result'] ?? '?') . ', delete: '
+                . ($delete === null ? 'skipped' : ($delete['message'] ?? $delete['result'] ?? '?')) . ')'
+                . ($unended !== [] ? " — a code is still live: $codes. Terminate it, then delete the order." : '.'));
+        }
     }
 
     /**
@@ -240,15 +312,12 @@ class OrderProvisioner
      * transaction is looked up by OUR transid, the invoice was placed by us).
      */
     public function applyStoreValue(int $invoiceId, string $transactionId, ?string $amount, ?string $currency,
-        int $clientId, bool $isPrimary): void
+        int $clientId): void
     {
         if ($invoiceId <= 0 || $transactionId === '' || $amount === null || $currency === null) {
             return;
         }
-        // bundle-secondary invoices always zero: the whole charge is stated once
-        $newTotal = $isPrimary && strcasecmp($currency, self::clientCurrencyCode($clientId)) === 0
-            ? $amount
-            : '0.00';
+        $newTotal = strcasecmp($currency, self::clientCurrencyCode($clientId)) === 0 ? $amount : '0.00';
         try {
             // Every localAPI call here goes through the checked wrapper: these commands
             // answer a FAILED update with result=error instead of throwing, so calling

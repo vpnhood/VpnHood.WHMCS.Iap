@@ -22,6 +22,21 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
  */
 class DeliveryReader
 {
+    /**
+     * Whether the provisioning module recorded a code on the service (its access code or its token
+     * id), read from the service alone: a create that failed after making the code leaves one behind
+     * on a service WHMCS still calls Pending.
+     */
+    public function holdsCode(int $serviceId): bool
+    {
+        $service = \WHMCS\Service\Service::find($serviceId);
+        if ($service === null) {
+            return false;
+        }
+        $properties = $service->serviceProperties;
+        return (string) $properties->get('accessCode') !== '' || (string) $properties->get('accessTokenId') !== '';
+    }
+
     public function readAccessCode(int $serviceId): ?string
     {
         $service = \WHMCS\Service\Service::find($serviceId);
