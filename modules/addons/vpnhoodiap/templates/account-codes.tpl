@@ -90,7 +90,7 @@
                     <div class="checkbox small" style="margin:0 0 4px">
                       <label>
                         <input type="checkbox" name="confirm" value="yes">
-                        Remove this access code from your account and signed-in devices? The code
+                        Remove this premium code from your account and signed-in devices? The code
                         itself keeps working for anyone who still has it, and you can add it again.
                       </label>
                     </div>
