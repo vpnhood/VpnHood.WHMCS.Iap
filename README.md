@@ -4,9 +4,9 @@
 orders — and delivers VpnHood access codes through the install's own provisioning
 module.**
 
-Supported stores: **Google Play** and **Apple App Store** (implemented); **Microsoft
-Store** (planned). The store remains the merchant of record; WHMCS becomes the single
-system of record for customers, orders, invoices, renewals and refunds.
+Supported stores: **Google Play** and **Apple App Store**. The store remains the merchant
+of record; WHMCS becomes the single system of record for customers, orders, invoices,
+renewals and refunds.
 
 ## How it works
 
@@ -25,21 +25,23 @@ sequenceDiagram
     Iap->>WHMCS: AddOrder → AcceptOrder(autosetup)
     WHMCS->>Prov: provision (vpnhoodstore / vpnhoodpartner)
     Iap->>WHMCS: AddInvoicePayment (the store's payment)
-    Iap-->>App: {entitlement, accessCode} — one call, no polling
+    Iap-->>App: provisioned (or pending) — one call, no polling
+    App->>Iap: GET /v1/account
+    Iap-->>App: the access code
     Store-->>Iap: webhooks: renew / cancel / refund / expire
 ```
 
 1. **Sign-in** — the app posts a Google/Apple id token — or the WHMCS client-area
-   email + password, with WHMCS two-factor auth honoured — to `POST /auth/sessions`; the
-   module creates or links a WHMCS client by email (verified emails only) and returns an
-   opaque session token.
+   email + password, with WHMCS two-factor auth honoured — to `POST /auth/sessions`, and
+   gets an opaque session token (verified emails only). Signing in creates no WHMCS
+   client: the first purchase creates one, or links the client that already has the email.
 2. **Purchase** — the app buys in the store and posts its proof (`POST /billing/purchases`); the
    module re-validates against the store API, then uses **only WHMCS-native machinery**:
    `AddOrder` on the mapped product → `AcceptOrder(autosetup)` → `AddInvoicePayment`
    (transid = store order id). WHMCS itself runs whatever provisioning module the product
    uses; the store's payment is recorded once the code exists, so a failed provisioning
-   leaves no paid order behind. The access code is read back from the service and
-   returned synchronously.
+   leaves no paid order behind. The call answers once the code exists, and the app reads
+   the code from `GET /v1/account`.
 3. **Lifecycle** — store webhooks (`webhook.php`) drive renewals, cancellations and
    refunds through the same WHMCS-native paths (pay renewal invoice / `ModuleSuspend` /
    `ModuleTerminate`).
@@ -65,12 +67,12 @@ account re-attaches it. The full contract and reasoning live in
 
 ## Provisioning-agnostic by design
 
-The module ships **verbatim** inside two packages:
+The same module runs, **verbatim**, on two kinds of install:
 
-| Package | Mapped products use | Delivery |
+| Install | Mapped products use | Delivery |
 | --- | --- | --- |
-| **Hub** ([VpnHood.WHMCS]) — VpnHood's own WHMCS | `vpnhoodstore` | access code fetched live from the access manager |
-| **Partner** ([VpnHood.WHMCS.Partner]) — white-label partners with their own store apps | `vpnhoodpartner` | access code relayed from the hub, stored on the service |
+| **Hub** ([VpnHood.WHMCS]) — VpnHood's own WHMCS, whose package bundles the module | `vpnhoodstore` | access code fetched live from the access manager |
+| **Partner** ([VpnHood.WHMCS.Partner]) — a white-label partner's WHMCS, which installs it from this repo's own release beside the connector (the connector's package does not bundle it) | `vpnhoodpartner` | access code relayed from the hub, stored on the service |
 
 The module never talks to the VpnHood access server or the hub API, and has no code
 dependency on `vpnhoodstore` or `vpnhoodpartner` — but a mapped product backed by one of
@@ -91,8 +93,10 @@ packages copy the module verbatim and never restamp it.
   unacknowledged purchases, which is the customer's fail-safe.
 - **Store credentials** are stored encrypted (WHMCS `EncryptPassword`) and are
   write-only in the admin UI. Purchase tokens are never returned to clients.
-- The module writes only to its own `mod_vpnhood_iap_*` tables; WHMCS core data is
-  touched exclusively through `localAPI`.
+- The module writes to its own `mod_vpnhood_iap_*` tables and changes WHMCS clients,
+  orders, invoices and services through `localAPI`, except for the few writes no localAPI
+  command makes: its bookkeeping gateway's rows, its own addon settings, the gateway stamped
+  on a store order, and an account deletion's erasures.
 
 ## Layout
 
@@ -100,7 +104,7 @@ packages copy the module verbatim and never restamp it.
 modules/addons/vpnhoodiap/          the addon: admin UI, tables, api.php, webhook.php
 modules/addons/vpnhoodiap/lib/      Auth (Google/Apple id tokens), Stores (GooglePlay /
                                     AppStore adapters), Provisioning (orders, accounts,
-                                    keyring, deletion), Controllers (api.php routing)
+                                    keyring, deletion), Controllers (webhook notifications)
 modules/addons/vpnhoodiap/openapi.json  the Portal API contract, served at /openapi.json
 docs/PORTAL-API.md                  the Portal API, explained
 docs/IAP-GOOGLE-PLAY.md             store setup: Google Play (app owner's own accounts)
@@ -127,9 +131,11 @@ Everything extracts at the WHMCS root.
   charge onto a paid invoice and cancels leftover renewal invoices; 9.1's default (*Full
   compliance*) refuses both, so store renewals and account deletions fail.
 - The addon activated (until then the public endpoints answer 404).
-- WHMCS **email verification enabled** (`EnableEmailVerification`) — the module refuses
-  to attach purchases to unverified existing emails.
-- The bookkeeping gateway `vpnhoodiappay` activated but **never shown on the order form**.
+- No email-verification setting to turn on. When a store purchase attaches itself to a
+  client that already had the email, the addon keeps that one account's client area shut
+  until WHMCS confirms the address; the purchase and its code are never held up.
+- The bookkeeping gateway `vpnhoodiappay` (*In-App Purchase*): the addon registers it
+  itself and keeps it off the order form, so there is nothing to activate.
 - Products for each sellable plan, using `vpnhoodstore` (hub) or `vpnhoodpartner`
   (partner), mapped in the addon's **Catalog** tab.
 - **Every app package must be registered** in the addon's **Apps** tab, or sign-in answers
@@ -137,7 +143,8 @@ Everything extracts at the WHMCS root.
   website, sideloaded APK) is registered under store `web`: no credentials, no adapter,
   no webhook; it only lets the package sign in.
 - Per store app, in the addon's **Apps** tab: the package/bundle id, the OAuth client
-  ids sign-in tokens may be issued to, and the store credentials —
+  ids sign-in tokens may be issued to (for Google, the **Web** client ID the app's Google
+  sign-in asks its tokens for, never the Android one), and the store credentials —
   **Google Play**: the Play service-account JSON, plus the Pub/Sub push service account
   whose OIDC token authenticates RTDN webhooks;
   **App Store**: the App Store Server API key as `{issuerId, keyId, privateKey}` (the
@@ -151,13 +158,16 @@ Everything extracts at the WHMCS root.
 Each app row on the **Apps** tab shows its own **Webhook URL**
 (`webhook.php?store=…&t=<secret>`). The token in it is the first auth layer; the second
 is store-native proof, so a leaked URL alone buys nothing — but treat it as a secret
-anyway, and re-create the app row if it leaks.
+anyway. The admin has no way to change it: deleting and re-adding the app row gives a new
+URL, but it also removes the row's catalog mappings, and the nightly check no longer visits
+the purchases made under the old row.
 
 **Google Play (RTDN via Pub/Sub).** Play cannot call a URL directly; it publishes to a
 Pub/Sub topic and a push subscription delivers to you:
 
 1. In Google Cloud (the same project as the Play service account), create a topic, e.g.
-   `play-rtdn`.
+   `play-rtdn`, and grant `google-play-developer-notifications@system.gserviceaccount.com`
+   the **Pub/Sub Publisher** role on it — without it Play cannot publish there.
 2. In **Play Console → your app → Monetize → Monetization setup → Real-time developer
    notifications**, set that topic.
 3. Create a **push subscription** on the topic with the app row's Webhook URL as the
@@ -173,14 +183,12 @@ Pub/Sub topic and a push subscription delivers to you:
    Notifications**, paste the app row's Webhook URL as the **Production Server URL**.
    Current App Store Connect configures **Version 2** notifications — there is no version
    choice any more (V1 is deprecated); if an older UI still offers one, pick Version 2.
-2. Point the **Sandbox Server URL** at your *staging/dev* install's webhook URL —
-   sandbox and TestFlight purchases should exercise that install, not production. Leaving
-   it empty sends BOTH environments' notifications to the Production URL.
+2. Set the **Sandbox Server URL** to the install that takes your sandbox and TestFlight
+   purchases — normally the same webhook URL, as the module checks a purchase that Apple's
+   production server does not know with Apple's sandbox. Notifications sent anywhere else
+   never reach the install that holds those purchases.
 3. No extra auth field: ASSN payloads are signed JWS whose x5c chain the module pins to
    Apple Root CA-G3.
-
-**Microsoft Store** has no webhook at all; when implemented, entitlement drift is covered
-by client push plus daily re-validation instead.
 
 ## Development & testing
 

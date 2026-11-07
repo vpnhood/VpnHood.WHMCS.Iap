@@ -2,12 +2,12 @@
 
 ## What this repo is
 
-The `vpnhoodiap` WHMCS addon: app-store purchases (Google Play / Apple / Microsoft) →
-WHMCS client + order + paid invoice → access code delivered by the install's
-provisioning module. Ships verbatim inside the hub package (VpnHood.WHMCS), and
-standalone from its own release, which is how a partner install takes it: the partner
-package does not bundle it, because in-app purchases are optional for a reseller and
-update on their own schedule.
+The `vpnhoodiap` WHMCS addon: the app's sign-in and accounts, and app-store purchases
+(Google Play / Apple) → WHMCS client + order + paid invoice → access code delivered by
+the install's provisioning module. Ships verbatim inside the hub package (VpnHood.WHMCS),
+and standalone from its own release, which is how a partner install takes it: the partner
+package does not bundle it, because only a white-label partner needs it (for its app's
+sign-in, and for in-app purchases if it sells them), and it updates on its own schedule.
 
 ## Non-negotiable rules
 
@@ -69,7 +69,7 @@ update on their own schedule.
   and that client in the SAME change set.
 - `api.php` **implements** the Portal API contract; it does not own it. The wire
   vocabulary is portal-neutral (session, account, entitlement, plans, access code)
-  so a future non-WHMCS backend can implement the same document without any client
+  so any other backend could implement the same document without any client
   change. **No WHMCS concept on the wire, ever** — no WHMCS client/invoice/order/
   service ids, no WHMCS error strings; errors are neutral machine codes.
 - The hub release pipeline bundles this repo's released files, and a standalone

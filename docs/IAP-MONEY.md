@@ -16,13 +16,16 @@ matching records so store customers look and behave like web customers:
 a client, an order, a service to provision, and a paid invoice for the books.
 
 Everything the addon writes is filtered to its own bookkeeping gateway,
-**`vpnhoodiappay`** ("In-App Purchase (billed by the app store)"). Your web
-sales, invoices, and mail are never touched.
+**`vpnhoodiappay`** (shown as *In-App Purchase*). Your web sales and their invoices
+are left alone, with one exception: when a customer deletes their account, their
+web billing is cancelled at the end of its paid period, and their unpaid invoices
+and stored payment methods are cancelled with it.
 
 ## What lands on a store invoice
 
-Every store purchase and renewal creates an invoice that is immediately marked
-**Paid** with the store's own order id as the transaction id. Its total follows
+Every store purchase gets an invoice marked **Paid** at once, and every renewal
+marks WHMCS's renewal invoice **Paid** when the store reports it, each with the
+store's own order id as the transaction id. Its total follows
 one rule — *the truth when it is knowable, an explicit flag when it is not*:
 
 | Case | Invoice total | Example |
@@ -33,7 +36,7 @@ one rule — *the truth when it is knowable, an explicit flag when it is not*:
 
 The real charge — including a foreign-currency one — is always written into the
 invoice line text (*"The store charged 259.99 TRY, see your store receipt"*)
-and shown in **Addons → VpnHood! IAP → Purchases → "Store Paid"**, so support
+and shown in **Addons → VpnHood! In-App Purchase → Purchases → "Store Paid"**, so support
 can always answer "what did this customer actually pay" without Play Console
 access. Amounts are **never converted** between currencies: a converted number
 would match neither the customer's receipt nor your payout, so it is not
@@ -59,10 +62,16 @@ invented in the first place.
 Refunds are **store-initiated only** (Play Console / App Store — an admin
 cannot refund a store customer from WHMCS, there is no store money to move
 from here). When the store refunds or revokes a purchase, the addon hears
-about it (push notification and a daily safety sweep) and mirrors it: the
-service is terminated, the invoice is marked Refunded, and a reversing
-transaction is booked for whatever was originally recorded. Replayed
-notifications never double-book.
+about it and mirrors it: the service is terminated, the invoice is marked
+Refunded, and a reversing transaction is booked for whatever was originally
+recorded. Replayed notifications never double-book.
+
+Refunds arrive by push notification. If one is lost, or booking it fails, the
+nightly check still catches it, in the same way: it re-reads the open purchases
+from the store, and for Google it also sweeps the list of voided purchases. If
+the store refunds a charge this install never recorded (a renewal whose
+notification never arrived), the service ends but nothing is reversed, and an
+admin alert asks you to match the store's refund against your books.
 
 ## Renewals
 
@@ -75,15 +84,20 @@ terminated and its leftover unpaid renewal invoice is cancelled automatically.
 
 ## Customer-visible surface
 
-Store customers get **no email from WHMCS** — no invoices, reminders, payment
-confirmations, or product welcome mail (the store sends its own receipts). If
-one ever logs into your client area, every store invoice is marked Paid, names
-the store, and says nothing is due.
+Store customers get **no billing email from WHMCS** — no invoices, reminders,
+payment confirmations, or product welcome mail (the store sends its own
+receipts). The addon sends only two account notices: when a new sign-in method
+is added to an account, and when an account gets a second active subscription.
+If a customer logs into your client area, each store purchase's invoice is
+marked Paid and names the store; a renewal invoice WHMCS has generated stays
+Unpaid until the store reports the renewal.
 
 ## If you deactivate the addon
 
 The API and webhook endpoints answer 404, processing stops, and nothing else
-in your WHMCS changes. In-flight purchases are protected by the store itself:
-an unacknowledged purchase is automatically refunded by Google after a few
-days, so customers are never charged for something that was never delivered.
+in your WHMCS changes. Google protects in-flight purchases itself: an
+unacknowledged purchase is automatically refunded after a few days, so a Google
+customer is never charged for something that was never delivered. Apple has no
+such refund: an Apple purchase made while the addon is off stays charged, and
+the buyer gets it once the addon is back, by Restore Purchases in the app.
 Tables and history are kept for reactivation.

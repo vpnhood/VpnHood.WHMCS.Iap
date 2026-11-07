@@ -89,8 +89,9 @@ Send it on every other call:
 Authorization: Bearer 0f1e2d3c4b5a…
 ```
 
-`GET /v1/billing/products` is the one resource outside `/auth` and `/system` that takes no
-session. An app has to render its plans page before anyone signs in, and gating it would
+`GET /v1/billing/products` takes no session, and `GET /v1/billing/plans` takes one only
+optionally; they are the only resources outside `/auth` and `/system` that work without
+one. An app has to render its plans page before anyone signs in, and gating it would
 force every app to ship a hardcoded product list — the exact drift this catalog exists to
 prevent. It answers only **what** an app sells, never who buys it, and those product ids
 are already public in the store listing.
@@ -103,7 +104,8 @@ entry per sellable plan — `planId`, `billingPeriod` (ISO-8601), `priceAmount`,
 renders, so the card shows the price exactly as the invoice will), and a ready-made
 `purchaseUrl` that opens the portal checkout with the plan preselected. The app opens
 that URL in the system browser and never assembles a purchase link — or a price
-string — itself.
+string — itself. The app sends `store=web` with its package name; a store-distributed
+app is refused with `403 store_not_supported`, as its store prices its plans.
 
 Two rules give the endpoint its shape:
 
@@ -275,9 +277,15 @@ keep the money for.
 | `bad_request` | 400 | Malformed body or a missing required field |
 | `unauthorized` | 401 | No session token, or it is expired or revoked |
 | `invalid_id_token` | 401 | The id token is malformed, expired, or not issued to this app |
+| `invalid_credentials` | 401 | Password sign-in: unknown email or wrong password — one answer for both |
+| `invalid_challenge` | 401 | The two-factor challenge is expired or already used; start over from the password |
+| `invalid_code` | 401 | The two-factor code is wrong |
+| `invalid_restore_credential` | 401 | The restore credential is not valid (400 when its registration is not) |
 | `unknown_app` | 403 | The package name is not registered on this portal |
 | `provider_email_unverified` | 403 | Google/Apple has not verified the signed-in email |
 | `purchase_account_mismatch` | 403 | The purchase belongs to a different account |
+| `no_account` | 403 | Password sign-in: this login has no app account of its own here |
+| `account_ambiguous` | 403 | Password sign-in: more than one app account belongs to this login; support merges them |
 | `unsupported_provider` | 400 | Sign-in provider is not `google` or `apple` |
 | `unknown_store` | 400 | Store is not one this API knows |
 | `purchase_invalid` | 400 | The store would not confirm the proof |
@@ -288,11 +296,13 @@ keep the money for.
 | `purchase_inactive` | 410 | Expired, cancelled or refunded at the store |
 | `plan_not_available` | 422 | The store product is not mapped to a plan here; parked, admin alerted |
 | `deletion_blocked` | 409 | RETIRED (kept for old clients' error maps): deletion no longer blocks — web billing is cancelled at period end instead |
-| `rate_limited` | 429 | Too many requests from this address |
-| `store_not_supported` | 501 | Known store, not implemented on this portal yet |
+| `rate_limited` | 429 | Too many requests from this address or account |
+| `too_many_attempts` | 429 | Password sign-in: too many attempts; wait a few minutes |
+| `store_not_supported` | 501 | Known store, not implemented on this portal — and 403 from `GET /v1/billing/plans` for a store-distributed app |
 | `provisioning_failed` | 502 | Downstream provisioning failed; nothing half-created, safe to retry |
 | `deletion_failed` | 502 | Anonymization or invoice cleanup failed; nothing partial, safe to retry |
 | `purchase_in_progress` | 503 | Another request is redeeming this same purchase; retry shortly |
+| `unavailable` | 503 | `GET /v1/account`: the selected code is briefly unavailable; retry shortly |
 | `internal_error` | 500 | Unexpected; recorded in the module log |
 
 ### The restore-credential form (zero-tap sign-in restoration)
@@ -332,12 +342,12 @@ user exists by construction.
 Unrecognised codes should be treated as a generic failure of their status class — new
 ones may be added.
 
-**Rate limits** (sliding window, per IP): `POST /v1/auth/sessions` 20 per 5 min,
+**Rate limits** (sliding window, per IP address): `POST /v1/auth/sessions` 20 per 5 min,
 `POST /v1/billing/purchases` 30 per 5 min, `GET /v1/system/status` 30 per min,
-`DELETE /v1/account` 5 per 5 min, `PUT /v1/account/access-code` 10 per 5 min,
-`POST /v1/account/access-code/rejected` 30 per 5 min, the restore-credential
-registration pair 10 per 5 min, and its assertion-options 20 per 5 min — each per IP
-address and per account.
+`DELETE /v1/account` 5 per 5 min, and the restore credential's assertion-options 120 per
+5 min. These count per IP address and per account as well: `PUT /v1/account/access-code`
+10 per 5 min, `POST /v1/account/access-code/rejected` 30 per 5 min, and the
+restore-credential registration pair 10 per 5 min.
 
 ## The ranking, and the one upload slot
 
@@ -498,7 +508,7 @@ agreement references so a stray charge can always be traced to an agreement an
 administrator can cancel.
 
 **The screen warns; nothing is mailed.** There is no deletion-preview endpoint,
-deliberately (lifecycle §5/§10): the confirmation a device shows lists no codes and
+deliberately: the confirmation a device shows lists no codes and
 no counts — a list read once under pressure saves nobody, and fetching it would drag
 the whole inventory question into the app. Nothing goes to the address on the way out
 either: the codes are forfeited with the account, and the order email that delivered

@@ -13,21 +13,23 @@ publisher, so VpnHood cannot do any of these steps for you.
 - Your branded iOS app in **your** App Store Connect (TestFlight is enough to
   start), with a bundle id.
 - The connector installed and working (see the White-Label Guide), and
-  the **VpnHood! IAP** addon + **vpnhoodiappay** gateway activated in your WHMCS.
+  the **VpnHood! In-App Purchase** addon activated in your WHMCS (it registers its
+  **vpnhoodiappay** gateway itself).
 
 ## 1. App Store Connect: Server API key
 
 The addon verifies every purchase directly with Apple through the App Store
 Server API, authenticated by a key you generate once:
 
-1. In **App Store Connect → Users and Access → Integrations → App Store Server
-   API**, generate an API key.
+1. In **App Store Connect → Users and Access → Integrations → In-App Purchase**,
+   generate an **In-App Purchase key** — the kind of key the App Store Server API
+   takes. A team key from *App Store Connect API* does not work here.
 2. Note the **Issuer ID** and the key's **Key ID**, and download the **`.p8`
    private key** — Apple lets you download it exactly once; store it safely.
 
 ## 2. WHMCS: register the app
 
-In **Addons → VpnHood! IAP → Apps**, add an app:
+In **Addons → VpnHood! In-App Purchase → Apps**, add an app:
 
 | Field | Value |
 | --- | --- |
@@ -80,7 +82,7 @@ involved. There are two ways to trigger one:
   notification and exercises the identical path — for most partners this is the
   simpler check, and you have to do it anyway.
 
-Either way, open **WHMCS Admin → Addons → VpnHood! IAP → Events**. Within a few
+Either way, open **WHMCS Admin → Addons → VpnHood! In-App Purchase → Events**. Within a few
 seconds a new row must appear:
 
 | Store | Type | Status | Error | Received |
@@ -102,24 +104,30 @@ entry:
 | No `webhook` entry at all | Nothing reached your WHMCS | The notification URL in App Store Connect is wrong or set on the wrong version/environment — it must be **Version 2**, and set for **both** Production and Sandbox |
 | `webhook` with status **404** | The `store=` part of the URL is wrong | Re-copy the whole webhook URL from the Apps tab |
 | `webhook` with status **401** | The secret `t=` token matches no app row | Re-copy the URL; it changes if the app row was deleted and re-added |
-| `webhook` with status **401** and a signature error | The signed payload failed verification | Confirm the URL is registered against the same app whose bundle id is in the Apps tab |
+| `webhook` with status **401** although the URL is copied exactly | The signed payload failed verification | Confirm the notification comes from Apple's own servers to this exact URL, not through a proxy that changes the body |
 
-If instead an Events row appears with status **`failed`** and an error message,
-delivery and signature checks passed and the payload was rejected later — the
-error text says why, most often a bundle id that is not registered in the Apps
-tab.
+If instead an Events row appears, delivery and signature checks passed:
+
+- Status **`skipped`** with *payload package does not match this app*: the
+  notification is for another bundle id than the one in this app row — the URL
+  was copied from the wrong row, or set on another app in App Store Connect.
+- Status **`failed`**: the payload was rejected later, and the error text says why.
 
 ## 5. Products and catalog mapping
 
 1. In **App Store Connect → your app → Subscriptions**, create your
    auto-renewable subscriptions and note each **Product ID**.
-2. In **Addons → VpnHood! IAP → Catalog**, map each Product ID to one of your
+2. In **Addons → VpnHood! In-App Purchase → Catalog**, map each Product ID to one of your
    connector products and its billing cycle. Leave the base-plan field empty —
    base plans are a Google Play concept; an Apple product maps on its Product
    ID alone.
 
 Only mapped products are ever provisioned. A purchase of an unmapped product is
-recorded, refused cleanly, and flagged to you — never guessed at.
+refused, never guessed at: it stays **`pending`** on the Purchases tab with the
+error *no catalog mapping*, and a line in WHMCS's Activity Log. The Admin Alert
+Email's daily digest does not count it. Apple refunds nothing by itself, so map
+every product before it goes on sale: the buyer has paid, and gets the
+subscription only once the mapping exists and the app sends the purchase again.
 
 ## 6. Test before going live
 
@@ -169,7 +177,8 @@ exercises the whole lifecycle.
   the API key was revoked in App Store Connect.
 - **Sign-in rejected with an audience error** — the token's audience isn't in
   **OAuth client ids**; add your bundle id (and Services ID, if used).
-- **Purchase parks as unmapped** — the Product ID isn't in the Catalog tab; add
-  the mapping, the purchase is redeemed on retry.
+- **Purchase stays `pending` with *no catalog mapping*** — the Product ID isn't
+  in the Catalog tab; add the mapping, and the purchase goes through when the app
+  sends it again (Restore Purchases).
 - Every webhook and API call is recorded in the addon's **Events** and **Log**
-  tabs; provisioning errors also appear in **Utilities → Logs → Module Log**.
+  tabs; a failed provisioning also appears in WHMCS's Activity Log.

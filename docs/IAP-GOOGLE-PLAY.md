@@ -13,7 +13,8 @@ publisher, so VpnHood cannot do any of these steps for you.
 - Your branded Android app published in **your** Play Console (an internal
   testing track is enough to start).
 - The connector installed and working (see the White-Label Guide), and
-  the **VpnHood! IAP** addon + **vpnhoodiappay** gateway activated in your WHMCS.
+  the **VpnHood! In-App Purchase** addon activated in your WHMCS (it registers its
+  **vpnhoodiappay** gateway itself).
 
 ## 1. Google Cloud: service account + API
 
@@ -34,13 +35,13 @@ with access to your app and these permissions:
 
 ## 3. WHMCS: register the app
 
-In **Addons → VpnHood! IAP → Apps**, add an app:
+In **Addons → VpnHood! In-App Purchase → Apps**, add an app:
 
 | Field | Value |
 | --- | --- |
 | Store | `googleplay` |
 | Package / bundle name | your app's package name (e.g. `com.yourbrand.vpn`) |
-| OAuth client ids | the OAuth 2.0 client ID(s) your app uses for Google sign-in (comma separated) |
+| OAuth client ids | the **Web** client ID your app's Google sign-in asks its tokens for (the server client ID; `GoogleSignInClientId` in the VpnHood app template), never the Android client ID — comma separated if there are several |
 | Credentials | paste the **service-account JSON key** — stored encrypted, write-only |
 
 Save the row, then copy the generated **webhook URL** — you need it in the next
@@ -79,7 +80,7 @@ Renewals, cancellations and refunds arrive through Google Pub/Sub:
    Account Token Creator* role to mint tokens for the chosen account, accept
    the grant — it is Google's own signing plumbing.
 4. Back in the WHMCS **Apps** tab, put that push service account's email into
-   **Pub/Sub service account** — the webhook rejects pushes signed by anyone
+   **Pub/Sub Push Service Account** — the webhook rejects pushes signed by anyone
    else.
 
 ## 5. Play Console: point RTDN at the topic
@@ -101,7 +102,7 @@ again any time you change the topic, the endpoint or the credentials.
 On the same **Monetization setup** page, click **Send test notification**. Play
 reports whether it could publish the message.
 
-Then open **WHMCS Admin → Addons → VpnHood! IAP → Events**. Within a few
+Then open **WHMCS Admin → Addons → VpnHood! In-App Purchase → Events**. Within a few
 seconds a new row must appear:
 
 | Store | Type | Status | Error | Received |
@@ -127,24 +128,28 @@ The **Log** tab tells you how far the request got. Find the most recent
 | `webhook` with status **404** | The `store=` part of the URL is wrong | Re-copy the whole webhook URL from the Apps tab |
 | `webhook` with status **401** | The secret `t=` token does not match any app row | Re-copy the URL; it changes if the app row was deleted and re-added |
 | `webhook` with status **401** right after enabling push | The push carried no OIDC token | **Enable authentication** on the subscription |
-| `webhook` with status **401** although authentication is on | The signed identity is not the one the app expects, or the audience does not match | The subscription's service account must equal the **Pub/Sub service account** on the Apps tab, and the endpoint URL must be exactly the one the audience is derived from |
+| `webhook` with status **401** although authentication is on | The signed identity is not the one the app expects, or the audience does not match | The subscription's service account must equal the **Pub/Sub Push Service Account** on the Apps tab, and the endpoint URL must be exactly the one the audience is derived from |
 
-If instead an Events row appears with status **`failed`** and an error message,
-delivery and authentication are fine — the payload was rejected later, and the
-error text says why. The most common cause is the notification being for a
-package name that is not registered in the Apps tab.
+If instead an Events row appears, delivery and authentication are fine:
+
+- Status **`skipped`** with *payload package does not match this app*: the
+  notification is for another package than the one in this app row — the topic
+  also serves another app, or the URL was copied from the wrong row.
+- Status **`failed`**: the payload was rejected later, and the error text says why.
 
 ## 7. Products and catalog mapping
 
 1. In **Play Console → Monetize → Subscriptions**, create your subscriptions
    with base plans (and offers, if you use them).
-2. In **Addons → VpnHood! IAP → Catalog**, map each `(product id, base plan id)`
+2. In **Addons → VpnHood! In-App Purchase → Catalog**, map each `(product id, base plan id)`
    pair to one of your connector products and its billing cycle.
 
 Only mapped products are ever provisioned. A purchase of an unmapped product is
-recorded, refused cleanly, and flagged to you — never guessed at. Because
-unacknowledged purchases are auto-refunded by Google after a few days, a
-mapping mistake costs the customer nothing.
+refused, never guessed at: it stays **`pending`** on the Purchases tab with the
+error *no catalog mapping*, and a line in WHMCS's Activity Log. The Admin Alert
+Email's daily digest does not count it. Because unacknowledged purchases are
+auto-refunded by Google after a few days, a mapping mistake costs the customer
+nothing.
 
 ## 8. Test before going live
 
@@ -177,11 +182,12 @@ its expiry. That exercises the whole lifecycle.
 - **Test notification doesn't arrive** — check the push subscription's endpoint
   URL matches the Apps tab exactly (the audience is pinned to it), OIDC
   authentication is enabled, and the push service-account email matches the
-  **Pub/Sub service account** field.
+  **Pub/Sub Push Service Account** field.
 - **A purchase fails with a store error** — the service account lacks
   Play Console permissions (step 2) or the Android Publisher API isn't enabled
   (step 1).
-- **Purchase parks as unmapped** — the `(product id, base plan id)` pair isn't
-  in the Catalog tab; add the mapping, the purchase is redeemed on retry.
+- **Purchase stays `pending` with *no catalog mapping*** — the
+  `(product id, base plan id)` pair isn't in the Catalog tab; add the mapping,
+  and the purchase goes through when the app sends it again (Restore Purchases).
 - Every webhook and API call is recorded in the addon's **Events** and **Log**
-  tabs; provisioning errors also appear in **Utilities → Logs → Module Log**.
+  tabs; a failed provisioning also appears in WHMCS's Activity Log.

@@ -13,7 +13,7 @@
   "servers": [
     {
       "url": "https://{host}/modules/addons/vpnhoodiap/api.php",
-      "description": "A WHMCS install running the vpnhoodiap addon. The resource path follows the script path (PHP PATH_INFO), so no rewrite rule is needed. Hosts that strip PATH_INFO accept the same routes as `?path=/account`.",
+      "description": "A WHMCS install running the vpnhoodiap addon. The resource path follows the script path (PHP PATH_INFO), so no rewrite rule is needed. Hosts that strip PATH_INFO accept the same routes as `?path=/v1/account`.",
       "variables": {
         "host": {
           "default": "whmcs.example.com",
@@ -487,7 +487,7 @@
         ],
         "operationId": "createPurchase",
         "summary": "Redeem a store purchase",
-        "description": "Turns a completed app-store purchase into a provisioned subscription — one synchronous call. The response is the state alone; the delivered code and the subscription live on `GET /v1/account`.\n\nThe portal re-fetches the purchase from the store API (the posted proof is only a pointer), checks that it was attributed to the signed-in user, maps it to a plan, provisions, and only then acknowledges the purchase with the store.\n\n**Idempotent.** The store purchase key is the anchor; redeeming the same purchase again re-answers `provisioned` for the same order and never creates a second one. Retrying after a network failure is always safe.\n\n**202 means not yet.** `pending` — the store has not settled the payment (deferred or slow payment methods); retry shortly.\n\n**A paid purchase is never refused for being a second one.** Prevention happens in the app, before the store's payment sheet opens: checkout is not offered to an account that is already served. Whatever still arrives paid is provisioned — the account then holds both, each serving its own store's devices, and an administrator is alerted so it can be surfaced rather than unwound. Refusing after payment only ever worked where the store auto-refunds an unacknowledged purchase, which is not true everywhere.\n\n**Restore after account deletion.** A purchase attributed to an account that was erased may be redeemed by a NEW signed-in account presenting the same store proof: the purchase is handed to that account and the SAME subscription re-delivered — never a new order or access code. Only when the previous owner is journalled as deleted and the new account holds no other live subscription; a purchase whose owner still exists is refused with 403 `purchase_account_mismatch` as always.",
+        "description": "Turns a completed app-store purchase into a provisioned subscription — one synchronous call. The response is the state alone; the delivered code and the subscription live on `GET /v1/account`.\n\nThe portal re-fetches the purchase from the store API (the posted proof is only a pointer), checks that it was attributed to the signed-in user, maps it to a plan, provisions, and only then acknowledges the purchase with the store.\n\n**Idempotent.** The store purchase key is the anchor; redeeming the same purchase again re-answers `provisioned` for the same order and never creates a second one. Retrying after a network failure is always safe.\n\n**`pending` means not yet.** A 201 whose state is `pending`: the store has not settled the payment (deferred or slow payment methods); retry shortly.\n\n**A paid purchase is never refused for being a second one.** Prevention happens in the app, before the store's payment sheet opens: checkout is not offered to an account that is already served. Whatever still arrives paid is provisioned — the account then holds both, each serving its own store's devices, and an administrator is alerted so it can be surfaced rather than unwound. Refusing after payment only ever worked where the store auto-refunds an unacknowledged purchase, which is not true everywhere.\n\n**Restore after account deletion.** A purchase attributed to an account that was erased may be redeemed by a NEW signed-in account presenting the same store proof: the purchase is handed to that account and the SAME subscription re-delivered — never a new order or access code. Only when the previous owner is journalled as deleted and the new account holds no other live subscription; a purchase whose owner still exists is refused with 403 `purchase_account_mismatch` as always.",
         "requestBody": {
           "required": true,
           "content": {
@@ -826,7 +826,7 @@
         "description": "The plans page of a **web-distributed** build renders from this: one entry per sellable plan with the price and a ready-made purchase URL. Everything is priced in ONE currency per response — the signed-in client's locked currency when there is one, the portal's default otherwise — and each plan's purchase URL pins that same currency, so the price on the card and the price at checkout agree by construction.\n\nStore-distributed apps are refused with `403 store_not_supported`: their store prices their plans, and store policy forbids pointing users at an external purchase. The refusal is the server-side half of that rule; hiding the UI is the client-side half.\n\nAuthentication is OPTIONAL. Anonymous requests get the default currency. A Bearer session whose account has a linked billing profile is priced in that profile's locked currency. A bad token is still a loud `401` — silently pricing a signed-in user as anonymous would break the card/checkout match this endpoint exists to guarantee.",
         "security": [
           {
-            "portalSession": []
+            "bearerAuth": []
           },
           {}
         ],
@@ -835,8 +835,12 @@
             "name": "store",
             "in": "query",
             "required": true,
+            "description": "Always `web`: plans are served only to web-distributed builds, which are registered under the store `web`.",
             "schema": {
-              "$ref": "#/components/schemas/StoreId"
+              "type": "string",
+              "enum": [
+                "web"
+              ]
             }
           },
           {
