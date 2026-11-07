@@ -12,7 +12,7 @@ publisher, so VpnHood cannot do any of these steps for you.
 
 - Your branded iOS app in **your** App Store Connect (TestFlight is enough to
   start), with a bundle id.
-- The connector installed and working (Layer 1 of the White-Label Guide), and
+- The connector installed and working (see the White-Label Guide), and
   the **VpnHood! IAP** addon + **vpnhoodiappay** gateway activated in your WHMCS.
 
 ## 1. App Store Connect: Server API key

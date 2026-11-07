@@ -12,7 +12,7 @@ publisher, so VpnHood cannot do any of these steps for you.
 
 - Your branded Android app published in **your** Play Console (an internal
   testing track is enough to start).
-- The connector installed and working (Layer 1 of the White-Label Guide), and
+- The connector installed and working (see the White-Label Guide), and
   the **VpnHood! IAP** addon + **vpnhoodiappay** gateway activated in your WHMCS.
 
 ## 1. Google Cloud: service account + API
