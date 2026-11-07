@@ -255,7 +255,7 @@ class EntitlementService
                     $supersededServiceId === null ? (int) $row['id'] : null
                 );
             } catch (\Throwable $e) {
-                $this->updateRow($row, ['status' => 'failed', 'last_error' => substr($e->getMessage(), 0, 500)], $record);
+                $this->updateRow($row, ['status' => 'failed', 'last_error' => substr(ApiException::logMessage($e), 0, 500)], $record);
                 throw $e instanceof ApiException ? $e : new ApiException('Provisioning failed.', 502, 'provisioning_failed');
             }
 
@@ -315,10 +315,11 @@ class EntitlementService
             localAPI('SendEmail', [
                 'id'            => $clientId,
                 'customtype'    => 'general',
-                'customsubject' => 'Your VpnHood account now has two active subscriptions',
+                'customsubject' => ucfirst(IapRepository::yourAccount()) . ' now has two active subscriptions',
                 'custommessage' => '<p>A new subscription from '
                     . htmlspecialchars(OrderProvisioner::storeLabel($newStore), ENT_QUOTES)
-                    . ' was just added to your VpnHood account — and the account already had an active'
+                    . ' was just added to ' . htmlspecialchars(IapRepository::yourAccount(), ENT_QUOTES)
+                    . ' — and the account already had an active'
                     . ' subscription. Both purchases are real; nothing needs to be undone.</p>'
                     . "<ul>$items</ul>"
                     . '<p>Keeping both is your choice. If you did not mean to pay twice, cancel the one'

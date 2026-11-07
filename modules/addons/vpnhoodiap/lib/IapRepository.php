@@ -762,6 +762,21 @@ class IapRepository
      * sign-in — and an account that never bought has no client to write to (and
      * nothing worth taking). The log row is the durable trace either way.
      */
+    /**
+     * How mail to a customer names their account: "your <Company Name> account", from the
+     * install's own General Settings, so a white-label partner's customers never read VpnHood's
+     * name — or just "your account" when the setting is empty.
+     */
+    public static function yourAccount(): string
+    {
+        try {
+            $company = trim((string) \WHMCS\Config\Setting::getValue('CompanyName'));
+        } catch (\Throwable) {
+            $company = '';
+        }
+        return $company !== '' ? "your $company account" : 'your account';
+    }
+
     private function notifyNewSignInMethod(array $user, string $provider): void
     {
         $this->log((int) $user['id'], 'identity_linked', '', 0, null, $provider);
@@ -774,7 +789,7 @@ class IapRepository
                 'customtype'    => 'general',
                 'customsubject' => 'A new sign-in method was added to your account',
                 'custommessage' => '<p>A new way of signing in (' . htmlspecialchars($provider, ENT_QUOTES)
-                    . ') was just added to your VpnHood account.</p>'
+                    . ') was just added to ' . htmlspecialchars(self::yourAccount(), ENT_QUOTES) . '.</p>'
                     . '<p>If this was you, there is nothing to do. If it was not, contact support immediately.</p>',
             ]);
         } catch (\Throwable) {

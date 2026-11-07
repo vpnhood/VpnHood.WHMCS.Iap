@@ -81,9 +81,11 @@ try {
         $orders->placeOrder($buyerId, $pid, 1, $transactionId, $dueDate);
         bad('placeOrder succeeded although no code could be created');
     } catch (ApiException $e) {
-        str_contains($e->getMessage(), 'AcceptOrder failed')
-            ? ok('placeOrder fails when the code cannot be created')
-            : bad('placeOrder failed with another error: ' . $e->getMessage());
+        // the client is told provisioning_failed in the portal's words; WHMCS's own stay in the log
+        ($e->getErrorCode() === 'provisioning_failed' && $e->getMessage() === 'Provisioning failed.'
+            && str_contains(ApiException::logMessage($e), 'AcceptOrder failed'))
+            ? ok('placeOrder fails when the code cannot be created: provisioning_failed, WHMCS\'s words only in the log')
+            : bad('placeOrder failed with another error: ' . $e->getErrorCode() . ' ' . ApiException::logMessage($e));
     } finally {
         $createFails = false;
     }

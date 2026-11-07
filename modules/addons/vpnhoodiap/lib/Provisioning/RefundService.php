@@ -75,6 +75,42 @@ class RefundService
     }
 
     /**
+     * A purchase the nightly check found revoked at the store, with no notification to say so:
+     * Apple has no voided-purchases list, and a notification can be lost. It ends the same way a
+     * REVOKED notification ends it: the recorded charge goes back and the service is terminated.
+     * Only a row whose service has ended is marked refunded; any other keeps its status, so the
+     * next run retries, and the refund booking is idempotent.
+     *
+     * @param array $purchase a mod_vpnhood_iap_purchases row
+     * @param ?string $revokedCharge the store order id of the charge the store revoked, when known.
+     *        When it is not the charge this install recorded — a renewal that never arrived here —
+     *        nothing is reversed, as the recorded charge was not refunded, and an admin is told.
+     * @return array{ended: bool, refund: string} refund as refund() reports it, or skipped-other-charge
+     */
+    public function endRevokedPurchase(array $purchase, string $why, ?string $revokedCharge = null): array
+    {
+        $recorded = (string) ($purchase['store_order_id'] ?? '');
+        if ($revokedCharge !== null && $revokedCharge !== '' && $recorded !== '' && $revokedCharge !== $recorded) {
+            $refund = 'skipped-other-charge';
+            $this->repo->alert("vpnhoodiap: purchase #" . (int) ($purchase['id'] ?? 0) . " was revoked at the store"
+                . " for charge $revokedCharge, which this install never recorded (it recorded $recorded). Its service"
+                . ' is ended and nothing is reversed: match the store\'s refund against your books by hand.');
+        } else {
+            // the money first; when it books, refund() also ends the key (revokeKey)
+            $refund = $this->refund($purchase);
+        }
+
+        // ends the service if refund() did not, and either way cancels its leftover renewal invoice
+        $serviceId = isset($purchase['service_id']) ? (int) $purchase['service_id'] : 0;
+        $ended = $serviceId <= 0 || (new OrderProvisioner($this->repo))->terminateService($serviceId, $why);
+        if ($ended) {
+            Capsule::table('mod_vpnhood_iap_purchases')->where('id', (int) ($purchase['id'] ?? 0))
+                ->update(['status' => 'refunded', 'updated_at' => date('Y-m-d H:i:s')]);
+        }
+        return ['ended' => $ended, 'refund' => $refund];
+    }
+
+    /**
      * A store refund revokes the key (lifecycle §8): the store has taken the
      * entitlement back, so the money and the service go back together. *Refund
      * and keep* is a website-side choice only. Best-effort: the refund is already

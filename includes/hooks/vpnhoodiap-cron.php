@@ -70,11 +70,13 @@ add_hook('DailyCronJob', 1, function () {
             continue; // store not implemented yet
         }
 
-        // open purchases: refresh against the store, re-drive lifecycle drift
+        // open purchases: refresh against the store, re-drive lifecycle drift. The least recently
+        // touched first: each refresh moves a row's updated_at, so with more than 500 open the runs
+        // take turns through all of them instead of re-reading the same first 500 every night.
         $open = Capsule::table('mod_vpnhood_iap_purchases')
             ->where('app_id', $app['id'])
             ->whereIn('status', ['provisioned', 'canceled', 'on_hold', 'pending'])
-            ->orderBy('id')->limit(500)
+            ->orderBy('updated_at')->orderBy('id')->limit(500)
             ->get()->map(fn ($row) => (array) $row)->all();
         foreach ($open as $purchase) {
             try {
@@ -108,10 +110,22 @@ add_hook('DailyCronJob', 1, function () {
                         $sync->repairCode((int) $purchase['service_id']);
                     }
                 }
-                // expired on the store but still provisioned here → terminate (with grace); a
-                // service the module could not end keeps its status, so this retries tomorrow
                 $graceDays = max(0, (int) $repo->setting('TerminateGraceDays'));
                 if (
+                    $record->state === \WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\PurchaseRecord::STATE_REVOKED
+                    && in_array($purchase['status'], ['provisioned', 'canceled', 'on_hold'], true)
+                ) {
+                    // revoked at the store (refunded) and no notification said so: Apple has no
+                    // voided list for the sweep below, and a notification can be lost. End it now
+                    // and book the refund, as REVOKED would, rather than wait for its paid time
+                    // to run out.
+                    $outcome = (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo))
+                        ->endRevokedPurchase($purchase, 'revoked at the store', $record->storeOrderId);
+                    localAPI('LogActivity', ['description' => "vpnhoodiap: purchase #{$purchase['id']} revoked at the store — service "
+                        . ($outcome['ended'] ? 'terminated' : 'NOT terminated (retried tomorrow)') . ", refund {$outcome['refund']}."]);
+                } elseif (
+                    // expired on the store but still provisioned here → terminate (with grace); a
+                    // service the module could not end keeps its status, so this retries tomorrow
                     in_array($purchase['status'], ['provisioned', 'canceled'], true)
                     && !$record->isEntitled()
                     && $record->expiryTimeUnix !== null
@@ -144,18 +158,12 @@ add_hook('DailyCronJob', 1, function () {
                 if ($row === null || $row->status === 'refunded') {
                     continue;
                 }
-                $ended = $row->service_id === null
-                    || (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner($repo))
-                        ->terminateService((int) $row->service_id, 'voided at the store');
-                $refund = (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo))->refund((array) $row);
                 // a service the module could not end keeps its status: tomorrow's sweep retries
                 // the termination, and the refund booking is idempotent
-                if ($ended) {
-                    Capsule::table('mod_vpnhood_iap_purchases')->where('id', $row->id)
-                        ->update(['status' => 'refunded', 'updated_at' => date('Y-m-d H:i:s')]);
-                }
+                $outcome = (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo))
+                    ->endRevokedPurchase((array) $row, 'voided at the store');
                 localAPI('LogActivity', ['description' => "vpnhoodiap: purchase {$voidedKey} voided at the store — service "
-                    . ($ended ? 'terminated' : 'NOT terminated (retried tomorrow)') . ", refund $refund."]);
+                    . ($outcome['ended'] ? 'terminated' : 'NOT terminated (retried tomorrow)') . ", refund {$outcome['refund']}."]);
             }
         } catch (\Throwable $e) {
             $repo->log(null, 'cron.voided', '', 0, ['app' => $app['id']], $e->getMessage());

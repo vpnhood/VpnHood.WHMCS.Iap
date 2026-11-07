@@ -29,8 +29,38 @@ class OrderProvisioner
     // with "cannot redeclare vpnhoodiap_config()"
     public const GATEWAY = 'vpnhoodiappay';
 
+    /**
+     * The invoices WHMCS creates in this process while placeOrder's own AddOrder runs, recorded
+     * by an invoice hook (captureInvoices()); null while no AddOrder of ours runs. It is what
+     * proves which leftovers a failed AddOrder made: a web checkout of the same client, or
+     * another purchase in flight, runs in another process and is never recorded here.
+     *
+     * @var int[]|null
+     */
+    private static ?array $addOrderInvoices = null;
+    private static bool $invoiceHooksAdded = false;
+
     public function __construct(private readonly IapRepository $repo)
     {
+    }
+
+    /** Registers, once per process, the hooks that fill $addOrderInvoices. */
+    private static function captureInvoices(): void
+    {
+        if (self::$invoiceHooksAdded || !function_exists('add_hook')) {
+            return;
+        }
+        self::$invoiceHooksAdded = true;
+        // ahead of every other invoice hook, so the id is kept even when a later one throws
+        foreach (['InvoiceCreation', 'InvoiceCreated'] as $hookPoint) {
+            add_hook($hookPoint, -1000, static function ($vars) {
+                $invoiceId = (int) ($vars['invoiceid'] ?? 0);
+                if (self::$addOrderInvoices !== null && $invoiceId > 0
+                    && !in_array($invoiceId, self::$addOrderInvoices, true)) {
+                    self::$addOrderInvoices[] = $invoiceId;
+                }
+            });
+        }
     }
 
     /**
@@ -46,14 +76,23 @@ class OrderProvisioner
     public function placeOrder(int $clientId, int $whmcsProductId, int $billingCycleMonths, string $transactionId,
         ?string $dueDate, ?int $purchaseId = null): array
     {
-        $add = $this->localApi('AddOrder', [
-            'clientid'       => $clientId,
-            'pid'            => $whmcsProductId,
-            'billingcycle'   => self::billingCycle($billingCycleMonths),
-            'paymentmethod'  => self::GATEWAY,
-            'noemail'        => true,
-            'noinvoiceemail' => true,
-        ]);
+        self::captureInvoices();
+        self::$addOrderInvoices = [];
+        try {
+            $add = $this->localApi('AddOrder', [
+                'clientid'       => $clientId,
+                'pid'            => $whmcsProductId,
+                'billingcycle'   => self::billingCycle($billingCycleMonths),
+                'paymentmethod'  => self::GATEWAY,
+                'noemail'        => true,
+                'noinvoiceemail' => true,
+            ]);
+        } catch (\Throwable $e) {
+            $this->removeHalfMadeOrder($clientId, $whmcsProductId, self::$addOrderInvoices ?? []);
+            throw $e;
+        } finally {
+            self::$addOrderInvoices = null;
+        }
         $orderId = (int) ($add['orderid'] ?? 0);
         $invoiceId = (int) ($add['invoiceid'] ?? 0);
         $serviceId = (int) (explode(',', (string) ($add['productids'] ?? ''))[0] ?? 0);
@@ -137,7 +176,7 @@ class OrderProvisioner
                 'noemail'   => true,
             ]);
         } catch (\Throwable $e) {
-            $error = $e->getMessage();
+            $error = ApiException::logMessage($e);
         }
         $status = (string) Capsule::table('tblinvoices')->where('id', $invoiceId)->value('status');
         if ($status !== 'Paid') {
@@ -201,6 +240,98 @@ class OrderProvisioner
     }
 
     /**
+     * What a failed AddOrder left behind. WHMCS 9.1.0's AddOrder can fail after it created the
+     * order, its service and its invoice, before (or after) the order names that invoice. The
+     * invoice is Unpaid and, as AddOrder swapped in the store's visible gateway, outside the mail
+     * suppression: its reminders would ask a store buyer to pay for what the store already
+     * charged. So the invoice is cancelled, and its order goes the way any failed order goes.
+     *
+     * Only what this AddOrder made: the invoices recorded in this process while it ran, and each
+     * only when it is wholly that order's (halfMadeOrderIds); anything else is left as it is and
+     * alerted. Each step stands on its own, and nothing here throws: the caller is already failing.
+     *
+     * @param int[] $invoiceIds
+     */
+    private function removeHalfMadeOrder(int $clientId, int $productId, array $invoiceIds): void
+    {
+        foreach ($invoiceIds as $invoiceId) {
+            try {
+                $orderIds = $this->halfMadeOrderIds($clientId, $productId, (int) $invoiceId);
+            } catch (\Throwable $e) {
+                $this->repo->alert("vpnhoodiap: a failed order for client #$clientId left invoice #$invoiceId, which"
+                    . ' could not be checked (' . ApiException::logMessage($e) . '). If it bills an app-store'
+                    . ' purchase, cancel it and its Pending order by hand, or its reminders reach a buyer who paid'
+                    . ' at the store.');
+                continue;
+            }
+            if ($orderIds === null) {
+                $this->repo->alert("vpnhoodiap: a failed order for client #$clientId left invoice #$invoiceId, which"
+                    . ' bills more than that order, so it was left as it is. Check it by hand: its reminders must'
+                    . ' not reach a buyer who paid at the store.');
+                continue;
+            }
+
+            $cancelled = false;
+            try {
+                // read again just before: an invoice paid meanwhile is no longer this cleanup's
+                if (Capsule::table('tblinvoices')->where('id', $invoiceId)->value('status') === 'Unpaid') {
+                    $this->localApi('UpdateInvoice', ['invoiceid' => (int) $invoiceId, 'status' => 'Cancelled']);
+                    $cancelled = true;
+                }
+            } catch (\Throwable $e) {
+                $this->repo->alert("vpnhoodiap: a failed order left invoice #$invoiceId Unpaid, and it could not be"
+                    . ' cancelled (' . ApiException::logMessage($e) . '). Cancel it by hand, or its reminders reach a'
+                    . ' buyer who paid at the store.');
+            }
+            foreach ($orderIds as $orderId) {
+                try {
+                    if (Capsule::table('tblorders')->where('id', $orderId)->value('status') === 'Pending') {
+                        $this->removeUnpaidOrder($orderId);
+                    }
+                } catch (\Throwable $e) {
+                    $this->repo->alert("vpnhoodiap: the half-made order #$orderId could not be removed ("
+                        . ApiException::logMessage($e) . '). Delete it by hand.');
+                }
+            }
+            $this->repo->log(null, 'order.halfmade', '', 0,
+                ['invoiceid' => (int) $invoiceId, 'orderids' => $orderIds], ['cancelled' => $cancelled]);
+        }
+    }
+
+    /**
+     * The orders a half-made invoice bills, when the invoice is wholly theirs: the client's own,
+     * every line a service line (Hosting, PromoHosting) of a service of this product and client,
+     * each service in a Pending order of this client that names this invoice or none. [] for an
+     * invoice with no lines yet; null when anything else is on it, which is then no one's to
+     * cancel automatically.
+     *
+     * @return int[]|null
+     */
+    private function halfMadeOrderIds(int $clientId, int $productId, int $invoiceId): ?array
+    {
+        if ((int) Capsule::table('tblinvoices')->where('id', $invoiceId)->value('userid') !== $clientId) {
+            return null;
+        }
+        $orderIds = [];
+        foreach (Capsule::table('tblinvoiceitems')->where('invoiceid', $invoiceId)->get(['type', 'relid']) as $item) {
+            if (!in_array((string) $item->type, ['Hosting', 'PromoHosting'], true)) {
+                return null;
+            }
+            $service = Capsule::table('tblhosting')->where('id', (int) $item->relid)->first(['orderid', 'userid', 'packageid']);
+            if ($service === null || (int) $service->userid !== $clientId || (int) $service->packageid !== $productId) {
+                return null;
+            }
+            $order = Capsule::table('tblorders')->where('id', (int) $service->orderid)->first(['userid', 'status', 'invoiceid']);
+            if ($order === null || (int) $order->userid !== $clientId || $order->status !== 'Pending'
+                || !in_array((int) $order->invoiceid, [0, $invoiceId], true)) {
+                return null;
+            }
+            $orderIds[(int) $service->orderid] = (int) $service->orderid;
+        }
+        return array_values($orderIds);
+    }
+
+    /**
      * Make the invoice tell the truth to anyone who ever opens it: the money
      * moved at the store, the WHMCS amount is internal bookkeeping. Appends the
      * real charge when the store reported one. Best-effort — a cosmetic line
@@ -231,7 +362,7 @@ class OrderProvisioner
                 $this->localApi('UpdateInvoice', $updates);
             }
         } catch (\Throwable $e) {
-            $this->repo->log(null, 'invoice.annotate', '', 0, ['invoiceid' => $invoiceId], $e->getMessage());
+            $this->repo->log(null, 'invoice.annotate', '', 0, ['invoiceid' => $invoiceId], ApiException::logMessage($e));
         }
     }
 
@@ -258,7 +389,7 @@ class OrderProvisioner
                 $this->localApi('UpdateInvoice', ['invoiceid' => (int) $invoiceId, 'status' => 'Cancelled']);
             }
         } catch (\Throwable $e) {
-            $this->repo->log(null, 'invoice.cleanup', '', 0, ['serviceid' => $serviceId], $e->getMessage());
+            $this->repo->log(null, 'invoice.cleanup', '', 0, ['serviceid' => $serviceId], ApiException::logMessage($e));
         }
     }
 
@@ -353,7 +484,7 @@ class OrderProvisioner
                 $this->localApi('UpdateInvoice', $updates);
             }
         } catch (\Throwable $e) {
-            $this->repo->log(null, 'invoice.storevalue', '', 0, ['invoiceid' => $invoiceId], $e->getMessage());
+            $this->repo->log(null, 'invoice.storevalue', '', 0, ['invoiceid' => $invoiceId], ApiException::logMessage($e));
         }
     }
 
@@ -418,13 +549,18 @@ class OrderProvisioner
         };
     }
 
-    /** @throws ApiException when the localAPI result is not success */
+    /**
+     * @throws ApiException 502 provisioning_failed when the localAPI result is not success. The
+     *         client gets the portal's own words; WHMCS's are kept behind them for the logs
+     *         (ApiException::logMessage), as no WHMCS error text may reach the wire.
+     */
     private function localApi(string $command, array $params): array
     {
         $result = localAPI($command, $params);
         if (($result['result'] ?? '') !== 'success') {
             $message = (string) ($result['message'] ?? 'unknown error');
-            throw new ApiException("$command failed: $message", 502);
+            throw new ApiException('Provisioning failed.', 502, 'provisioning_failed',
+                new \RuntimeException("$command failed: $message"));
         }
         return $result;
     }

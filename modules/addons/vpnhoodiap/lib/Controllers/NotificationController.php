@@ -132,8 +132,20 @@ class NotificationController
                 return 'expired';
 
             case StoreNotification::REVOKED:
+                // the money first: a row marked refunded is never looked at again, so if booking it
+                // throws, the service still ends but the row stays open, and the nightly check finds
+                // the purchase revoked and books the refund then
+                try {
+                    $refund = $this->refundPayment($notification);
+                } catch (\Throwable $e) {
+                    $serviceId = $this->serviceIdFor($notification);
+                    if ($serviceId !== null) {
+                        (new OrderProvisioner($this->repo))->terminateService($serviceId, $notification->eventType);
+                    }
+                    throw $e;
+                }
                 $this->terminateService($notification, 'refunded');
-                return 'revoked-' . $this->refundPayment($notification);
+                return 'revoked-' . $refund;
 
             default:
                 return 'unknown-recorded';

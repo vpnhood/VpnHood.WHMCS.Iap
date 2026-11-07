@@ -176,7 +176,7 @@ try {
 } catch (ApiException $e) {
     $status = $e->getHttpStatus();
     $repo?->log($request['logUserId'] ?? null, $route, $remoteIp, $status,
-        vpnhoodiap_redact($logged), $e->getMessage());
+        vpnhoodiap_redact($logged), ApiException::logMessage($e));
     vpnhoodiap_problem($status, $e->getErrorCode(), $e->getMessage());
 } catch (\Throwable $e) {
     logModuleCall('vpnhoodiap', 'api', $route, $e->getMessage(), $e->getTraceAsString());

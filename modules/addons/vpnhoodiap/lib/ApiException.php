@@ -16,11 +16,19 @@ if (!defined('WHMCS') && !defined('VPNHOODIAP_TEST')) {
 class ApiException extends \Exception
 {
     // NOT named $code: Exception already owns that property, and a promoted
-    // readonly one cannot redeclare it.
+    // readonly one cannot redeclare it. $previous holds what must never reach the
+    // wire — WHMCS's own error text — for the logs alone (logMessage()).
     public function __construct(string $message, private readonly int $httpStatus = 400,
-        private readonly ?string $errorCode = null)
+        private readonly ?string $errorCode = null, ?\Throwable $previous = null)
     {
-        parent::__construct($message);
+        parent::__construct($message, 0, $previous);
+    }
+
+    /** What a log keeps of a failure: the message, and the cause it hides from the client. */
+    public static function logMessage(\Throwable $e): string
+    {
+        $previous = $e->getPrevious();
+        return $previous !== null ? $e->getMessage() . ' (' . $previous->getMessage() . ')' : $e->getMessage();
     }
 
     public function getHttpStatus(): int
