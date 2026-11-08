@@ -39,6 +39,10 @@ final class PurchaseRecord
         public readonly ?string $currency,
         public readonly array $raw,
         public readonly ?string $expiredPurchaseKey = null, // googleplay: the lapsed purchase a store-side resubscription continues
+        // STATE_REVOKED: the charge the store refunded, when the record names it, and how much of it
+        // in milliunits (100000 whole, 0 nothing: Apple Family Sharing, null: the store did not say)
+        public readonly ?string $refundedOrderId = null,
+        public readonly ?int $refundShare = null,
     ) {
     }
 

@@ -61,17 +61,35 @@ invented in the first place.
 
 Refunds are **store-initiated only** (Play Console / App Store — an admin
 cannot refund a store customer from WHMCS, there is no store money to move
-from here). When the store refunds or revokes a purchase, the addon hears
-about it and mirrors it: the service is terminated, the invoice is marked
-Refunded, and a reversing transaction is booked for whatever was originally
-recorded. Replayed notifications never double-book.
+from here). When the store refunds a charge, the addon mirrors it on that
+charge: a reversing transaction for the amount the store refunded, and the
+invoice marked Refunded when the whole charge went back. Each renewal is a
+charge of its own, and the store names the one it refunded (Google's order id,
+Apple's transaction id), so nothing is reversed by guesswork. Replayed
+notifications never double-book.
 
-Refunds arrive by push notification. If one is lost, or booking it fails, the
-nightly check still catches it, in the same way: it re-reads the open purchases
-from the store, and for Google it also sweeps the list of voided purchases. If
-the store refunds a charge this install never recorded (a renewal whose
-notification never arrived), the service ends but nothing is reversed, and an
-admin alert asks you to match the store's refund against your books.
+The service follows the store, not the refund: it ends when the store says the
+purchase is no longer granted. A refund of an earlier renewal, on a
+subscription the store still grants, reverses that renewal's charge and leaves
+the service running.
+
+Refunds arrive by push notification. If one is lost, the nightly check still
+catches it: for Google it reads the store's list of voided orders, and for both
+stores it re-reads the open purchases. If WHMCS refuses to book a refund, an
+admin alert says so once, and the nightly check retries it every night until it
+books. If Apple later reverses a refund it granted, the booked refund stays as
+it is: book that money back by hand.
+
+**Store refunds to check.** A refund only a person can settle is not booked by
+itself: part of a charge refunded, a charge on no invoice, an invoice that
+already shows a refund made by hand, two payments with the same order id, a
+refund that grew after it was booked or dismissed, and one WHMCS keeps refusing.
+Addons → VpnHood! In-App Purchase → Purchases lists them, each with a note
+saying why, and the daily digest counts them. Check the refund in Play Console
+or App Store Connect first. **Book** books what the store refunded, as shown;
+**Dismiss** books nothing for what the store reported so far, once you have
+settled it by hand. If the store later reports more of that charge refunded, it
+comes back to the list.
 
 ## Renewals
 

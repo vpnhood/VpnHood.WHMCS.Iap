@@ -108,16 +108,39 @@ class AppStoreAdapter implements StoreAdapterInterface
             $transaction = ($this->jwsVerifier)((string) $data['signedTransactionInfo']);
         }
 
+        // REFUND and REVOKE carry the transaction they take back: a refund reverses that one
+        // charge, a Family Sharing revocation none
+        $eventType = self::mapEvent($notificationType, $subtype);
+        $revoked = $eventType === StoreNotification::REVOKED && isset($transaction['transactionId']);
+
         return new StoreNotification(
             self::STORE,
             $messageId,
-            self::mapEvent($notificationType, $subtype),
+            $eventType,
             isset($transaction['originalTransactionId']) ? (string) $transaction['originalTransactionId'] : null,
             isset($transaction['productId']) ? (string) $transaction['productId'] : null,
             isset($data['bundleId']) ? (string) $data['bundleId'] : null,
             isset($payload['signedDate']) ? intdiv((int) $payload['signedDate'], 1000) : null,
-            ['notificationType' => $notificationType, 'subtype' => $subtype, 'data' => $data]
+            ['notificationType' => $notificationType, 'subtype' => $subtype, 'data' => $data],
+            $revoked ? (string) $transaction['transactionId'] : null,
+            $revoked ? ($notificationType === 'REVOKE' ? 0 : self::refundShare($transaction)) : null,
         );
+    }
+
+    /**
+     * How much of a revoked transaction the App Store refunded, in milliunits: 100000 the whole
+     * charge (REFUND_FULL, or a payload from before revocationType), revocationPercentage for a
+     * prorated refund (null when it is missing), 0 for a revocation that refunds nothing here
+     * (Family Sharing, an organization's seat).
+     */
+    private static function refundShare(array $transaction): ?int
+    {
+        return match ((string) ($transaction['revocationType'] ?? '')) {
+            'FAMILY_REVOKE', 'ASSIGNMENT_REVOKE' => 0,
+            'REFUND_PRORATED' => isset($transaction['revocationPercentage'])
+                ? max(0, min(100000, (int) $transaction['revocationPercentage'])) : null,
+            default => ($transaction['inAppOwnershipType'] ?? '') === 'FAMILY_SHARED' ? 0 : 100000,
+        };
     }
 
     public function finalize(array $app, PurchaseRecord $record): void
@@ -125,7 +148,7 @@ class AppStoreAdapter implements StoreAdapterInterface
         // Apple has no acknowledge/consume step — nothing to do, by design.
     }
 
-    public function listVoidedPurchaseKeys(array $app, int $sinceUnix): array
+    public function listVoidedPurchases(array $app, int $sinceUnix): array
     {
         // Apple pushes REFUND/REVOKE notifications and the reconciliation cron
         // re-fetches statuses (status 5 = revoked) — no separate voided list exists.
@@ -209,6 +232,8 @@ class AppStoreAdapter implements StoreAdapterInterface
         $amount = isset($transaction['price'])
             ? number_format(((int) $transaction['price']) / 1000, 2, '.', '')
             : null;
+        // a revoked transaction names the charge the App Store took back
+        $revoked = isset($transaction['revocationDate'], $transaction['transactionId']);
 
         return new PurchaseRecord(
             store: self::STORE,
@@ -228,6 +253,8 @@ class AppStoreAdapter implements StoreAdapterInterface
             amount: $amount,
             currency: isset($transaction['currency']) ? (string) $transaction['currency'] : null,
             raw: $transaction,
+            refundedOrderId: $revoked ? (string) $transaction['transactionId'] : null,
+            refundShare: $revoked ? self::refundShare($transaction) : null,
         );
     }
 }

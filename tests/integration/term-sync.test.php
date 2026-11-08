@@ -71,7 +71,7 @@ class FakeTermAdapter implements StoreAdapterInterface
     {
     }
 
-    public function listVoidedPurchaseKeys(array $app, int $sinceUnix): array
+    public function listVoidedPurchases(array $app, int $sinceUnix): array
     {
         return [];
     }
@@ -260,6 +260,7 @@ try {
         : bad('restarted: ' . json_encode([$handled, $row, 'services' => $serviceCount()]));
 
     // ---- 6. ON_HOLD suspends; RECOVERED is a renewal onto the same service ----
+    $adapter->record = $record('RENEW-1', $expiry, PurchaseRecord::STATE_ON_HOLD); // the store's answer on hold
     $handled = $notify(StoreNotification::ON_HOLD);
     ($handled === 'on_hold' && $serviceStatus() === 'Suspended' && $ledger()['status'] === 'on_hold')
         ? ok('ON_HOLD suspended the service')

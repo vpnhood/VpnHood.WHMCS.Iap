@@ -42,7 +42,7 @@ function vpnhoodiap_config(): array
                 'FriendlyName' => 'Admin Alert Email',
                 'Type'         => 'text',
                 'Size'         => '40',
-                'Description'  => 'Receives the daily digest of parked purchases and repeated webhook failures. Leave blank to disable.',
+                'Description'  => 'Receives the daily digest of parked purchases, repeated webhook failures and store refunds to check. Leave blank to disable.',
                 'Default'      => '',
             ],
             'RawPayloadRetentionDays' => [
@@ -215,6 +215,35 @@ function vpnhoodiap_activate(): array
                 $table->timestamp('created_at')->nullable();
                 $table->timestamp('updated_at')->nullable();
                 $table->unique(['store', 'purchase_key'], 'iap_purchases_store_key');
+            });
+        }
+
+        // the refund ledger (RefundService): one row per charge a store named as refunded, the
+        // money side of a revocation; the service side follows the store's entitlement instead.
+        // unique (store, charge_id) is what keeps a refund from being booked twice.
+        if (!$schema->hasTable('mod_vpnhood_iap_refunds')) {
+            $schema->create('mod_vpnhood_iap_refunds', function ($table) {
+                $table->increments('id');
+                $table->integer('purchase_id')->unsigned()->index();
+                $table->string('store', 16);
+                $table->string('charge_id', 191); // the store order id the store refunded
+                $table->integer('share')->unsigned()->nullable(); // milliunits refunded; null = the store did not say
+                $table->integer('booked_share')->unsigned()->default(0);
+                $table->string('state', 16)->index(); // due | booked | none | review | skipped
+                $table->string('reason', 16)->default('');
+                $table->string('source', 16); // webhook | voided | refresh
+                $table->integer('payment_id')->unsigned()->nullable(); // the charge's tblaccounts row
+                $table->decimal('amount', 16, 2)->nullable(); // what the booking reversed
+                $table->integer('invoice_id')->unsigned()->nullable();
+                $table->integer('refund_transaction_id')->unsigned()->nullable();
+                $table->boolean('invoice_done')->default(true);
+                $table->integer('attempts')->unsigned()->default(0);
+                $table->integer('version')->unsigned()->default(1); // an admin's action names the version it saw
+                $table->text('note')->nullable();
+                $table->timestamp('created_at')->nullable();
+                $table->timestamp('updated_at')->nullable();
+                $table->timestamp('settled_at')->nullable();
+                $table->unique(['store', 'charge_id'], 'iap_refunds_store_charge');
             });
         }
 
@@ -844,7 +873,8 @@ function vpnhoodiap_clientareaDeleteAccount(): array
 
 /**
  * Admin area output: tabbed UI — Apps (store credentials), Catalog (SKU mappings),
- * Accounts (deletion on request), Purchases / Events / Log (read-only monitors).
+ * Accounts (deletion on request), Purchases (the store refunds waiting for an admin, each booked,
+ * retried or dismissed, above a read-only list), Events / Log (read-only monitors).
  */
 function vpnhoodiap_output(array $vars): void
 {
@@ -934,6 +964,14 @@ function vpnhoodiap_output(array $vars): void
                 (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\AccountDeletionService())->deleteUser($user);
                 $notice = 'Account #' . (int) $user['id'] . ' is deleted.';
                 $noticeType = 'success';
+            } elseif ($sub === 'refund_action') {
+                // an admin's action on a store refund, as they saw it (its version): a row changed
+                // since is refused, not acted on
+                $tab = 'purchases';
+                $refundId = (int) ($_POST['id'] ?? 0);
+                $result = vpnhoodiap_refundService($repo)
+                    ->adminAction($refundId, (int) ($_POST['version'] ?? 0), (string) ($_POST['action'] ?? ''));
+                [$noticeType, $notice] = vpnhoodiap_refundNotice($refundId, $result);
             }
         } catch (\Throwable $e) {
             $notice = 'Error: ' . htmlspecialchars($e->getMessage());
@@ -963,7 +1001,7 @@ function vpnhoodiap_output(array $vars): void
             vpnhoodiap_renderAccounts($repo, $modulelink);
             break;
         case 'purchases':
-            vpnhoodiap_renderPurchases($repo);
+            vpnhoodiap_renderPurchases($repo, $modulelink);
             break;
         case 'events':
             vpnhoodiap_renderEvents($repo);
@@ -1159,9 +1197,130 @@ function vpnhoodiap_renderAccounts(IapRepository $repo, string $modulelink): voi
     echo '</tbody></table>';
 }
 
-/** Purchases tab (read-only, latest 50). */
-function vpnhoodiap_renderPurchases(IapRepository $repo): void
+function vpnhoodiap_refundService(IapRepository $repo): \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService
 {
+    require_once __DIR__ . '/lib/ApiException.php';
+    require_once __DIR__ . '/lib/Provisioning/OrderProvisioner.php';
+    require_once __DIR__ . '/lib/Provisioning/RefundService.php';
+    return new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo);
+}
+
+/** @return array{0: string, 1: string} the notice type and text for an admin's refund action (RefundService::adminAction) */
+function vpnhoodiap_refundNotice(int $refundId, array $result): array
+{
+    $invoice = match ($result['invoice'] ?? 'n/a') {
+        'refunded' => ' and its invoice set Refunded.',
+        'failed'   => ', but its invoice could not be set Refunded: that is retried every night.',
+        default    => '.',
+    };
+    return match ($result['outcome'] ?? '') {
+        'booked'         => ['success', "Refund #$refundId is booked$invoice"],
+        'already'        => ['success', "Refund #$refundId was booked already$invoice"],
+        'dismissed'      => ['success', "Refund #$refundId is dismissed: nothing is booked for what the store reported so far."],
+        'invoice-done'   => ['success', "Refund #$refundId: its invoice is set Refunded."],
+        'invoice-failed' => ['danger', "Refund #$refundId: its invoice still could not be set Refunded."],
+        'no-payment'     => ['info', "Refund #$refundId: no payment is recorded for its charge, so nothing was booked."],
+        'busy'           => ['warning', "Refund #$refundId: its purchase is busy right now. Try again in a minute."],
+        'changed'        => ['warning', "Refund #$refundId changed since this page was loaded, so nothing was done. Check it again."],
+        'ambiguous', 'manual', 'uninvoiced'
+                         => ['warning', "Refund #$refundId was not booked: it needs you, as its note says."],
+        default          => ['warning', "Refund #$refundId: nothing was done (" . htmlspecialchars((string) ($result['outcome'] ?? '')) . ').'],
+    };
+}
+
+/**
+ * Store refunds waiting for an admin (RefundService::checkList), above the purchases, a page at a
+ * time: a refund the store did not give whole, one on no invoice or two payments, one an invoice
+ * shows refunded by hand, one grown after it was booked or dismissed, one WHMCS keeps refusing, an
+ * invoice update that keeps failing. Every action names the version of the row it was shown, so a
+ * row changed since is refused rather than acted on. Fenced: the purchases list below never fails
+ * with it.
+ */
+function vpnhoodiap_renderRefundsToCheck(IapRepository $repo, string $modulelink): void
+{
+    try {
+        $refunds = vpnhoodiap_refundService($repo);
+        if (!\WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService::ledgerReady()) {
+            echo '<div class="alert alert-danger">This install has no refund ledger (table <code>mod_vpnhood_iap_refunds</code>),'
+                . ' so store refunds wait unbooked. Create it once by running the addon\'s activation, which only adds missing'
+                . ' tables: in the WHMCS folder, <code>php -r \'require "init.php"; require'
+                . ' "modules/addons/vpnhoodiap/vpnhoodiap.php"; print_r(vpnhoodiap_activate());\'</code></div>';
+            return;
+        }
+        $total = $refunds->checkCount();
+        if ($total === 0) {
+            return;
+        }
+        $perPage = 50;
+        $pages = (int) ceil($total / $perPage);
+        $page = min($pages, max(1, (int) ($_GET['refunds_page'] ?? 1)));
+        $rows = $refunds->checkList($page, $perPage);
+    } catch (\Throwable $e) {
+        echo '<div class="alert alert-danger">The store refunds to check could not be listed: '
+            . htmlspecialchars($e->getMessage()) . '</div>';
+        return;
+    }
+
+    echo '<div class="panel panel-warning"><div class="panel-heading"><strong>Store refunds to check (' . $total
+        . ')</strong></div><div class="panel-body">'
+        . '<p>The store refunded these charges, and each needs you: its note says why. Check the refund in Google Play'
+        . ' Console or App Store Connect first. <b>Book</b> books what the store refunded, as shown. <b>Dismiss</b> books'
+        . ' nothing for what the store reported so far: use it once you have settled it by hand in WHMCS. If the store'
+        . ' later reports more of the charge refunded, it comes back here.</p></div>'
+        . '<table class="table table-condensed" style="margin:0"><thead><tr><th>Refund</th><th>Store</th><th>Charge</th>'
+        . '<th>Refunded</th><th>Paid</th><th>Invoice</th><th>Client</th><th>Note</th><th></th></tr></thead><tbody>';
+    $form = fn (array $r, string $action, string $class, string $label, string $question) =>
+        '<form method="post" action="' . $modulelink . '&tab=purchases" style="display:inline;margin:0 4px 0 0"'
+        . ' onsubmit="return confirm(' . htmlspecialchars(json_encode($question), ENT_QUOTES) . ');">'
+        . vpnhoodiap_csrfField() . '<input type="hidden" name="do" value="refund_action">'
+        . '<input type="hidden" name="id" value="' . (int) $r['id'] . '">'
+        . '<input type="hidden" name="version" value="' . (int) $r['version'] . '">'
+        . '<input type="hidden" name="action" value="' . $action . '">'
+        . '<button class="btn btn-xs ' . $class . '">' . htmlspecialchars($label) . '</button></form>';
+    foreach ($rows as $r) {
+        $charge = htmlspecialchars($r['charge']);
+        $actions = '';
+        foreach ($r['actions'] as $action) {
+            $actions .= match ($action) {
+                'book'          => $form($r, 'book', 'btn-primary', "Book {$r['to_book']}",
+                    "Book {$r['to_book']} back for charge {$r['charge']}, the " . ($r['share'] ?? '') . ' the store refunded?'),
+                'retry'         => $form($r, 'retry', 'btn-primary', 'Retry now', "Try to book the refund of charge {$r['charge']} now?"),
+                'retry-invoice' => $form($r, 'retry-invoice', 'btn-primary', 'Retry invoice', 'Try to set the invoice Refunded now?'),
+                'dismiss'       => $form($r, 'dismiss', 'btn-default', 'Dismiss',
+                    "Dismiss the refund of charge {$r['charge']}? Nothing is booked for it here: do this once you have settled it by hand."),
+                default         => '',
+            };
+        }
+        echo '<tr>'
+            . '<td>#' . (int) $r['id'] . '<br><small>purchase #' . (int) $r['purchase_id'] . '</small></td>'
+            . '<td>' . htmlspecialchars($r['store']) . '</td>'
+            . '<td><code>' . $charge . '</code></td>'
+            . '<td>' . ($r['share'] !== null ? htmlspecialchars($r['share']) : '?') . '</td>'
+            . '<td>' . ($r['paid'] !== null ? htmlspecialchars($r['paid']) : '—') . '</td>'
+            . '<td>' . ($r['invoice_id'] > 0 ? '<a href="invoices.php?action=edit&id=' . (int) $r['invoice_id'] . '">#'
+                . (int) $r['invoice_id'] . '</a> ' . htmlspecialchars((string) $r['invoice_status']) : 'none') . '</td>'
+            . '<td>' . ($r['client_id'] ? '<a href="clientssummary.php?userid=' . (int) $r['client_id'] . '">#'
+                . (int) $r['client_id'] . '</a>' : '—') . '</td>'
+            . '<td>' . htmlspecialchars($r['note']) . '</td>'
+            . '<td style="white-space:nowrap">' . $actions . '</td>'
+            . '</tr>';
+    }
+    echo '</tbody></table>';
+    if ($pages > 1) {
+        echo '<div class="panel-footer">Page ' . $page . ' of ' . $pages . ':';
+        for ($p = 1; $p <= $pages; $p++) {
+            echo ' ' . ($p === $page ? "<b>$p</b>"
+                : '<a href="' . $modulelink . '&tab=purchases&refunds_page=' . $p . '">' . $p . '</a>');
+        }
+        echo '</div>';
+    }
+    echo '</div>';
+}
+
+/** Purchases tab: the store refunds to check, then the latest 50 purchases (read-only). */
+function vpnhoodiap_renderPurchases(IapRepository $repo, string $modulelink): void
+{
+    vpnhoodiap_renderRefundsToCheck($repo, $modulelink);
     $rows = $repo->recentPurchases(50);
     echo '<table class="table table-condensed table-striped"><thead><tr>'
         . '<th>ID</th><th>Store</th><th>Order Id</th><th>Status</th><th>Client</th><th>Service</th>'

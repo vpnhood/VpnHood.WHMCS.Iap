@@ -97,6 +97,7 @@ $tables = [
     'mod_vpnhood_iap_identities',
     'mod_vpnhood_iap_sessions',
     'mod_vpnhood_iap_purchases',
+    'mod_vpnhood_iap_refunds',
     'mod_vpnhood_iap_events',
     'mod_vpnhood_iap_log',
     'mod_vpnhood_iap_deletions',

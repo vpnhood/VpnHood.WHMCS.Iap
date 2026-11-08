@@ -119,7 +119,9 @@ class GooglePlayApiClient
         $all = [];
         $pageToken = null;
         do {
-            $query = 'startTime=' . $startTimeMillis . '&type=1' . ($pageToken !== null ? '&token=' . rawurlencode($pageToken) : '');
+            // type=1: subscriptions too; quantity-based partial refunds too, marked by their voidedQuantity
+            $query = 'startTime=' . $startTimeMillis . '&type=1&includeQuantityBasedPartialRefund=true'
+                . ($pageToken !== null ? '&token=' . rawurlencode($pageToken) : '');
             $page = $this->call('GET', '/purchases/voidedpurchases?' . $query);
             foreach ((array) ($page['voidedPurchases'] ?? []) as $voided) {
                 $all[] = (array) $voided;

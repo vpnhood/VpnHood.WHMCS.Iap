@@ -351,6 +351,45 @@ test('RTDN type map: renewed / canceled / revoked / expired / test', function ()
     );
 });
 
+test('a voided-purchase RTDN names the exact order voided; SUBSCRIPTION_REVOKED names none', function () use ($oidcAdapter, $oidcPrivatePem) {
+    $voided = fn (int $refundType, string $messageId) => $oidcAdapter->parseNotification(rtdnApp(), oidcHeaders($oidcPrivatePem), pushEnvelope([
+        'packageName'                => PACKAGE,
+        'voidedPurchaseNotification' => [
+            'purchaseToken' => 'tok-V', 'orderId' => 'GPA.1111-2222-3333-44444..1', 'productType' => 1, 'refundType' => $refundType,
+        ],
+    ], $messageId), []);
+    $full = $voided(1, 'm-v1');
+    assertSame(StoreNotification::REVOKED, $full->eventType);
+    assertSame('tok-V', $full->purchaseKey);
+    assertSame('GPA.1111-2222-3333-44444..1', $full->refundedOrderId, 'the renewal order voided');
+    assertSame(100000, $full->refundShare);
+    assertSame(null, $voided(2, 'm-v2')->refundShare, 'a quantity-based partial refund does not say how much');
+    $revoked = $oidcAdapter->parseNotification(rtdnApp(), oidcHeaders($oidcPrivatePem), pushEnvelope(
+        ['packageName' => PACKAGE, 'subscriptionNotification' => ['notificationType' => 12, 'purchaseToken' => 'tok-V']],
+        'm-v3'
+    ), []);
+    assertSame(null, $revoked->refundedOrderId, 'SUBSCRIPTION_REVOKED names no order');
+});
+
+test('the voided list carries each voided order with its purchase', function () use ($saPrivatePem) {
+    $log = [];
+    $http = fakeHttp($log, [['match' => 'voidedpurchases?startTime', 'response' => ['status' => 200, 'body' => '', 'json' => [
+        'voidedPurchases' => [
+            ['purchaseToken' => 'v1', 'orderId' => 'GPA.1'],
+            ['purchaseToken' => 'v2'],
+            ['orderId' => 'GPA.3'],
+            ['purchaseToken' => 'v4', 'orderId' => 'GPA.4', 'voidedQuantity' => 1],
+        ],
+    ]]]]);
+    $adapter = new GooglePlayAdapter(fn (array $app) => new GooglePlayApiClient(serviceAccount($saPrivatePem), PACKAGE, $http));
+    assertSame([
+        ['purchaseKey' => 'v1', 'orderId' => 'GPA.1', 'share' => 100000],
+        ['purchaseKey' => 'v2', 'orderId' => null, 'share' => 100000],
+        ['purchaseKey' => 'v4', 'orderId' => 'GPA.4', 'share' => null],
+    ], $adapter->listVoidedPurchases(['id' => 1], 1000));
+    assertTrue(str_contains($log[count($log) - 1]['url'], 'includeQuantityBasedPartialRefund=true'), 'partial refunds are asked for too');
+});
+
 test('push without a bearer token is rejected', function () use ($oidcAdapter) {
     assertThrows(
         fn () => $oidcAdapter->parseNotification(rtdnApp(), [], pushEnvelope(['packageName' => PACKAGE]), []),

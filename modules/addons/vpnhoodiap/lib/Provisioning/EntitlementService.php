@@ -70,7 +70,8 @@ class EntitlementService
 
         $this->ensurePurchaseRow($app, $record, $user);
 
-        $lockName = 'vpnhoodiap.' . $record->store . '.' . sha1($record->purchaseKey);
+        // the purchase's lifecycle lock, shared with renewals and refunds (IapRepository::purchaseLockName)
+        $lockName = IapRepository::purchaseLockName($record->store, $record->purchaseKey);
         $acquired = (int) (Capsule::select('SELECT GET_LOCK(?, 30) AS l', [$lockName])[0]->l ?? 0);
         if ($acquired !== 1) {
             throw new ApiException('This purchase is being processed. Try again shortly.', 503, 'purchase_in_progress');

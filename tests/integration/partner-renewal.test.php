@@ -71,7 +71,7 @@ class FakePartnerAdapter implements StoreAdapterInterface
     {
     }
 
-    public function listVoidedPurchaseKeys(array $app, int $sinceUnix): array
+    public function listVoidedPurchases(array $app, int $sinceUnix): array
     {
         return [];
     }
@@ -219,6 +219,7 @@ try {
         : bad("renewal replay: $handled, paid cycles " . $hubPaidCycles());
 
     // ---- 4. a payment hold that outlasts the term, then the store recovers --------------
+    $adapter->record = $record('RENEW-1', $monthFromNow(), PurchaseRecord::STATE_ON_HOLD); // the store's answer on hold
     $handled = $notify(StoreNotification::ON_HOLD);
     ($handled === 'on_hold' && ($service($hubServiceId)['domainstatus'] ?? '') === 'Suspended')
         ? ok('ON_HOLD suspended the key at the Hub too')

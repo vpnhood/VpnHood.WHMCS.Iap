@@ -106,6 +106,9 @@ class GooglePlayAdapter implements StoreAdapterInterface
             return new StoreNotification(self::STORE, $messageId, StoreNotification::TEST, null, null, $packageName, $eventTime, $rtdn);
         }
         if (isset($rtdn['voidedPurchaseNotification'])) {
+            // the exact charge voided: a subscription gets a new order id per renewal. A
+            // quantity-based partial refund (refundType 2, multi-quantity purchases only) does not
+            // say how much of the charge went back
             $voided = (array) $rtdn['voidedPurchaseNotification'];
             return new StoreNotification(
                 self::STORE,
@@ -115,7 +118,9 @@ class GooglePlayAdapter implements StoreAdapterInterface
                 null,
                 $packageName,
                 $eventTime,
-                $rtdn
+                $rtdn,
+                isset($voided['orderId']) ? (string) $voided['orderId'] : null,
+                (int) ($voided['refundType'] ?? 1) === 2 ? null : 100000,
             );
         }
         if (isset($rtdn['subscriptionNotification'])) {
@@ -167,16 +172,22 @@ class GooglePlayAdapter implements StoreAdapterInterface
         }
     }
 
-    public function listVoidedPurchaseKeys(array $app, int $sinceUnix): array
+    public function listVoidedPurchases(array $app, int $sinceUnix): array
     {
+        // a quantity-based partial refund (multi-quantity purchases only) carries voidedQuantity and
+        // does not say how much of the charge went back
         $client = ($this->apiClientFactory)($app);
-        $keys = [];
+        $voidedPurchases = [];
         foreach ($client->listVoidedPurchases($sinceUnix * 1000) as $voided) {
             if (!empty($voided['purchaseToken'])) {
-                $keys[] = (string) $voided['purchaseToken'];
+                $voidedPurchases[] = [
+                    'purchaseKey' => (string) $voided['purchaseToken'],
+                    'orderId'     => !empty($voided['orderId']) ? (string) $voided['orderId'] : null,
+                    'share'       => isset($voided['voidedQuantity']) ? null : 100000,
+                ];
             }
         }
-        return $keys;
+        return $voidedPurchases;
     }
 
     // ----------------------------------------------------------- internal --
@@ -296,6 +307,10 @@ class GooglePlayAdapter implements StoreAdapterInterface
             amount: null,
             currency: null,
             raw: $product,
+            // a canceled one-time purchase has one charge: its order
+            refundedOrderId: $state === PurchaseRecord::STATE_REVOKED && isset($product['orderId'])
+                ? (string) $product['orderId'] : null,
+            refundShare: $state === PurchaseRecord::STATE_REVOKED ? 100000 : null,
         );
     }
 

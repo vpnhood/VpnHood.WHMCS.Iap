@@ -37,6 +37,14 @@ class RenewalService
      */
     public function renew(array $app, string $purchaseKey, StoreAdapterInterface $adapter): string
     {
+        // the purchase's lifecycle lock: a revocation ending its service (RefundService) and this
+        // renewal recording a new charge never interleave; a busy lock is retried later
+        return IapRepository::withPurchaseLock($adapter->storeId(), $purchaseKey,
+            fn (): string => $this->renewHeld($app, $purchaseKey, $adapter));
+    }
+
+    private function renewHeld(array $app, string $purchaseKey, StoreAdapterInterface $adapter): string
+    {
         $row = Capsule::table('mod_vpnhood_iap_purchases')
             ->where('store', $adapter->storeId())
             ->where('purchase_key', $purchaseKey)

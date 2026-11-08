@@ -5,14 +5,21 @@
  *
  *   1. Reconciliation: re-fetch every open purchase from its store — the
  *      self-healing net under dropped/failed webhooks for a provisioned
- *      purchase. A parked one is only refreshed, never redeemed here.
- *   2. Voided-purchases sweep: store-side refunds terminate the service even
- *      when the webhook never arrived.
+ *      purchase. A parked one is only refreshed, never redeemed here. One the
+ *      store revoked is settled as a REVOKED notification would (RefundService):
+ *      the refund of the charge the store names, and the service ended.
+ *   2. Voided-purchases sweep (Google): each voided order's refund is recorded
+ *      and booked even when its notification never arrived, and a purchase the
+ *      store no longer grants is ended.
+ *   2b. Store refunds still due: a refund WHMCS refused, or whose purchase was
+ *      busy, is retried; one of a charge with no payment yet is booked once the
+ *      payment is recorded; an invoice a booked refund left Paid is set Refunded.
  *   3. Hygiene: clear raw payloads and the request log past their retention, and
  *      re-clamp the bookkeeping gateway's order-form visibility (an admin can
  *      re-tick the checkbox; the gateway must never be offered at checkout).
- *   4. Ops digest: parked/failed purchases and failed events mailed to the
- *      configured admin address.
+ *   4. Ops digest: parked/failed purchases, failed events, store refunds waiting
+ *      for an admin and failures of the voided sweep, mailed to the configured
+ *      admin address.
  *
  * Every step is fenced: a store/API failure logs and moves on — the cron
  * must never take WHMCS's daily run down with it.
@@ -113,35 +120,63 @@ add_hook('DailyCronJob', 1, function () {
                 $graceDays = max(0, (int) $repo->setting('TerminateGraceDays'));
                 if (
                     $record->state === \WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\PurchaseRecord::STATE_REVOKED
-                    && in_array($purchase['status'], ['provisioned', 'canceled', 'on_hold'], true)
+                    && in_array($purchase['status'], ['provisioned', 'canceled', 'on_hold', 'pending'], true)
                 ) {
-                    // revoked at the store (refunded) and no notification said so: Apple has no
-                    // voided list for the sweep below, and a notification can be lost. End it now
-                    // and book the refund, as REVOKED would, rather than wait for its paid time
-                    // to run out.
-                    $outcome = (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo))
-                        ->endRevokedPurchase($purchase, 'revoked at the store', $record->storeOrderId);
-                    localAPI('LogActivity', ['description' => "vpnhoodiap: purchase #{$purchase['id']} revoked at the store — service "
-                        . ($outcome['ended'] ? 'terminated' : 'NOT terminated (retried tomorrow)') . ", refund {$outcome['refund']}."]);
+                    // revoked at the store and no notification said so (Apple has no voided list for
+                    // the sweep below, and a notification can be lost): settled as REVOKED would. The
+                    // refund of the charge the store names, when it names one; then the service, ended
+                    // unless the store grants it again. A refund not even recorded keeps the purchase
+                    // open, so tomorrow's run records it. A pending purchase ends too.
+                    $refunds = new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo);
+                    $money = 'unnamed';
+                    $recorded = true;
+                    if ($record->refundedOrderId !== null) {
+                        try {
+                            $money = $refunds->recordRefund($purchase, $record->refundedOrderId, $record->refundShare, 'refresh')['state'];
+                        } catch (\Throwable $e) {
+                            $money = 'failed';
+                            $recorded = $e->getCode() !== \WHMCS\Module\Addon\VpnHoodIap\IapRepository::RETRY_LATER;
+                            $repo->log(null, 'cron.refund', '', 0, ['purchase' => $purchase['id']],
+                                \WHMCS\Module\Addon\VpnHoodIap\ApiException::logMessage($e));
+                        }
+                    }
+                    $service = $refunds->endEntitlement($purchase,
+                        fn () => $adapter->refresh($app, (string) $purchase['purchase_key'], ''), 'revoked at the store', $recorded);
+                    localAPI('LogActivity', ['description' => "vpnhoodiap: purchase #{$purchase['id']} revoked at the store — "
+                        . "refund $money, service $service."]);
                 } elseif (
-                    // expired on the store but still provisioned here → terminate (with grace); a
-                    // service the module could not end keeps its status, so this retries tomorrow
-                    in_array($purchase['status'], ['provisioned', 'canceled'], true)
+                    // expired on the store but still provisioned here → terminate (with grace), under the
+                    // purchase's lifecycle lock and only while the store, read again there, still says
+                    // so: a renewal recorded meanwhile keeps its service. A service the module could not
+                    // end keeps its status, so this retries tomorrow. Never 'refunded' here: a revoked
+                    // purchase is settled above, with its refund. A held one whose store let it lapse
+                    // ends too: its hold notification is the last it will ever get
+                    in_array($purchase['status'], ['provisioned', 'canceled', 'on_hold'], true)
                     && !$record->isEntitled()
                     && $record->expiryTimeUnix !== null
                     && $record->expiryTimeUnix < time() - $graceDays * 86400
                 ) {
-                    $ended = $purchase['service_id'] === null
-                        || (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\OrderProvisioner($repo))
-                            ->terminateService((int) $purchase['service_id'], 'expired at the store');
-                    if ($ended) {
-                        $changes['status'] = $record->state === \WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\PurchaseRecord::STATE_REVOKED
-                            ? 'refunded' : 'expired';
-                    }
+                    (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo))->endEntitlement(
+                        $purchase,
+                        fn () => $adapter->refresh($app, (string) $purchase['purchase_key'], ''),
+                        'expired at the store',
+                        true,
+                        'expired',
+                        fn ($fresh): bool => !$fresh->isEntitled() && $fresh->expiryTimeUnix !== null
+                            && $fresh->expiryTimeUnix < time() - $graceDays * 86400
+                    );
                 }
                 Capsule::table('mod_vpnhood_iap_purchases')->where('id', $purchase['id'])->update($changes);
             } catch (\Throwable $e) {
-                $repo->log(null, 'cron.reconcile', '', 0, ['purchase' => $purchase['id']], $e->getMessage());
+                $repo->log(null, 'cron.reconcile', '', 0, ['purchase' => $purchase['id']],
+                    \WHMCS\Module\Addon\VpnHoodIap\ApiException::logMessage($e));
+                // to the back of the queue: rows that keep failing must not take every night's 500 places
+                try {
+                    Capsule::table('mod_vpnhood_iap_purchases')->where('id', $purchase['id'])
+                        ->update(['updated_at' => date('Y-m-d H:i:s')]);
+                } catch (\Throwable) {
+                    // logged above
+                }
             }
         }
 
@@ -152,22 +187,75 @@ add_hook('DailyCronJob', 1, function () {
         // skew; the sweep is a nightly safety net behind the webhooks, so consecutive runs
         // still overlap by ~20 days.
         try {
-            foreach ($adapter->listVoidedPurchaseKeys($app, time() - 20 * 86400) as $voidedKey) {
-                $row = Capsule::table('mod_vpnhood_iap_purchases')
-                    ->where('store', $app['store'])->where('purchase_key', $voidedKey)->first();
-                if ($row === null || $row->status === 'refunded') {
-                    continue;
-                }
-                // a service the module could not end keeps its status: tomorrow's sweep retries
-                // the termination, and the refund booking is idempotent
-                $outcome = (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo))
-                    ->endRevokedPurchase((array) $row, 'voided at the store');
-                localAPI('LogActivity', ['description' => "vpnhoodiap: purchase {$voidedKey} voided at the store — service "
-                    . ($outcome['ended'] ? 'terminated' : 'NOT terminated (retried tomorrow)') . ", refund {$outcome['refund']}."]);
-            }
+            $voidedOrders = $adapter->listVoidedPurchases($app, time() - 20 * 86400);
         } catch (\Throwable $e) {
             $repo->log(null, 'cron.voided', '', 0, ['app' => $app['id']], $e->getMessage());
+            $voidedOrders = [];
         }
+        foreach ($voidedOrders as $voided) {
+            // one at a time: a purchase that fails must not keep the rest of the list waiting
+            try {
+                $row = Capsule::table('mod_vpnhood_iap_purchases')
+                    ->where('store', $app['store'])->where('purchase_key', $voided['purchaseKey'])->first();
+                if ($row === null) {
+                    continue;
+                }
+                $row = (array) $row;
+                $refunds = new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo);
+                // the money, whatever the purchase's status: the order voided (each night of the
+                // sweep's 20 days; a no-op once recorded, and the ledger keeps a due one after them)
+                $money = 'unnamed';
+                if ($voided['orderId'] !== null) {
+                    try {
+                        $money = $refunds->recordRefund($row, $voided['orderId'], $voided['share'], 'voided')['state'];
+                    } catch (\Throwable $e) {
+                        $money = 'failed';
+                        $repo->log(null, 'cron.voided', '', 0, ['app' => $app['id'], 'order' => $voided['orderId']],
+                            \WHMCS\Module\Addon\VpnHoodIap\ApiException::logMessage($e));
+                    }
+                }
+                // the service: ended when the store no longer grants the purchase; a voided older
+                // order of a subscription the store still grants leaves it running
+                if (in_array($row['status'], ['provisioned', 'canceled', 'on_hold', 'pending'], true)) {
+                    $service = $refunds->endEntitlement($row,
+                        fn () => $adapter->refresh($app, (string) $voided['purchaseKey'], ''), 'voided at the store');
+                    if ($service !== 'kept') {
+                        localAPI('LogActivity', ['description' => "vpnhoodiap: purchase #{$row['id']} voided at the store — "
+                            . "refund $money, service $service."]);
+                    }
+                }
+            } catch (\Throwable $e) {
+                $repo->log(null, 'cron.voided', '', 0, ['app' => $app['id'], 'purchase' => $voided['purchaseKey']],
+                    \WHMCS\Module\Addon\VpnHoodIap\ApiException::logMessage($e));
+            }
+        }
+    }
+
+    // -- 2b: store refunds still due -------------------------------------------
+    // The ledger keeps a refund until it is booked: one WHMCS refused, or whose purchase was busy,
+    // is retried here every night past any store's window, with an alert on its first failure; one
+    // of a charge with no payment yet is booked once the payment is recorded; and an invoice a
+    // booked refund left Paid is set Refunded. An install activated before the ledger existed gets
+    // it by hand (no migrations until a partner install runs the module): until then, every run says so.
+    try {
+        if (!\WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService::ledgerReady()) {
+            $repo->alert('vpnhoodiap: this install has no refund ledger (table mod_vpnhood_iap_refunds), so store refunds'
+                . ' wait unbooked. Create it once by running the addon\'s activation, which only adds missing tables: in the'
+                . ' WHMCS folder, php -r \'require "init.php"; require "modules/addons/vpnhoodiap/vpnhoodiap.php";'
+                . ' print_r(vpnhoodiap_activate());\'');
+        } else {
+            $refunds = new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo);
+            $due = $refunds->retryDue();
+            $paid = $refunds->recheckNoPayment();
+            $repaired = $refunds->repairInvoices();
+            if (array_sum($due) + $paid + $repaired > 0) {
+                localAPI('LogActivity', ['description' => "vpnhoodiap: store refunds due — {$due['booked']} booked,"
+                    . " {$due['failed']} still failing, {$due['other']} waiting; $paid found paid since;"
+                    . " $repaired invoice(s) set Refunded."]);
+            }
+        }
+    } catch (\Throwable $e) {
+        logModuleCall('vpnhoodiap', 'cron.refunds', '', $e->getMessage(), '');
     }
 
     // -- 3: hygiene ----------------------------------------------------------
@@ -224,13 +312,28 @@ add_hook('DailyCronJob', 1, function () {
                     $query->whereNull('p.expiry_time')->orWhere('p.expiry_time', '>', date('Y-m-d H:i:s'));
                 })
                 ->distinct()->count('r.user_id');
-            if ($parked > 0 || $failedEvents > 0 || $refusedPaying > 0) {
+            // store refunds waiting for an admin, fenced so the rest of the digest still goes out
+            $ledger = \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService::ledgerReady();
+            $refundsToCheck = 0;
+            try {
+                $refundsToCheck = $ledger ? (new \WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService($repo))->checkCount() : 0;
+            } catch (\Throwable $e) {
+                logModuleCall('vpnhoodiap', 'cron.digest-refunds', '', $e->getMessage(), '');
+            }
+            // Google's voided feed is the only record naming the order a revocation refunded
+            $voidedFailures = (int) Capsule::table('mod_vpnhood_iap_log')
+                ->where('action', 'cron.voided')->where('created_at', '>=', $since)->count();
+            if ($parked > 0 || $failedEvents > 0 || $refusedPaying > 0 || $refundsToCheck > 0 || $voidedFailures > 0 || !$ledger) {
                 localAPI('SendAdminEmail', [
                     'customsubject' => "vpnhoodiap digest: $parked failed purchases, $failedEvents failed events, "
-                        . "$refusedPaying paying accounts refused",
+                        . "$refusedPaying paying accounts refused, $refundsToCheck store refunds to check",
                     'custommessage' => "Failed purchases: $parked\n"
                         . "Failed webhook events in the last 24h: $failedEvents\n"
-                        . "Accounts with a live store subscription whose code was refused in the last 24h: $refusedPaying\n\n"
+                        . "Accounts with a live store subscription whose code was refused in the last 24h: $refusedPaying\n"
+                        . "Store refunds waiting for an admin (Purchases tab): $refundsToCheck\n"
+                        . "Failures of the Google voided-purchases check in the last 24h: $voidedFailures\n"
+                        . ($ledger ? '' : "This install has no refund ledger: store refunds wait unbooked (see the activity log).\n")
+                        . "\n"
                         . 'Review them in Addons → VpnHood! In-App Purchase; refusals are in the activity log ("REFUSED the code").',
                     'type'          => 'system',
                 ]);

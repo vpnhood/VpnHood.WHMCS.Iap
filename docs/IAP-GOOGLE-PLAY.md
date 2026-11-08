@@ -90,8 +90,9 @@ In **Play Console → Monetize → Monetization setup**, set the topic name
 
 **Notification content**: choose the option that includes *all one-time
 products* (the widest one). Every notification type is handled, and voided
-purchases in particular are what revoke a refunded customer's service — leaving
-them out means refunds go unnoticed until the next daily reconciliation.
+purchases in particular name the exact order Google refunded, which is what the
+refund is booked against — leaving them out delays refunds until the nightly
+check reads Google's list of voided orders.
 
 ## 6. Send a test notification — and verify it arrived
 
@@ -175,7 +176,7 @@ its expiry. That exercises the whole lifecycle.
 | Renewal | Renewal invoice paid, expiry advanced, upstream key kept in sync |
 | Cancellation | Auto-renew off; service stays active until the paid-for expiry |
 | Grace period / on hold | Service kept / suspended accordingly, recovers automatically |
-| Refund / revoke | Service terminated, refund transaction recorded |
+| Refund / revoke | The refunded order's charge reversed; service terminated once Google no longer grants the purchase |
 
 ## Troubleshooting
 

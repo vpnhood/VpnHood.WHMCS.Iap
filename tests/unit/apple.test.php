@@ -347,6 +347,42 @@ test('ASSN V2 notification types map to the normalized table', function () use (
     }
 });
 
+test('REFUND and REVOKE name the transaction taken back, and how much of it went back', function () use ($chain) {
+    $adapter = appStoreAdapter($chain, statusesDoc($chain, 1));
+    $notify = function (string $type, array $transaction) use ($adapter, $chain): StoreNotification {
+        $payload = [
+            'notificationType' => $type,
+            'subtype'          => '',
+            'notificationUUID' => 'uuid-' . bin2hex(random_bytes(4)),
+            'data'             => ['bundleId' => BUNDLE_ID, 'signedTransactionInfo' => signAppleJws(array_merge([
+                'transactionId' => '2000000777', 'originalTransactionId' => '2000000001',
+                'productId' => 'vh.premium.monthly', 'bundleId' => BUNDLE_ID, 'revocationDate' => 1700000000000,
+            ], $transaction), $chain)],
+        ];
+        $body = json_encode(['signedPayload' => signAppleJws($payload, $chain)]);
+        return $adapter->parseNotification(['package_name' => BUNDLE_ID], [], $body, []);
+    };
+    $full = $notify('REFUND', ['revocationType' => 'REFUND_FULL']);
+    assertSame('2000000777', $full->refundedOrderId, 'the refunded transaction, not the original one');
+    assertSame(100000, $full->refundShare);
+    assertSame(100000, $notify('REFUND', [])->refundShare, 'a payload from before revocationType is a full refund');
+    assertSame(25000, $notify('REFUND', ['revocationType' => 'REFUND_PRORATED', 'revocationPercentage' => 25000])->refundShare);
+    assertSame(null, $notify('REFUND', ['revocationType' => 'REFUND_PRORATED'])->refundShare, 'prorated, its percentage missing');
+    assertSame(0, $notify('REVOKE', ['revocationType' => 'FAMILY_REVOKE'])->refundShare, 'Family Sharing refunds nothing');
+    $renewal = $notify('DID_RENEW', []);
+    assertSame(null, $renewal->refundedOrderId, 'only a revocation names a refunded charge');
+    assertSame(null, $renewal->refundShare);
+});
+
+test('a revoked status names its latest transaction as the refunded charge', function () use ($chain) {
+    $revoked = appStoreAdapter($chain, statusesDoc($chain, 5, ['revocationDate' => 1700000000000, 'revocationType' => 'REFUND_FULL']))
+        ->refresh(['package_name' => BUNDLE_ID], '2000000001', '');
+    assertSame('2000000999', $revoked->refundedOrderId);
+    assertSame(100000, $revoked->refundShare);
+    $active = appStoreAdapter($chain, statusesDoc($chain, 1))->refresh(['package_name' => BUNDLE_ID], '2000000001', '');
+    assertSame(null, $active->refundedOrderId, 'an active subscription names no refund');
+});
+
 test('an unsigned or foreign-signed notification body is rejected', function () use ($chain) {
     $adapter = appStoreAdapter($chain, statusesDoc($chain, 1));
     assertThrows(

@@ -157,7 +157,7 @@ exercises the whole lifecycle.
 | Renewal (incl. billing recovery) | Renewal invoice paid, expiry advanced, upstream key kept in sync |
 | Auto-renew turned off | Service stays active until the paid-for expiry |
 | Grace period / billing retry | Service kept / suspended accordingly, recovers automatically |
-| Refund / revoke | Service terminated, refund transaction recorded |
+| Refund / revoke | The refunded transaction's charge reversed (nothing for a Family Sharing revoke); service terminated once Apple no longer grants the purchase |
 
 ## Notes for your app build
 

@@ -33,7 +33,10 @@ sign-in, and for in-app purchases if it sells them), and it updates on its own s
   setting on, through WHMCS's own `Setting` (`AccountDeletionService::keepInvoiceSnapshotsOn`):
   a deleted person's invoices keep the buyer only through those snapshots.
 - **Idempotency anchors:** unique `(store, purchase_key)` on purchases, unique
-  `(store, message_id)` on the event inbox, store order id as the payment transid.
+  `(store, message_id)` on the event inbox, store order id as the payment transid, unique
+  `(store, charge_id)` on the refund ledger with `<order id>-refund` as the reversal's transid.
+  Everything that changes a purchase's charge or service, or books its money, holds its
+  lifecycle lock (`IapRepository::purchaseLockName`).
 - **Never acknowledge a store purchase before provisioning succeeded** — Google's
   auto-refund of unacknowledged purchases is the fail-safe.
 - **Own version stream.** `./VERSION` + `scripts/set-version.sh`; consuming packages
@@ -45,7 +48,12 @@ sign-in, and for in-app purchases if it sells them), and it updates on its own s
   every table in its current shape; a change an existing install needs is made by hand, never
   as an `_upgrade()` step or a one-off cleanup in the module. `_upgrade()` re-runs only
   activation's self-heals, and the cron runs it within one run of an update (hooks.php →
-  `vpnhoodiap_runPendingUpgrade`), as an admin opening Addon Modules would.
+  `vpnhoodiap_runPendingUpgrade`), as an admin opening Addon Modules would. A new table
+  reaches an existing install by running activation once by hand, which only adds missing
+  tables: in the WHMCS folder, `php -r 'require "init.php"; require
+  "modules/addons/vpnhoodiap/vpnhoodiap.php"; print_r(vpnhoodiap_activate());'`. The refund
+  ledger (`mod_vpnhood_iap_refunds`) needs this on every install activated before it: until
+  then the webhook answers a revocation 503 (the store sends it again), and the cron alerts.
 - Secrets are stored via WHMCS `EncryptPassword` and are write-only in the admin UI.
   No secrets in this repo, ever.
 

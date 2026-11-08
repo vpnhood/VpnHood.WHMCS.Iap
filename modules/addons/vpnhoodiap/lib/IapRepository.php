@@ -47,6 +47,42 @@ class IapRepository
             ->exists();
     }
 
+    /** The exception code of work to retry later: the store's redelivery (webhook 503) or the nightly run. */
+    public const RETRY_LATER = 4290;
+
+    /**
+     * A purchase's lifecycle lock, a database named lock on (store, purchase key), held by everything
+     * that changes which charge and which service a purchase has, or books its money: redeeming it
+     * (EntitlementService), renewing it (RenewalService), ending its entitlement and booking its
+     * refunds (RefundService). Re-entrant on MariaDB and MySQL 5.7+, so a renewal's re-provisioning
+     * redeem nests in it.
+     */
+    public static function purchaseLockName(string $store, string $purchaseKey): string
+    {
+        return 'vpnhoodiap.' . $store . '.' . sha1($purchaseKey);
+    }
+
+    /**
+     * Runs $work holding the purchase's lifecycle lock. Throws RETRY_LATER when it is not free within
+     * $timeout seconds: the work is retried by the store's redelivery or the nightly run.
+     */
+    public static function withPurchaseLock(string $store, string $purchaseKey, callable $work, int $timeout = 30): mixed
+    {
+        $name = self::purchaseLockName($store, $purchaseKey);
+        if ((int) (Capsule::select('SELECT GET_LOCK(?, ?) AS l', [$name, $timeout])[0]->l ?? 0) !== 1) {
+            throw new \RuntimeException('This purchase is being processed elsewhere: try again later.', self::RETRY_LATER);
+        }
+        try {
+            return $work();
+        } finally {
+            try {
+                Capsule::select('SELECT RELEASE_LOCK(?)', [$name]);
+            } catch (\Throwable) {
+                // the lock ends with the connection anyway
+            }
+        }
+    }
+
     /** Read one addon setting (tbladdonmodules), '' when unset. */
     public function setting(string $name): string
     {

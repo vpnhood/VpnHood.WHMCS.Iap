@@ -36,6 +36,11 @@ final class StoreNotification
         public readonly ?string $packageName,   // as claimed by the payload; caller compares to the app row
         public readonly ?int $eventTimeUnix,
         public readonly array $raw,
+        // REVOKED only: the charge the store refunded, when the notification names it (Google's voided
+        // order id, Apple's refunded transaction id), and how much of it, in milliunits: 100000 the
+        // whole charge, 0 nothing (Apple Family Sharing), null when the store did not say
+        public readonly ?string $refundedOrderId = null,
+        public readonly ?int $refundShare = null,
     ) {
     }
 }

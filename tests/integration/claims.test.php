@@ -99,7 +99,7 @@ class FakeStoreAdapter implements StoreAdapterInterface
         $this->finalizeCalls++;
     }
 
-    public function listVoidedPurchaseKeys(array $app, int $sinceUnix): array
+    public function listVoidedPurchases(array $app, int $sinceUnix): array
     {
         return [];
     }

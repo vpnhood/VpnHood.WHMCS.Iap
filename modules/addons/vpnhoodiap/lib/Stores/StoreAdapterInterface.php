@@ -53,12 +53,14 @@ interface StoreAdapterInterface
     public function finalize(array $app, PurchaseRecord $record): void;
 
     /**
-     * Purchase keys refunded/voided since $sinceUnix (empty when the store
-     * has no such API — the webhook path covers it).
+     * Orders refunded/voided since $sinceUnix (empty when the store has no
+     * such API — the webhook path covers it): the purchase, the exact order
+     * voided, and how much of it in milliunits (100000 the whole charge, null
+     * when the store did not say).
      *
-     * @return array<int,string>
+     * @return list<array{purchaseKey: string, orderId: ?string, share: ?int}>
      */
-    public function listVoidedPurchaseKeys(array $app, int $sinceUnix): array;
+    public function listVoidedPurchases(array $app, int $sinceUnix): array;
 
     // NO stopRenewals here, deliberately (lifecycle §8): deletion never touches
     // a store subscription. Signing in again brings it back by itself, so

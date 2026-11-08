@@ -3,9 +3,8 @@
  * webhook.test.php — NotificationController dispatch inside the real dev
  * WHMCS with a fake adapter (auth already covered by unit tests): inbox
  * dedup on (store, message_id), tenant/package guard, TEST handling,
- * CANCELED lifecycle transition, REVOKED booking the money back (and the
- * nightly check doing the same for a revocation no notification reported), and
- * the never-5xx guarantee when processing throws.
+ * CANCELED lifecycle transition, and the never-5xx guarantee when processing
+ * throws. Revocations and their refunds are refunds.test.php.
  */
 
 require __DIR__ . '/lib/common.php';
@@ -30,7 +29,6 @@ requireIapLib(
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\VpnHoodIap\Controllers\NotificationController;
 use WHMCS\Module\Addon\VpnHoodIap\IapRepository;
-use WHMCS\Module\Addon\VpnHoodIap\Provisioning\RefundService;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\PurchaseRecord;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\Dto\StoreNotification;
 use WHMCS\Module\Addon\VpnHoodIap\Stores\StoreAdapterInterface;
@@ -68,7 +66,7 @@ class FakeNotifyAdapter implements StoreAdapterInterface
     {
     }
 
-    public function listVoidedPurchaseKeys(array $app, int $sinceUnix): array
+    public function listVoidedPurchases(array $app, int $sinceUnix): array
     {
         return [];
     }
@@ -153,131 +151,6 @@ try {
         ? ok('CANCELED flips auto-renew off and keeps the row provisioned (a status of its own doubled the service)')
         : bad('canceled dispatch: ' . json_encode([$result, $row]));
 
-    // ---- REVOKED → terminate + the recorded charge goes back (idempotent)
-    $buyer = clientByEmail($db, BUYER_EMAIL);
-    if (!$buyer) {
-        bad('fixture missing: ' . BUYER_EMAIL . ' — cannot exercise the refund path');
-    } else {
-        $chargeId = strtoupper($marker) . '-CHARGE';
-        // the charge as OrderProvisioner would have recorded it
-        $charge = localAPI('AddTransaction', [
-            'userid' => (int) $buyer['id'], 'paymentmethod' => 'vpnhoodiappay',
-            'transid' => $chargeId, 'amountin' => '7.90', 'date' => date('Y-m-d'),
-            'description' => 'vpnhoodiap webhook test charge',
-        ]);
-        ($charge['result'] ?? '') === 'success'
-            ? ok('test charge recorded')
-            : bad('test charge failed: ' . json_encode($charge));
-        Capsule::table('mod_vpnhood_iap_purchases')->where('purchase_key', "$marker-tok")
-            ->update(['store_order_id' => $chargeId, 'client_id' => (int) $buyer['id']]);
-
-        $adapter->next = notif($marker, StoreNotification::REVOKED, "$marker-m5", "$marker-tok", $package);
-        $result = $controller->handle($app, $adapter, [], '{}', []);
-        $row = one($db, 'SELECT status FROM mod_vpnhood_iap_purchases WHERE purchase_key=?', ["$marker-tok"]);
-        ($result['status'] === 200 && $row['status'] === 'refunded'
-            && $result['body']['data']['handled'] === 'revoked-refunded')
-            ? ok('REVOKED marks the purchase refunded and books the refund')
-            : bad('revoked dispatch: ' . json_encode([$result, $row]));
-
-        $refund = one($db, 'SELECT amountout FROM tblaccounts WHERE transid=?', ["$chargeId-refund"]);
-        ($refund !== null && abs((float) $refund['amountout'] - 7.90) < 0.001)
-            ? ok('refund transaction carries the charged amount back out')
-            : bad('refund transaction: ' . json_encode($refund));
-
-        // a store refund is the store's decision: it leaves no record of the account here
-        !tableExists($db, 'mod_vpnhood_iap_refund_marks')
-            ? ok('no refund mark table: the account is not remembered for a store refund')
-            : bad('mod_vpnhood_iap_refund_marks exists — the refund marks are back');
-        (int) one($db, "SELECT COUNT(*) c FROM mod_vpnhood_iap_log WHERE action='refund.repeat'")['c'] === 0
-            ? ok('and no "repeat refund" line in the log')
-            : bad('refund.repeat rows in mod_vpnhood_iap_log');
-
-        // replayed revocation must not double-book
-        $adapter->next = notif($marker, StoreNotification::REVOKED, "$marker-m6", "$marker-tok", $package);
-        $result = $controller->handle($app, $adapter, [], '{}', []);
-        $count = (int) one($db, 'SELECT COUNT(*) c FROM tblaccounts WHERE transid=?', ["$chargeId-refund"])['c'];
-        ($result['body']['data']['handled'] === 'revoked-skipped-already' && $count === 1)
-            ? ok('replayed revocation books nothing twice')
-            : bad('refund replay: ' . json_encode([$result['body']['data'] ?? null, $count]));
-
-        // the trailing EXPIRED Google sends after a revocation must not relabel it
-        $adapter->next = notif($marker, StoreNotification::EXPIRED, "$marker-m7", "$marker-tok", $package);
-        $controller->handle($app, $adapter, [], '{}', []);
-        $row = one($db, 'SELECT status FROM mod_vpnhood_iap_purchases WHERE purchase_key=?', ["$marker-tok"]);
-        $row['status'] === 'refunded'
-            ? ok('EXPIRED after a revocation keeps the purchase refunded')
-            : bad("trailing EXPIRED relabeled the purchase: {$row['status']}");
-
-        // ---- revoked with no notification (Apple has no voided list, and a notification can
-        // be lost): the nightly check ends it the same way, and books the refund only once
-        $chargeId2 = strtoupper($marker) . '-CHARGE2';
-        $charge2 = localAPI('AddTransaction', [
-            'userid' => (int) $buyer['id'], 'paymentmethod' => 'vpnhoodiappay',
-            'transid' => $chargeId2, 'amountin' => '4.90', 'date' => date('Y-m-d'),
-            'description' => 'vpnhoodiap webhook test charge (nightly revocation)',
-        ]);
-        ($charge2['result'] ?? '') === 'success'
-            ? ok('second test charge recorded')
-            : bad('second test charge failed: ' . json_encode($charge2));
-        $silentId = (int) Capsule::table('mod_vpnhood_iap_purchases')->insertGetId([
-            'app_id'         => $appId,
-            'store'          => 'googleplay',
-            'purchase_key'   => "$marker-tok3",
-            'status'         => 'provisioned',
-            'auto_renewing'  => 0,
-            'store_order_id' => $chargeId2,
-            'client_id'      => (int) $buyer['id'],
-            'created_at'     => $now,
-            'updated_at'     => $now,
-        ]);
-        $refunds = new RefundService($repo);
-        $silent = (array) Capsule::table('mod_vpnhood_iap_purchases')->where('id', $silentId)->first();
-        $outcome = $refunds->endRevokedPurchase($silent, 'revoked at the store');
-        $row = one($db, 'SELECT status FROM mod_vpnhood_iap_purchases WHERE id=?', [$silentId]);
-        ($outcome === ['ended' => true, 'refund' => 'refunded'] && $row['status'] === 'refunded')
-            ? ok('a revocation the nightly check finds ends the purchase and books the refund')
-            : bad('nightly revocation: ' . json_encode([$outcome, $row]));
-        $refund2 = one($db, 'SELECT amountout FROM tblaccounts WHERE transid=?', ["$chargeId2-refund"]);
-        ($refund2 !== null && abs((float) $refund2['amountout'] - 4.90) < 0.001)
-            ? ok('…with the charged amount going back out')
-            : bad('nightly refund transaction: ' . json_encode($refund2));
-        $again = $refunds->endRevokedPurchase($silent, 'revoked at the store');
-        $count2 = (int) one($db, 'SELECT COUNT(*) c FROM tblaccounts WHERE transid=?', ["$chargeId2-refund"])['c'];
-        ($again['refund'] === 'skipped-already' && $count2 === 1)
-            ? ok('…and a second night books nothing twice')
-            : bad('nightly refund replay: ' . json_encode([$again, $count2]));
-
-        // ---- the store revoked a charge this install never recorded (a renewal that never
-        // arrived): the recorded charge was not refunded, so nothing is reversed
-        $chargeId3 = strtoupper($marker) . '-CHARGE3';
-        $charge3 = localAPI('AddTransaction', [
-            'userid' => (int) $buyer['id'], 'paymentmethod' => 'vpnhoodiappay',
-            'transid' => $chargeId3, 'amountin' => '3.90', 'date' => date('Y-m-d'),
-            'description' => 'vpnhoodiap webhook test charge (another charge revoked)',
-        ]);
-        ($charge3['result'] ?? '') === 'success'
-            ? ok('third test charge recorded')
-            : bad('third test charge failed: ' . json_encode($charge3));
-        $otherId = (int) Capsule::table('mod_vpnhood_iap_purchases')->insertGetId([
-            'app_id'         => $appId,
-            'store'          => 'googleplay',
-            'purchase_key'   => "$marker-tok4",
-            'status'         => 'provisioned',
-            'auto_renewing'  => 0,
-            'store_order_id' => $chargeId3,
-            'client_id'      => (int) $buyer['id'],
-            'created_at'     => $now,
-            'updated_at'     => $now,
-        ]);
-        $other = (array) Capsule::table('mod_vpnhood_iap_purchases')->where('id', $otherId)->first();
-        $outcome = $refunds->endRevokedPurchase($other, 'revoked at the store', strtoupper($marker) . '-NEVER-RECORDED');
-        $row = one($db, 'SELECT status FROM mod_vpnhood_iap_purchases WHERE id=?', [$otherId]);
-        $reversed = (int) one($db, 'SELECT COUNT(*) c FROM tblaccounts WHERE transid=?', ["$chargeId3-refund"])['c'];
-        ($outcome === ['ended' => true, 'refund' => 'skipped-other-charge'] && $row['status'] === 'refunded' && $reversed === 0)
-            ? ok('a revoked charge this install never recorded reverses nothing, and the purchase ends')
-            : bad('revocation of an unrecorded charge: ' . json_encode([$outcome, $row, $reversed]));
-    }
-
     // ---- processing failure (refresh throws) → recorded failed, still 200
     $adapter->next = notif($marker, StoreNotification::PURCHASED, "$marker-m4", "$marker-tok2", $package);
     $result = $controller->handle($app, $adapter, [], '{}', []);
@@ -289,7 +162,6 @@ try {
     Capsule::table('mod_vpnhood_iap_events')->where('message_id', 'like', "$marker-%")->delete();
     Capsule::table('mod_vpnhood_iap_purchases')->where('app_id', $appId)->delete();
     Capsule::table('mod_vpnhood_iap_apps')->where('id', $appId)->delete();
-    Capsule::table('tblaccounts')->where('transid', 'like', strtoupper($marker) . '-CHARGE%')->delete();
     ok('fixtures cleaned up');
 }
 
