@@ -128,7 +128,10 @@ if ($productTemplate === '') {
 //    owns it the same way, so every send WHMCS still aims at either row is a
 //    guaranteed bounce. Account-level mail (verification, password reset) is keyed on
 //    the LOGIN, which is why both rows are exercised here.
-$erasedEmail = 'suppress-erased-' . bin2hex(random_bytes(4)) . '@vpnhood.com';
+// a reserved .test address, as everywhere else in the suite: WHMCS mails "Email Address
+// Verification" from inside AddClient (noemail does not cover it), and at @vpnhood.com,
+// where no such mailbox exists, every run bounced into the dev mailbox
+$erasedEmail = 'suppress-erased-' . bin2hex(random_bytes(4)) . '@vpnhood.test';
 $erasedClient = localAPI('AddClient', [
     'firstname'      => 'Suppress',
     'lastname'       => 'Erased',
