@@ -63,7 +63,7 @@ if (!tableExists($db, 'mod_vpnhood_iap_claims')) {
     finish();
 }
 
-const API_URL = 'https://whmcs-dev.vpnhood.com/modules/addons/vpnhoodiap/api.php/v1';
+const API_URL = SITE_URL . '/modules/addons/vpnhoodiap/api.php/v1';
 
 /** A scripted store: finalize is what proves the purchase was acknowledged, not left hanging. */
 class FakeStoreAdapter implements StoreAdapterInterface

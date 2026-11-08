@@ -40,7 +40,7 @@ if (!tableExists($db, 'mod_vpnhood_iap_login_challenges') || !tableExists($db, '
 }
 ok('1.0.15 login tables exist');
 
-const API_URL = 'https://whmcs-dev.vpnhood.com/modules/addons/vpnhoodiap/api.php/v1';
+const API_URL = SITE_URL . '/modules/addons/vpnhoodiap/api.php/v1';
 
 $marker = 'pwtest-' . bin2hex(random_bytes(4));
 $testStart = date('Y-m-d H:i:s');

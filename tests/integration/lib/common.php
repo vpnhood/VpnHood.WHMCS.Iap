@@ -12,13 +12,36 @@
  */
 
 error_reporting(E_ALL);
-const WEBROOT = '/home/whmcsdev/web/whmcs-dev.vpnhood.com/public_html';
+
+/**
+ * The dev WHMCS's web root. This repo is public and never names the server, so the box itself is
+ * asked: WHMCS_DEV_WEBROOT when a runner passes it, otherwise the one WHMCS install under ~/web
+ * (~/web/<site>/public_html).
+ */
+function devWebroot(): string
+{
+    $root = getenv('WHMCS_DEV_WEBROOT');
+    if ($root) {
+        return rtrim($root, '/');
+    }
+    $found = glob(getenv('HOME') . '/web/*/public_html/configuration.php') ?: [];
+    if (count($found) !== 1) {
+        fwrite(STDERR, 'expected one WHMCS install under ~/web, found ' . count($found) . "; set WHMCS_DEV_WEBROOT\n");
+        exit(1);
+    }
+    return dirname($found[0]);
+}
+
+define('WEBROOT', devWebroot());
 
 // Fixture accounts created by the hub repo's bootstrap; reused here so this
 // suite never has to create clients of its own.
 const BUYER_EMAIL = 'test-buyer@vpnhood.com';
 
 require_once WEBROOT . '/init.php';
+
+// the site's own address, as WHMCS knows it
+define('SITE_URL', rtrim((string) \WHMCS\Config\Setting::getValue('SystemURL'), '/'));
 
 /** @var PDO $db */
 $db = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8mb4", $db_username, $db_password);

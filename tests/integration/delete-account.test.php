@@ -42,7 +42,7 @@ if (!tableExists($db, 'mod_vpnhood_iap_deletions')) {
     finish();
 }
 
-const API_URL = 'https://whmcs-dev.vpnhood.com/modules/addons/vpnhoodiap/api.php/v1';
+const API_URL = SITE_URL . '/modules/addons/vpnhoodiap/api.php/v1';
 
 $marker = 'deltest-' . bin2hex(random_bytes(4));
 $clientIds = [];
