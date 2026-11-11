@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VH_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 . "$SCRIPT_DIR/dev-server.sh"  # the dev WHMCS's names, from <Vh root>/.user/whmcs/dev.env
-SSH_KEY="${WHMCS_DEV_SSH_KEY:-$VH_ROOT/.user/ssh/ssh.openssh}"
+SSH_KEY="$WHMCS_DEV_SSH_KEY"
 SSH_HOST="$WHMCS_DEV_SSH_HOST"
 WEBROOT="$WHMCS_DEV_WEBROOT"
 # tests and dev deploys run ONLY against the dev box — never production (account.vpnhood.com)

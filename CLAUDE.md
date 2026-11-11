@@ -61,10 +61,10 @@ sign-in, and for in-app purchases if it sells them), and it updates on its own s
 
 - Dev WHMCS + deploy tooling live in the sibling `VpnHood.WHMCS` repo:
   `scripts/deploy-dev.sh iap` deploys THIS repo's tree (env `IAP_REPO` overrides the
-  sibling path). SSH key: `<Vh root>/.user/ssh/ssh.openssh`.
+  sibling path).
 - This repo is public and never names the dev WHMCS: no host, SSH user, folder or address, in
-  code, tests or docs. They live in `<Vh root>/.user/whmcs/dev.env` (SSH login, web root, site,
-  and the secrets file holding the admin credentials), which `scripts/dev-server.sh` reads; the
+  code, tests or docs. They live in `<Vh root>/.user/whmcs/dev.env` (SSH login and key, web root,
+  site, and the secrets file holding the admin credentials), which `scripts/dev-server.sh` reads; the
   PHP tests find the web root on the box and ask WHMCS for its own address.
 - Integration tests follow the hub repo's `tests/integration` style: upload
   `.test.php` over SSH, run with the server's PHP, assert via localAPI reads.
